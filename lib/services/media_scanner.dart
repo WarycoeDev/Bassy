@@ -4,7 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/song.dart';
-import 'settings_service.dart'; // ajusta la ruta si tu archivo se llama distinto
+import 'metadata_cache.dart';
+import 'metadata_reader.dart';
+import 'settings_service.dart';
 
 /// Resultado del escaneo.
 class ScanResult {
@@ -42,7 +44,6 @@ class MediaScanner {
   bool _scanning = false;
 
   /// Escanea las carpetas configuradas en [AppSettings].
-  /// Devuelve canciones y podcasts separados por directorio de origen.
   Future<ScanResult> scan() async {
     if (_scanning) {
       debugPrint('MediaScanner: ya hay un escaneo en curso');
@@ -69,6 +70,14 @@ class MediaScanner {
         out: podcasts,
         errors: errors,
       );
+
+      // Persistir caché + limpiar entradas huérfanas.
+      final existing = <String>{
+        ...songs.map((s) => s.path),
+        ...podcasts.map((s) => s.path),
+      };
+      await MetadataCache.instance.prune(existing);
+      await MetadataCache.instance.flush();
     } catch (e) {
       errors.add('Error general: $e');
       debugPrint('MediaScanner.scan error: $e');
@@ -76,7 +85,6 @@ class MediaScanner {
       _scanning = false;
     }
 
-    // Orden por título para presentación estable.
     songs.sort(
       (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
     );
@@ -116,12 +124,16 @@ class MediaScanner {
     List<Song> out,
     List<String> errors,
   ) async {
+    final cache = MetadataCache.instance;
+    final coversDir = await cache.coversDir();
+
     try {
       await for (final entity in dir.list(
         recursive: true,
         followLinks: false,
       )) {
         if (entity is! File) continue;
+
         final ext = p
             .extension(entity.path)
             .replaceFirst('.', '')
@@ -130,18 +142,82 @@ class MediaScanner {
 
         try {
           final stat = await entity.stat();
-          final base = p.basenameWithoutExtension(entity.path);
+          final cached = await cache.get(entity.path);
+
+          String title = '';
+          String artist = '';
+          String album = '';
+          Duration duration = Duration.zero;
+          String? coverPath;
+
+          // ── Cache hit válido ──
+          if (cached != null && cached.matchesFile(stat)) {
+            title = cached.title;
+            artist = cached.artist;
+            album = cached.album;
+            duration = cached.duration;
+            coverPath = cached.coverPath;
+
+            // Si la carátula desapareció del disco, invalidamos para reextraer.
+            if (coverPath != null && !await File(coverPath).exists()) {
+              coverPath = null;
+            }
+          }
+
+          // ── Cache miss, o falta título / carátula ──
+          final needsRead =
+              cached == null ||
+              !cached.matchesFile(stat) ||
+              title.isEmpty ||
+              (coverPath == null && cached.coverPath != null);
+
+          if (needsRead) {
+            final raw = await MetadataReader.instance.read(entity);
+            final base = p.basenameWithoutExtension(entity.path);
+
+            title = (raw?.title.isNotEmpty ?? false) ? raw!.title : base;
+            artist = raw?.artist ?? '';
+            album = raw?.album ?? '';
+            duration = raw?.duration ?? Duration.zero;
+
+            if (raw?.coverBytes != null && raw!.coverBytes!.isNotEmpty) {
+              final name = cache.coverFileName(entity.path, album);
+              final coverFile = File(p.join(coversDir.path, name));
+              if (!await coverFile.exists()) {
+                await coverFile.writeAsBytes(raw.coverBytes!, flush: true);
+              }
+              coverPath = coverFile.path;
+            } else {
+              coverPath = null;
+            }
+
+            await cache.put(
+              CachedMetadata(
+                path: entity.path,
+                title: title,
+                artist: artist,
+                album: album,
+                duration: duration,
+                coverPath: coverPath,
+                sizeBytes: stat.size,
+                mtimeMs: stat.modified.millisecondsSinceEpoch,
+              ),
+            );
+          }
+
           out.add(
             Song(
               path: entity.path,
               fileName: p.basename(entity.path),
-              title: _cleanTitle(base),
-              artist: '',
-              album: '',
+              title: _cleanTitle(title),
+              artist: artist,
+              album: album,
               extension: ext,
               sizeBytes: stat.size,
               modified: stat.modified,
               kind: kind,
+              duration: duration,
+              coverPath: coverPath,
             ),
           );
         } catch (e) {
@@ -157,7 +233,6 @@ class MediaScanner {
   /// "01 - Blinding Lights" -> "Blinding Lights"
   String _cleanTitle(String raw) {
     var s = raw.replaceAll('_', ' ').trim();
-    // Quita prefijo numérico tipo "01 ", "01- ", "01. "
     s = s.replaceFirst(RegExp(r'^\d{1,3}[\s\-\.]+'), '');
     return s.isEmpty ? raw : s;
   }

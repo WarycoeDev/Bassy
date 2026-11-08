@@ -1,5 +1,5 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
-
 import '../models/song.dart';
 
 class SongTile extends StatelessWidget {
@@ -13,6 +13,8 @@ class SongTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isPodcast = song.kind == MediaKind.podcast;
+    final cover = song.coverPath;
+    final hasCover = cover != null && File(cover).existsSync();
 
     return InkWell(
       onTap: onTap,
@@ -26,22 +28,28 @@ class SongTile extends StatelessWidget {
         ),
         child: Row(
           children: [
-            // Cover / icono
-            Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                width: 52,
+                height: 52,
                 color: scheme.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(
-                isPodcast ? Icons.mic : Icons.music_note,
-                color: scheme.onSurfaceVariant,
+                child: hasCover
+                    ? Image.file(
+                        File(cover),
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Icon(
+                          isPodcast ? Icons.mic : Icons.music_note,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      )
+                    : Icon(
+                        isPodcast ? Icons.mic : Icons.music_note,
+                        color: scheme.onSurfaceVariant,
+                      ),
               ),
             ),
             const SizedBox(width: 12),
-
-            // Título + subtítulo
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -70,26 +78,23 @@ class SongTile extends StatelessWidget {
                 ],
               ),
             ),
-
-            // Extensión + tamaño
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Text(
-                  song.extension.toUpperCase(),
+                  song.durationLabel,
                   style: TextStyle(
                     color: scheme.onSurfaceVariant,
-                    fontSize: 10,
+                    fontSize: 11,
                     fontWeight: FontWeight.w600,
-                    letterSpacing: 0.5,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  song.sizeLabel,
+                  '${song.extension.toUpperCase()} · ${song.sizeLabel}',
                   style: TextStyle(
                     color: scheme.onSurfaceVariant,
-                    fontSize: 11,
+                    fontSize: 10,
                   ),
                 ),
               ],

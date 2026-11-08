@@ -11,7 +11,7 @@ class Song {
   /// Nombre del archivo sin extensión (título "fallback").
   final String fileName;
 
-  /// Título mostrado (por ahora = fileName, luego puedes leer tags ID3).
+  /// Título mostrado.
   final String title;
 
   /// Artista (si se lee de tags, si no queda vacío).
@@ -32,6 +32,12 @@ class Song {
   /// Música o podcast, según el directorio donde se encontró.
   final MediaKind kind;
 
+  /// Duración leída de los tags. `Duration.zero` si no se pudo leer.
+  final Duration duration;
+
+  /// Ruta absoluta al JPG de carátula extraído (o `null` si no hay).
+  final String? coverPath;
+
   const Song({
     required this.path,
     required this.fileName,
@@ -42,6 +48,8 @@ class Song {
     required this.sizeBytes,
     required this.modified,
     required this.kind,
+    this.duration = Duration.zero,
+    this.coverPath,
   });
 
   /// Tamaño legible tipo "8.2 MB".
@@ -57,11 +65,25 @@ class Song {
     return '${v.toStringAsFixed(1)} ${units[i]}';
   }
 
-  /// Subtítulo para el tile: artista si existe, si no la carpeta padre.
+  /// Duración formateada "3:42" o "1:02:03" si supera la hora.
+  /// "--:--" cuando aún no se conoce.
+  String get durationLabel {
+    final total = duration.inSeconds;
+    if (total <= 0) return '--:--';
+    final h = total ~/ 3600;
+    final m = (total % 3600) ~/ 60;
+    final s = total % 60;
+    final ss = s.toString().padLeft(2, '0');
+    if (h > 0) return '$h:${m.toString().padLeft(2, '0')}:$ss';
+    return '$m:$ss';
+  }
+
+  /// Subtítulo para el tile: artista · álbum si existen, si no la carpeta padre.
   String get subtitle {
     if (artist.isNotEmpty) {
       return album.isNotEmpty ? '$artist · $album' : artist;
     }
+    if (album.isNotEmpty) return album;
     final parts = path.split(RegExp(r'[/\\]'));
     if (parts.length >= 2) return parts[parts.length - 2];
     return kind == MediaKind.podcast ? 'Podcast' : 'Música';
@@ -69,6 +91,34 @@ class Song {
 
   /// Clave estable para identificar la canción (ruta).
   String get id => path;
+
+  Song copyWith({
+    String? path,
+    String? fileName,
+    String? title,
+    String? artist,
+    String? album,
+    String? extension,
+    int? sizeBytes,
+    DateTime? modified,
+    MediaKind? kind,
+    Duration? duration,
+    String? coverPath,
+  }) {
+    return Song(
+      path: path ?? this.path,
+      fileName: fileName ?? this.fileName,
+      title: title ?? this.title,
+      artist: artist ?? this.artist,
+      album: album ?? this.album,
+      extension: extension ?? this.extension,
+      sizeBytes: sizeBytes ?? this.sizeBytes,
+      modified: modified ?? this.modified,
+      kind: kind ?? this.kind,
+      duration: duration ?? this.duration,
+      coverPath: coverPath ?? this.coverPath,
+    );
+  }
 
   @override
   bool operator ==(Object other) =>
