@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
@@ -11,25 +13,24 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen>
-    with SingleTickerProviderStateMixin {
+class _LibraryScreenState extends State<LibraryScreen> {
   // Filtro activo: 0 = Todo, 1 = Canciones, 2 = Playlists, 3 = Álbumes,
   //               4 = Artistas, 5 = Podcasts, 6 = Descargas
   int _selectedFilter = 0;
 
   bool _slideFromRight = true;
 
-  late final AnimationController _slideController;
-  late Animation<Offset> _slideAnimation;
-  late final Animation<double> _fadeAnimation;
-
   final ScrollController _scrollController = ScrollController();
 
   // ── Estado del scanner ──
   List<Song> _songs = const [];
   List<Song> _podcasts = const [];
+  List<String> _scanErrors = const [];
   bool _loadingLibrary = true;
-  String? _scanError;
+  bool _scanning = false;
+  int _processedFiles = 0;
+
+  StreamSubscription<ScanProgress>? _scanSub;
 
   final List<String> _filters = const [
     'Todo',
@@ -41,81 +42,92 @@ class _LibraryScreenState extends State<LibraryScreen>
     'Descargas',
   ];
 
+  // Altura fija de cada SongTile: 52 cover + 8*2 padding + 10 margen bottom
+  static const double _songTileExtent = 78;
+
   @override
   void initState() {
     super.initState();
-
-    _slideController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 260),
-      value: 1.0,
-    );
-
-    _slideAnimation = Tween<Offset>(begin: Offset.zero, end: Offset.zero)
-        .animate(
-          CurvedAnimation(parent: _slideController, curve: Curves.easeOutCubic),
-        );
-
-    _fadeAnimation = CurvedAnimation(
-      parent: _slideController,
-      curve: Curves.easeOut,
-    );
-
     _loadLibrary();
   }
 
   @override
   void dispose() {
-    _slideController.dispose();
+    _scanSub?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // CARGA (stream en vivo)
+  // ─────────────────────────────────────────────────────────────
   Future<void> _loadLibrary() async {
+    if (_scanning) return;
+
+    // Si ya hay resultado previo, pintarlo de inmediato (evita parpadeo).
+    final last = MediaScanner.instance.lastResult;
     setState(() {
-      _loadingLibrary = true;
-      _scanError = null;
+      _loadingLibrary = last == null;
+      _scanning = true;
+      _processedFiles = 0;
+      _scanErrors = const [];
+      if (last != null) {
+        _songs = last.songs;
+        _podcasts = last.podcasts;
+      }
     });
-    final result = await MediaScanner.instance.scan();
-    if (!mounted) return;
-    setState(() {
-      _songs = result.songs;
-      _podcasts = result.podcasts;
-      _loadingLibrary = false;
-      _scanError = result.errors.isEmpty ? null : result.errors.first;
-    });
+
+    await _scanSub?.cancel();
+    _scanSub = MediaScanner.instance.scanStream().listen(
+      (p) {
+        if (!mounted) return;
+        setState(() {
+          _songs = p.songs;
+          _podcasts = p.podcasts;
+          _scanErrors = p.errors;
+          _processedFiles = p.processedFiles;
+          if (p.done) {
+            _scanning = false;
+            _loadingLibrary = false;
+          } else if (_songs.isNotEmpty || _podcasts.isNotEmpty) {
+            _loadingLibrary = false;
+          }
+        });
+      },
+      onError: (Object e) {
+        if (!mounted) return;
+        setState(() {
+          _scanErrors = [..._scanErrors, 'Error: $e'];
+          _scanning = false;
+          _loadingLibrary = false;
+        });
+      },
+      onDone: () {
+        if (!mounted) return;
+        setState(() {
+          _scanning = false;
+          _loadingLibrary = false;
+        });
+      },
+    );
   }
 
   // Cambia el filtro con animación de slide y scroll al inicio.
   void _changeFilter(int index) {
     if (index == _selectedFilter) return;
 
-    // 1) Resetear scroll PRIMERO, mientras el ScrollController sigue montado.
-    if (_scrollController.hasClients) {
-      _scrollController.jumpTo(0);
-    }
-
-    // 2) Dirección según el índice destino.
     _slideFromRight = index > _selectedFilter;
 
-    // 3) Reconfigurar la animación para que entre desde el lado correcto.
-    final begin = _slideFromRight
-        ? const Offset(0.30, 0)
-        : const Offset(-0.30, 0);
-
-    _slideAnimation = Tween<Offset>(begin: begin, end: Offset.zero).animate(
-      CurvedAnimation(parent: _slideController, curve: Curves.easeOutCubic),
-    );
-
-    // 4) setState para que build() se ejecute y el nuevo child se construya.
     setState(() {
       _selectedFilter = index;
     });
 
-    // 5) Reiniciar y lanzar la animación.
-    _slideController
-      ..reset()
-      ..forward();
+    // Resetear scroll después de que el nuevo ListView monte.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(0);
+      }
+    });
   }
 
   @override
@@ -133,36 +145,35 @@ class _LibraryScreenState extends State<LibraryScreen>
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: _buildHeader(context),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 12),
+            _buildScanProgress(context),
+            const SizedBox(height: 12),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: _buildFilterChips(context),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
             Expanded(
               child: ClipRect(
-                child: AnimatedBuilder(
-                  animation: _slideController,
-                  builder: (context, _) {
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  transitionBuilder: (child, animation) {
+                    final begin = Offset(_slideFromRight ? 0.15 : -0.15, 0);
+                    final offset = Tween<Offset>(
+                      begin: begin,
+                      end: Offset.zero,
+                    ).animate(animation);
                     return FadeTransition(
-                      opacity: _fadeAnimation,
-                      child: SlideTransition(
-                        position: _slideAnimation,
-                        child: SingleChildScrollView(
-                          key: ValueKey<int>(_selectedFilter),
-                          controller: _scrollController,
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              ..._buildFilteredContent(context),
-                              const SizedBox(height: 24),
-                            ],
-                          ),
-                        ),
-                      ),
+                      opacity: animation,
+                      child: SlideTransition(position: offset, child: child),
                     );
                   },
+                  child: KeyedSubtree(
+                    key: ValueKey<int>(_selectedFilter),
+                    child: _buildScrollableContent(context),
+                  ),
                 ),
               ),
             ),
@@ -173,93 +184,181 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Construye las secciones según el filtro seleccionado.
+  // CONTENIDO SCROLLABLE (lazy por filtro)
   // ─────────────────────────────────────────────────────────────
-  List<Widget> _buildFilteredContent(BuildContext context) {
+  Widget _buildScrollableContent(BuildContext context) {
+    // Filtro "Todo": ListView con secciones mixtas.
     if (_selectedFilter == 0) {
-      return [
-        _buildSectionTitle(
-          context,
-          'Canciones',
-          onSeeAll: () => _changeFilter(1),
-        ),
-        const SizedBox(height: 12),
-        _buildSongs(context),
-        const SizedBox(height: 24),
-        _buildSectionTitle(
-          context,
-          'Playlists',
-          onSeeAll: () => _changeFilter(2),
-        ),
-        const SizedBox(height: 12),
-        _buildPlaylists(context),
-        const SizedBox(height: 24),
-        _buildSectionTitle(
-          context,
-          'Álbumes',
-          onSeeAll: () => _changeFilter(3),
-        ),
-        const SizedBox(height: 12),
-        _buildAlbums(context),
-        const SizedBox(height: 24),
-        _buildSectionTitle(
-          context,
-          'Artistas',
-          onSeeAll: () => _changeFilter(4),
-        ),
-        const SizedBox(height: 12),
-        _buildArtists(context),
-        const SizedBox(height: 24),
-        _buildSectionTitle(
-          context,
-          'Podcasts',
-          onSeeAll: () => _changeFilter(5),
-        ),
-        const SizedBox(height: 12),
-        _buildPodcasts(context),
-      ];
+      return ListView(
+        controller: _scrollController,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        children: [
+          const SizedBox(height: 8),
+          _buildSectionTitle(
+            context,
+            'Canciones',
+            onSeeAll: () => _changeFilter(1),
+          ),
+          const SizedBox(height: 12),
+          _buildSongs(context, limit: 5),
+          const SizedBox(height: 24),
+          _buildSectionTitle(
+            context,
+            'Playlists',
+            onSeeAll: () => _changeFilter(2),
+          ),
+          const SizedBox(height: 12),
+          _buildPlaylists(context),
+          const SizedBox(height: 24),
+          _buildSectionTitle(
+            context,
+            'Álbumes',
+            onSeeAll: () => _changeFilter(3),
+          ),
+          const SizedBox(height: 12),
+          _buildAlbums(context),
+          const SizedBox(height: 24),
+          _buildSectionTitle(
+            context,
+            'Artistas',
+            onSeeAll: () => _changeFilter(4),
+          ),
+          const SizedBox(height: 12),
+          _buildArtists(context),
+          const SizedBox(height: 24),
+          _buildSectionTitle(
+            context,
+            'Podcasts',
+            onSeeAll: () => _changeFilter(5),
+          ),
+          const SizedBox(height: 12),
+          _buildPodcasts(context, limit: 5),
+          const SizedBox(height: 24),
+        ],
+      );
     }
 
+    // Filtro "Canciones": ListView.builder puro (100% lazy).
+    if (_selectedFilter == 1) {
+      return _buildSongsList(context);
+    }
+
+    // Filtro "Podcasts": ListView.builder puro.
+    if (_selectedFilter == 5) {
+      return _buildPodcastsList(context);
+    }
+
+    // Resto de filtros: ListView con contenido estático (mock o detallado).
+    // Ya NO se muestra el título superior porque la categoría está
+    // seleccionada en los chips de arriba.
+    return ListView(
+      controller: _scrollController,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      children: [
+        const SizedBox(height: 8),
+        ..._buildFilteredContent(context),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // Contenido de filtros que NO son canciones/podcasts (mock / detallado).
+  List<Widget> _buildFilteredContent(BuildContext context) {
     switch (_selectedFilter) {
-      case 1:
-        return [
-          _buildSectionTitle(context, 'Canciones', showSeeAll: false),
-          const SizedBox(height: 12),
-          _buildSongs(context),
-        ];
       case 2:
-        return [
-          _buildSectionTitle(context, 'Playlists', showSeeAll: false),
-          const SizedBox(height: 12),
-          _buildPlaylistsDetailed(context),
-        ];
+        return [_buildPlaylistsDetailed(context)];
       case 3:
-        return [
-          _buildSectionTitle(context, 'Álbumes', showSeeAll: false),
-          const SizedBox(height: 12),
-          _buildAlbumsDetailed(context),
-        ];
+        return [_buildAlbumsDetailed(context)];
       case 4:
-        return [
-          _buildSectionTitle(context, 'Artistas', showSeeAll: false),
-          const SizedBox(height: 12),
-          _buildArtistsDetailed(context),
-        ];
-      case 5:
-        return [
-          _buildSectionTitle(context, 'Podcasts', showSeeAll: false),
-          const SizedBox(height: 12),
-          _buildPodcasts(context),
-        ];
+        return [_buildArtistsDetailed(context)];
       case 6:
-        return [
-          _buildSectionTitle(context, 'Descargas', showSeeAll: false),
-          const SizedBox(height: 12),
-          _buildDownloads(context),
-        ];
+        return [_buildDownloads(context)];
       default:
         return [];
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // BARRA DE PROGRESO DEL ESCANEO
+  // ─────────────────────────────────────────────────────────────
+  Widget _buildScanProgress(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    if (!_scanning && _scanErrors.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_scanning) ...[
+            Row(
+              children: [
+                SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: scheme.primary,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Escaneando… ${_songs.length + _podcasts.length} encontradas · $_processedFiles archivos',
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 12,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                minHeight: 3,
+                backgroundColor: scheme.surfaceContainerHigh,
+                color: scheme.primary,
+              ),
+            ),
+          ],
+          if (_scanErrors.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: scheme.errorContainer,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.warning_amber_rounded,
+                    size: 16,
+                    color: scheme.onErrorContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${_scanErrors.length} advertencia(s) durante el escaneo',
+                      style: TextStyle(
+                        color: scheme.onErrorContainer,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -267,26 +366,35 @@ class _LibraryScreenState extends State<LibraryScreen>
   // ─────────────────────────────────────────────────────────────
   Widget _buildHeader(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final total = _songs.length + _podcasts.length;
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Tu biblioteca',
-              style: TextStyle(
-                color: scheme.onSurface,
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Tu biblioteca',
+                style: TextStyle(
+                  color: scheme.onSurface,
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Música local en tu dispositivo',
-              style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
-            ),
-          ],
+              const SizedBox(height: 4),
+              Text(
+                _scanning
+                    ? 'Escaneando… $_processedFiles archivos'
+                    : (total == 0
+                          ? 'Música local en tu dispositivo'
+                          : '$total elementos'),
+                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
         ),
         Row(
           children: [
@@ -297,7 +405,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             _buildIconButton(
               context,
               Icons.refresh,
-              onTap: _loadingLibrary ? null : _loadLibrary,
+              onTap: _scanning ? null : _loadLibrary,
             ),
           ],
         ),
@@ -412,9 +520,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   // ═════════════════════════════════════════════════════════════
-  // CANCIONES (datos reales del scanner)
+  // CANCIONES — versión compacta (para "Todo", limitada)
   // ═════════════════════════════════════════════════════════════
-  Widget _buildSongs(BuildContext context) {
+  Widget _buildSongs(BuildContext context, {int? limit}) {
     if (_loadingLibrary) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 32),
@@ -426,25 +534,65 @@ class _LibraryScreenState extends State<LibraryScreen>
         context,
         icon: Icons.library_music_outlined,
         title: 'No hay canciones',
-        subtitle:
-            _scanError ??
-            'Configura tus carpetas en Ajustes y vuelve a escanear.',
+        subtitle: _scanErrors.isNotEmpty
+            ? _scanErrors.first
+            : 'Configura tus carpetas en Ajustes y vuelve a escanear.',
       );
     }
-    return Column(
-      children: _songs
-          .map(
-            (song) => SongTile(
-              song: song,
-              onTap: () {
-                // TODO: reproducir
-              },
-              onMore: () {
-                // TODO: menú contextual
-              },
-            ),
-          )
-          .toList(),
+
+    final count = limit == null ? _songs.length : _songs.length.clamp(0, limit);
+
+    return ListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: count,
+      itemExtent: _songTileExtent,
+      itemBuilder: (context, index) {
+        final song = _songs[index];
+        return RepaintBoundary(
+          key: ValueKey<String>(song.path),
+          child: SongTile(song: song),
+        );
+      },
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════
+  // CANCIONES — lista completa lazy (para filtro "Canciones")
+  // ═════════════════════════════════════════════════════════════
+  Widget _buildSongsList(BuildContext context) {
+    if (_loadingLibrary) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_songs.isEmpty) {
+      return ListView(
+        controller: _scrollController,
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildEmptyState(
+            context,
+            icon: Icons.library_music_outlined,
+            title: 'No hay canciones',
+            subtitle: _scanErrors.isNotEmpty
+                ? _scanErrors.first
+                : 'Configura tus carpetas en Ajustes y vuelve a escanear.',
+          ),
+        ],
+      );
+    }
+
+    return ListView.builder(
+      controller: _scrollController,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: _songs.length,
+      itemExtent: _songTileExtent,
+      itemBuilder: (context, index) {
+        final song = _songs[index];
+        return RepaintBoundary(
+          key: ValueKey<String>(song.path),
+          child: SongTile(song: song),
+        );
+      },
     );
   }
 
@@ -481,7 +629,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
           const SizedBox(height: 12),
           TextButton.icon(
-            onPressed: _loadLibrary,
+            onPressed: _scanning ? null : _loadLibrary,
             icon: const Icon(Icons.refresh, size: 18),
             label: const Text('Escanear de nuevo'),
           ),
@@ -743,9 +891,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   // ═════════════════════════════════════════════════════════════
-  // PODCASTS (datos reales del scanner)
+  // PODCASTS — versión compacta (para "Todo", limitada)
   // ═════════════════════════════════════════════════════════════
-  Widget _buildPodcasts(BuildContext context) {
+  Widget _buildPodcasts(BuildContext context, {int? limit}) {
     if (_loadingLibrary) {
       return const SizedBox.shrink();
     }
@@ -757,14 +905,15 @@ class _LibraryScreenState extends State<LibraryScreen>
         subtitle: 'Agrega carpetas de podcasts en Ajustes.',
       );
     }
+    final list = limit == null ? _podcasts : _podcasts.take(limit).toList();
     final scheme = Theme.of(context).colorScheme;
     return SizedBox(
       height: 90,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
-        itemCount: _podcasts.length,
+        itemCount: list.length,
         itemBuilder: (context, index) {
-          final pod = _podcasts[index];
+          final pod = list[index];
           return Container(
             width: 220,
             margin: const EdgeInsets.only(right: 12),
@@ -805,7 +954,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        '${pod.extension.toUpperCase()} · ${pod.sizeLabel}',
+                        '${pod.extension.toUpperCase()} · ${pod.durationLabel}',
                         style: TextStyle(
                           color: scheme.onSurfaceVariant,
                           fontSize: 12,
@@ -820,6 +969,95 @@ class _LibraryScreenState extends State<LibraryScreen>
           );
         },
       ),
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════
+  // PODCASTS — lista completa lazy (para filtro "Podcasts")
+  // ═════════════════════════════════════════════════════════════
+  Widget _buildPodcastsList(BuildContext context) {
+    if (_loadingLibrary) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_podcasts.isEmpty) {
+      return ListView(
+        controller: _scrollController,
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildEmptyState(
+            context,
+            icon: Icons.podcasts_outlined,
+            title: 'No hay podcasts',
+            subtitle: 'Agrega carpetas de podcasts en Ajustes.',
+          ),
+        ],
+      );
+    }
+
+    final scheme = Theme.of(context).colorScheme;
+    return ListView.builder(
+      controller: _scrollController,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: _podcasts.length,
+      itemExtent: 90,
+      itemBuilder: (context, index) {
+        final pod = _podcasts[index];
+        return RepaintBoundary(
+          key: ValueKey<String>(pod.path),
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainer,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(
+                    Icons.mic,
+                    color: scheme.onSurfaceVariant,
+                    size: 30,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        pod.title,
+                        style: TextStyle(
+                          color: scheme.onSurface,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${pod.extension.toUpperCase()} · ${pod.durationLabel}',
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 12,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -892,7 +1130,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   // ═════════════════════════════════════════════════════════════
-  // VISTAS DETALLADAS (mock, no dependen del scanner)
+  // VISTAS DETALLADAS (mock)
   // ═════════════════════════════════════════════════════════════
   Widget _buildPlaylistsDetailed(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;

@@ -1,5 +1,7 @@
 import 'dart:io';
+
 import 'package:flutter/material.dart';
+
 import '../models/song.dart';
 
 class SongTile extends StatelessWidget {
@@ -9,12 +11,26 @@ class SongTile extends StatelessWidget {
 
   const SongTile({super.key, required this.song, this.onTap, this.onMore});
 
+  // Cache estático por path: evita repetir existsSync() en cada build.
+  static final Map<String, bool> _coverCache = <String, bool>{};
+
+  static bool _hasCover(String? cover) {
+    if (cover == null) return false;
+    return _coverCache.putIfAbsent(cover, () {
+      try {
+        return File(cover).existsSync();
+      } catch (_) {
+        return false;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isPodcast = song.kind == MediaKind.podcast;
     final cover = song.coverPath;
-    final hasCover = cover != null && File(cover).existsSync();
+    final hasCover = _hasCover(cover);
 
     return InkWell(
       onTap: onTap,
@@ -36,8 +52,11 @@ class SongTile extends StatelessWidget {
                 color: scheme.surfaceContainerHigh,
                 child: hasCover
                     ? Image.file(
-                        File(cover),
+                        File(cover!),
                         fit: BoxFit.cover,
+                        // cacheWidth reduce memoria y acelera decode.
+                        cacheWidth: 156,
+                        gaplessPlayback: true,
                         errorBuilder: (_, __, ___) => Icon(
                           isPodcast ? Icons.mic : Icons.music_note,
                           color: scheme.onSurfaceVariant,
