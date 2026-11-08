@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'app/app_shell.dart';
@@ -7,24 +9,44 @@ import 'services/media_scanner.dart';
 import 'services/settings_service.dart';
 import 'widgets/permission_gate.dart';
 
-Future<void> main() async {
+class _LifecycleRescanObserver with WidgetsBindingObserver {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    if (kIsWeb) return;
+    if (!Platform.isLinux && !Platform.isWindows && !Platform.isMacOS) return;
+    unawaited(MediaScanner.instance.rescanNow());
+  }
+}
+
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // 1) Primer arranque: crea settings.json con los defaults en disco
-  //    (ReplayGain off, transiciones off, sin directorios).
-  //    Debe ejecutarse ANTES que cualquier otro servicio que dependa
-  //    de la configuración persistida.
-  await SettingsService.instance.load();
-
-  // 2) Ahora sí, lanzamos el escaneo inicial en segundo plano. Ya puede
-  //    leer los ajustes persistidos de forma segura.
-  unawaited(MediaScanner.instance.ensureInitialScan());
-
+  WidgetsBinding.instance.addObserver(_LifecycleRescanObserver());
   runApp(const BassyApp());
 }
 
-class BassyApp extends StatelessWidget {
+class BassyApp extends StatefulWidget {
   const BassyApp({super.key});
+
+  @override
+  State<BassyApp> createState() => _BassyAppState();
+}
+
+class _BassyAppState extends State<BassyApp> {
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    try {
+      await SettingsService.instance.load();
+    } catch (e, st) {
+      debugPrint('SettingsService.load failed: $e\n$st');
+    }
+    unawaited(MediaScanner.instance.ensureInitialScan());
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -24,6 +24,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _loadingLibrary = true;
   bool _scanning = false;
   int _processedFiles = 0;
+  String? _scanStatus;
 
   StreamSubscription<ScanProgress>? _scanSub;
 
@@ -56,7 +57,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final last = MediaScanner.instance.lastResult;
     setState(() {
       _loadingLibrary = last == null;
-      _scanning = false;
+      _scanning = MediaScanner.instance.isScanning;
       _processedFiles = last?.totalCount ?? 0;
       _scanErrors = last?.errors ?? const [];
       if (last != null) {
@@ -75,6 +76,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _scanErrors = p.errors;
           _processedFiles = p.processedFiles;
           _loadingLibrary = false;
+          _scanning = p.scanning;
+          _scanStatus = p.statusMessage;
         });
       },
       onError: (Object e) {
@@ -82,17 +85,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
         setState(() {
           _scanErrors = [..._scanErrors, 'Error: $e'];
           _loadingLibrary = false;
+          _scanning = false;
+          _scanStatus = null;
         });
       },
     );
   }
 
   Future<void> _manualRescan() async {
+    if (_scanning) return;
+
     setState(() {
       _scanning = true;
+      _scanStatus = 'Escaneando biblioteca…';
       _scanErrors = const [];
       _processedFiles = 0;
     });
+
     final result = await MediaScanner.instance.scan();
     if (!mounted) return;
     setState(() {
@@ -100,6 +109,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _podcasts = result.podcasts;
       _scanErrors = result.errors;
       _scanning = false;
+      _scanStatus = null;
       _loadingLibrary = false;
     });
   }
@@ -284,7 +294,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Escaneando… ${_songs.length + _podcasts.length} encontradas · $_processedFiles archivos',
+                    _scanStatus ??
+                        'Escaneando… ${_songs.length + _podcasts.length} encontradas · $_processedFiles archivos',
                     style: TextStyle(
                       color: scheme.onSurfaceVariant,
                       fontSize: 12,
@@ -305,7 +316,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ),
           ],
           if (_scanErrors.isNotEmpty) ...[
-            const SizedBox(height: 8),
+            if (_scanning) const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               decoration: BoxDecoration(
@@ -360,7 +371,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               const SizedBox(height: 4),
               Text(
                 _scanning
-                    ? 'Escaneando… $_processedFiles archivos'
+                    ? (_scanStatus ?? 'Escaneando… $_processedFiles archivos')
                     : (total == 0
                           ? 'Música local en tu dispositivo'
                           : '$total elementos'),

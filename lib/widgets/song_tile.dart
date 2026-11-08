@@ -97,37 +97,47 @@ class SongTile extends StatelessWidget {
                 ],
               ),
             ),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
+            // Grupo derecho: duración, formato/peso y botón "más"
+            // centrados verticalmente como un solo bloque.
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Text(
-                  song.durationLabel,
-                  style: TextStyle(
-                    color: scheme.onSurfaceVariant,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      song.durationLabel,
+                      style: TextStyle(
+                        color: scheme.onSurfaceVariant,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${song.extension.toUpperCase()} · ${song.sizeLabel}',
+                      style: TextStyle(
+                        color: scheme.onSurfaceVariant,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  '${song.extension.toUpperCase()} · ${song.sizeLabel}',
-                  style: TextStyle(
+                const SizedBox(width: 4),
+                IconButton(
+                  onPressed: onMore,
+                  icon: Icon(
+                    Icons.more_vert,
                     color: scheme.onSurfaceVariant,
-                    fontSize: 10,
+                    size: 20,
                   ),
+                  visualDensity: VisualDensity.compact,
+                  splashRadius: 20,
                 ),
               ],
-            ),
-            const SizedBox(width: 4),
-            IconButton(
-              onPressed: onMore,
-              icon: Icon(
-                Icons.more_vert,
-                color: scheme.onSurfaceVariant,
-                size: 20,
-              ),
-              visualDensity: VisualDensity.compact,
-              splashRadius: 20,
             ),
           ],
         ),

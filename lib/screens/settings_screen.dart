@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../models/song.dart';
+import '../services/media_scanner.dart';
 import '../services/settings_service.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -40,7 +42,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  /// Guarda con debounce para no escribir en disco en cada tick del slider.
   void _persist() {
     _saveDebounce?.cancel();
     _saveDebounce = Timer(const Duration(milliseconds: 300), () {
@@ -48,10 +49,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  /// Muta el modelo + setState + persiste en un solo paso.
+  Future<void> _persistNow() async {
+    _saveDebounce?.cancel();
+    await _service.save(_settings);
+  }
+
   void _update(void Function(AppSettings s) mutate) {
     setState(() => mutate(_settings));
     _persist();
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+  }
+
+  Future<void> _addMusicDir(String path) async {
+    setState(() => _settings.musicDirs.add(path));
+    await _persistNow();
+    _showSnack('Escaneando carpeta de música…');
+    await MediaScanner.instance.onDirectoryAdded(path, MediaKind.music);
+    _showSnack('Carpeta agregada');
+  }
+
+  Future<void> _removeMusicDir(String path) async {
+    setState(() => _settings.musicDirs.remove(path));
+    await _persistNow();
+    await MediaScanner.instance.onDirectoryRemoved(path);
+    _showSnack('Carpeta eliminada');
+  }
+
+  Future<void> _addPodcastDir(String path) async {
+    setState(() => _settings.podcastDirs.add(path));
+    await _persistNow();
+    _showSnack('Escaneando carpeta de podcasts…');
+    await MediaScanner.instance.onDirectoryAdded(path, MediaKind.podcast);
+    _showSnack('Carpeta agregada');
+  }
+
+  Future<void> _removePodcastDir(String path) async {
+    setState(() => _settings.podcastDirs.remove(path));
+    await _persistNow();
+    await MediaScanner.instance.onDirectoryRemoved(path);
+    _showSnack('Carpeta eliminada');
   }
 
   @override
@@ -74,31 +122,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _buildHeader(context),
               const SizedBox(height: 24),
 
-              // ── Cuenta ──
               _buildSectionTitle(context, 'Cuenta'),
               const SizedBox(height: 12),
               _buildAccountCard(context),
               const SizedBox(height: 24),
 
-              // ── ReplayGain ──
               _buildSectionTitle(context, 'ReplayGain'),
               const SizedBox(height: 12),
               _buildReplayGainGroup(context),
               const SizedBox(height: 24),
 
-              // ── Reproducción ──
               _buildSectionTitle(context, 'Reproducción'),
               const SizedBox(height: 12),
               _buildPlaybackGroup(context),
               const SizedBox(height: 24),
 
-              // ── Almacenamiento ──
               _buildSectionTitle(context, 'Almacenamiento'),
               const SizedBox(height: 12),
               _buildStorageGroup(context),
               const SizedBox(height: 24),
 
-              // ── Apariencia ──
               _buildSectionTitle(context, 'Apariencia'),
               const SizedBox(height: 12),
               _buildSettingsGroup(context, [
@@ -123,7 +166,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ]),
               const SizedBox(height: 24),
 
-              // ── Acerca de ──
               _buildSectionTitle(context, 'Acerca de'),
               const SizedBox(height: 12),
               _buildSettingsGroup(context, [
@@ -154,9 +196,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // HEADER
-  // ─────────────────────────────────────────────────────────────
   Widget _buildHeader(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Row(
@@ -215,9 +254,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // REPLAYGAIN
-  // ─────────────────────────────────────────────────────────────
   Widget _buildReplayGainGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final enabled = _settings.replayGainEnabled;
@@ -267,9 +303,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // REPRODUCCIÓN
-  // ─────────────────────────────────────────────────────────────
   Widget _buildPlaybackGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
@@ -443,9 +476,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // ALMACENAMIENTO
-  // ─────────────────────────────────────────────────────────────
   Widget _buildStorageGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
@@ -463,12 +493,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: 'Música',
             subtitle: 'Directorios donde se escanean canciones',
             dirs: _settings.musicDirs,
-            onRemove: (dir) => _update((s) => s.musicDirs.remove(dir)),
+            onRemove: _removeMusicDir,
             onAdd: () => _pickDirectory(
               context,
               title: 'Agregar directorio de música',
               existing: _settings.musicDirs,
-              onAdded: (path) => _update((s) => s.musicDirs.add(path)),
+              onAdded: _addMusicDir,
             ),
           ),
           _divider(context),
@@ -478,12 +508,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: 'Podcasts',
             subtitle: 'Directorios donde se escanean episodios',
             dirs: _settings.podcastDirs,
-            onRemove: (dir) => _update((s) => s.podcastDirs.remove(dir)),
+            onRemove: _removePodcastDir,
             onAdd: () => _pickDirectory(
               context,
               title: 'Agregar directorio de podcasts',
               existing: _settings.podcastDirs,
-              onAdded: (path) => _update((s) => s.podcastDirs.add(path)),
+              onAdded: _addPodcastDir,
             ),
           ),
         ],
@@ -497,7 +527,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required String title,
     required String subtitle,
     required List<String> dirs,
-    required void Function(String) onRemove,
+    required Future<void> Function(String) onRemove,
     required VoidCallback onAdd,
   }) {
     final scheme = Theme.of(context).colorScheme;
@@ -643,13 +673,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // SELECTOR DE DIRECTORIOS (nativo con file_picker)
-  // ─────────────────────────────────────────────────────────────
   Future<void> _pickDirectory(
     BuildContext context, {
     required String title,
-    required void Function(String) onAdded,
+    required Future<void> Function(String) onAdded,
     required List<String> existing,
   }) async {
     try {
@@ -659,7 +686,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
       if (selected == null || selected.trim().isEmpty) return;
 
-      // Normaliza (evita duplicados con o sin slash final)
       final normalized = selected.trim().replaceAll(RegExp(r'/+$'), '');
       final alreadyExists = existing.any(
         (d) => d.replaceAll(RegExp(r'/+$'), '') == normalized,
@@ -676,7 +702,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return;
       }
 
-      onAdded(normalized);
+      await onAdded(normalized);
     } catch (e) {
       if (context.mounted) {
         await _showInfoDialog(
@@ -710,9 +736,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // HELPERS
-  // ─────────────────────────────────────────────────────────────
   String _formatDb(double db) {
     final sign = db > 0 ? '+' : '';
     return '$sign${db.toStringAsFixed(1)} dB';
@@ -795,9 +818,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// WIDGETS REUTILIZABLES
-// ─────────────────────────────────────────────────────────────
 class _SettingItem extends StatelessWidget {
   final IconData icon;
   final String title;
