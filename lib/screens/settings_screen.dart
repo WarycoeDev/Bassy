@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
+import '../services/settings_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -8,29 +12,53 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  // ── ReplayGain ──
-  bool _replayGainEnabled = true;
+  final _service = SettingsService.instance;
 
-  // ── Reproducción ──
-  double _volumeBoost = 0.0; // dB, rango -12 .. +12
-  bool _transitionsEnabled = true;
-  int _transitionMode = 0; // 0 = Crossfade, 1 = Fade In / Fade Out
-  double _crossfadeSeconds = 4.0; // 0 .. 12 s
-  double _fadeSeconds = 3.0; // 0 .. 12 s
+  AppSettings _settings = AppSettings();
+  bool _loaded = false;
+  Timer? _saveDebounce;
 
-  // ── Recordatorios ──
-  bool _remindersEnabled = true;
-  bool _dailyReminder = true;
-  TimeOfDay _reminderTime = const TimeOfDay(hour: 18, minute: 0);
-  bool _unplayedAlbums = false;
-  bool _forgottenPlaylists = false;
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
 
-  // ── Almacenamiento ──
-  final List<String> _musicDirs = ['/storage/emulated/0/Music'];
-  final List<String> _podcastDirs = ['/storage/emulated/0/Podcasts'];
+  @override
+  void dispose() {
+    _saveDebounce?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadSettings() async {
+    final loaded = await _service.load();
+    if (!mounted) return;
+    setState(() {
+      _settings = loaded;
+      _loaded = true;
+    });
+  }
+
+  /// Guarda con debounce para no escribir en disco en cada tick del slider.
+  void _persist() {
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 300), () {
+      _service.save(_settings);
+    });
+  }
+
+  /// Muta el modelo + setState + persiste en un solo paso.
+  void _update(void Function(AppSettings s) mutate) {
+    setState(() => mutate(_settings));
+    _persist();
+  }
 
   @override
   Widget build(BuildContext context) {
+    if (!_loaded) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -63,44 +91,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _buildPlaybackGroup(context),
               const SizedBox(height: 24),
 
-              // ── Recordatorios ──
-              _buildSectionTitle(context, 'Recordatorios'),
-              const SizedBox(height: 12),
-              _buildRemindersGroup(context),
-              const SizedBox(height: 24),
-
               // ── Almacenamiento ──
               _buildSectionTitle(context, 'Almacenamiento'),
               const SizedBox(height: 12),
-              _buildScanDirsCard(
-                context,
-                icon: Icons.music_note,
-                title: 'Música',
-                subtitle: 'Directorios donde se escanean canciones',
-                dirs: _musicDirs,
-                onRemove: (dir) => setState(() => _musicDirs.remove(dir)),
-                onAdd: () => _addDirectory(
-                  context,
-                  title: 'Agregar directorio de música',
-                  onAdded: (path) => setState(() => _musicDirs.add(path)),
-                  existing: _musicDirs,
-                ),
-              ),
-              const SizedBox(height: 12),
-              _buildScanDirsCard(
-                context,
-                icon: Icons.podcasts,
-                title: 'Podcasts',
-                subtitle: 'Directorios donde se escanean episodios',
-                dirs: _podcastDirs,
-                onRemove: (dir) => setState(() => _podcastDirs.remove(dir)),
-                onAdd: () => _addDirectory(
-                  context,
-                  title: 'Agregar directorio de podcasts',
-                  onAdded: (path) => setState(() => _podcastDirs.add(path)),
-                  existing: _podcastDirs,
-                ),
-              ),
+              _buildStorageGroup(context),
               const SizedBox(height: 24),
 
               // ── Apariencia ──
@@ -225,6 +219,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ─────────────────────────────────────────────────────────────
   Widget _buildReplayGainGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final enabled = _settings.replayGainEnabled;
 
     return Container(
       decoration: BoxDecoration(
@@ -238,11 +233,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             title: 'ReplayGain',
             subtitle: 'Normalizar el volumen entre pistas',
             trailing: Switch(
-              value: _replayGainEnabled,
-              onChanged: (v) => setState(() => _replayGainEnabled = v),
+              value: enabled,
+              onChanged: (v) => _update((s) => s.replayGainEnabled = v),
             ),
           ),
-          if (_replayGainEnabled) ...[
+          if (enabled) ...[
             _divider(context),
             _ActionButton(
               icon: Icons.playlist_add_check,
@@ -284,22 +279,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       child: Column(
         children: [
-          _buildTransitionBlock(context),
-          _divider(context),
           _SliderItem(
             icon: Icons.graphic_eq,
             title: 'Amplificación de volumen',
-            subtitle: _formatDb(_volumeBoost),
+            subtitle: _formatDb(_settings.volumeBoost),
             enabled: true,
             child: Slider(
-              value: _volumeBoost,
+              value: _settings.volumeBoost,
               min: -12,
               max: 12,
               divisions: 48,
-              label: _formatDb(_volumeBoost),
-              onChanged: (v) => setState(() => _volumeBoost = v),
+              label: _formatDb(_settings.volumeBoost),
+              onChanged: (v) => _update((s) => s.volumeBoost = v),
             ),
           ),
+          _divider(context),
+          _buildTransitionBlock(context),
         ],
       ),
     );
@@ -307,6 +302,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildTransitionBlock(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final enabled = _settings.transitionsEnabled;
+    final mode = _settings.transitionMode;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
@@ -343,10 +340,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      _transitionsEnabled
-                          ? (_transitionMode == 0
-                                ? 'Crossfade'
-                                : 'Fade In / Fade Out')
+                      enabled
+                          ? (mode == 0 ? 'Crossfade' : 'Fade In / Fade Out')
                           : 'Desactivado',
                       style: TextStyle(
                         color: scheme.onSurfaceVariant,
@@ -357,13 +352,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               Switch(
-                value: _transitionsEnabled,
-                onChanged: (v) => setState(() => _transitionsEnabled = v),
+                value: enabled,
+                onChanged: (v) => _update((s) => s.transitionsEnabled = v),
               ),
             ],
           ),
           Opacity(
-            opacity: _transitionsEnabled ? 1.0 : 0.4,
+            opacity: enabled ? 1.0 : 0.4,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -373,9 +368,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Expanded(
                       child: _TransitionChip(
                         label: 'Crossfade',
-                        selected: _transitionMode == 0,
-                        onTap: _transitionsEnabled
-                            ? () => setState(() => _transitionMode = 0)
+                        selected: mode == 0,
+                        onTap: enabled
+                            ? () => _update((s) => s.transitionMode = 0)
                             : null,
                       ),
                     ),
@@ -383,9 +378,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Expanded(
                       child: _TransitionChip(
                         label: 'Fade In / Out',
-                        selected: _transitionMode == 1,
-                        onTap: _transitionsEnabled
-                            ? () => setState(() => _transitionMode = 1)
+                        selected: mode == 1,
+                        onTap: enabled
+                            ? () => _update((s) => s.transitionMode = 1)
                             : null,
                       ),
                     ),
@@ -396,7 +391,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      _transitionMode == 0
+                      mode == 0
                           ? 'Duración del crossfade'
                           : 'Duración del fade',
                       style: TextStyle(
@@ -405,9 +400,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                     Text(
-                      _transitionMode == 0
-                          ? '${_crossfadeSeconds.toStringAsFixed(1)} s'
-                          : '${_fadeSeconds.toStringAsFixed(1)} s',
+                      mode == 0
+                          ? '${_settings.crossfadeSeconds.toStringAsFixed(1)} s'
+                          : '${_settings.fadeSeconds.toStringAsFixed(1)} s',
                       style: TextStyle(
                         color: scheme.onSurfaceVariant,
                         fontSize: 12,
@@ -417,26 +412,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
                 const SizedBox(height: 4),
-                if (_transitionMode == 0)
+                if (mode == 0)
                   Slider(
-                    value: _crossfadeSeconds,
+                    value: _settings.crossfadeSeconds,
                     min: 0,
                     max: 12,
                     divisions: 24,
-                    label: '${_crossfadeSeconds.toStringAsFixed(1)} s',
-                    onChanged: _transitionsEnabled
-                        ? (v) => setState(() => _crossfadeSeconds = v)
+                    label: '${_settings.crossfadeSeconds.toStringAsFixed(1)} s',
+                    onChanged: enabled
+                        ? (v) => _update((s) => s.crossfadeSeconds = v)
                         : null,
                   )
                 else
                   Slider(
-                    value: _fadeSeconds,
+                    value: _settings.fadeSeconds,
                     min: 0,
                     max: 12,
                     divisions: 24,
-                    label: '${_fadeSeconds.toStringAsFixed(1)} s',
-                    onChanged: _transitionsEnabled
-                        ? (v) => setState(() => _fadeSeconds = v)
+                    label: '${_settings.fadeSeconds.toStringAsFixed(1)} s',
+                    onChanged: enabled
+                        ? (v) => _update((s) => s.fadeSeconds = v)
                         : null,
                   ),
               ],
@@ -448,106 +443,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // RECORDATORIOS
+  // ALMACENAMIENTO
   // ─────────────────────────────────────────────────────────────
-  Widget _buildRemindersGroup(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        children: [
-          _SettingItem(
-            icon: Icons.notifications_active,
-            title: 'Recordatorios',
-            subtitle: 'Avisos para no dejar de escuchar música',
-            trailing: Switch(
-              value: _remindersEnabled,
-              onChanged: (v) => setState(() => _remindersEnabled = v),
-            ),
-          ),
-          if (_remindersEnabled) ...[
-            _divider(context),
-            _SettingItem(
-              icon: Icons.today,
-              title: 'Recordarme reproducir algo hoy',
-              subtitle: 'Un aviso diario para escuchar música',
-              trailing: Switch(
-                value: _dailyReminder,
-                onChanged: (v) => setState(() => _dailyReminder = v),
-              ),
-            ),
-            _divider(context),
-            _SettingItem(
-              icon: Icons.schedule,
-              title: 'Hora del recordatorio',
-              subtitle: _formatTime(_reminderTime),
-              onTap: _dailyReminder ? _pickReminderTime : null,
-              trailing: Opacity(
-                opacity: _dailyReminder ? 1.0 : 0.4,
-                child: Icon(
-                  Icons.chevron_right,
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-            _divider(context),
-            _SettingItem(
-              icon: Icons.album,
-              title: 'Álbumes sin escuchar',
-              subtitle: 'Sugerir álbumes que no has reproducido',
-              trailing: Switch(
-                value: _unplayedAlbums,
-                onChanged: (v) => setState(() => _unplayedAlbums = v),
-              ),
-            ),
-            _divider(context),
-            _SettingItem(
-              icon: Icons.queue_music,
-              title: 'Playlists olvidadas',
-              subtitle: 'Recordar playlists que no escuchas hace tiempo',
-              trailing: Switch(
-                value: _forgottenPlaylists,
-                onChanged: (v) => setState(() => _forgottenPlaylists = v),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Future<void> _pickReminderTime() async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: _reminderTime,
-    );
-    if (picked != null) {
-      setState(() => _reminderTime = picked);
-    }
-  }
-
-  String _formatTime(TimeOfDay time) {
-    final h = time.hour.toString().padLeft(2, '0');
-    final m = time.minute.toString().padLeft(2, '0');
-    return '$h:$m';
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // ALMACENAMIENTO — tarjetas por categoría (Opción A)
-  // ─────────────────────────────────────────────────────────────
-  Widget _buildScanDirsCard(
-    BuildContext context, {
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required List<String> dirs,
-    required void Function(String) onRemove,
-    required VoidCallback onAdd,
-  }) {
+  Widget _buildStorageGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
     return Container(
@@ -558,157 +456,189 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Encabezado de la tarjeta ──
+          _buildStorageCategory(
+            context,
+            icon: Icons.music_note,
+            title: 'Música',
+            subtitle: 'Directorios donde se escanean canciones',
+            dirs: _settings.musicDirs,
+            onRemove: (dir) => _update((s) => s.musicDirs.remove(dir)),
+            onAdd: () => _addDirectory(
+              context,
+              title: 'Agregar directorio de música',
+              onAdded: (path) => _update((s) => s.musicDirs.add(path)),
+              existing: _settings.musicDirs,
+            ),
+          ),
+          _divider(context),
+          _buildStorageCategory(
+            context,
+            icon: Icons.podcasts,
+            title: 'Podcasts',
+            subtitle: 'Directorios donde se escanean episodios',
+            dirs: _settings.podcastDirs,
+            onRemove: (dir) => _update((s) => s.podcastDirs.remove(dir)),
+            onAdd: () => _addDirectory(
+              context,
+              title: 'Agregar directorio de podcasts',
+              onAdded: (path) => _update((s) => s.podcastDirs.add(path)),
+              existing: _settings.podcastDirs,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStorageCategory(
+    BuildContext context, {
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required List<String> dirs,
+    required void Function(String) onRemove,
+    required VoidCallback onAdd,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(icon, color: scheme.onSurfaceVariant, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: scheme.onSurface,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        color: scheme.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  '${dirs.length}',
+                  style: TextStyle(
+                    color: scheme.onSurfaceVariant,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (dirs.isEmpty)
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Text(
+              'Sin directorios añadidos',
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          )
+        else
+          ...dirs.map(
+            (dir) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.folder,
+                      size: 18,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        dir,
+                        style: TextStyle(color: scheme.onSurface, fontSize: 12),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    InkWell(
+                      onTap: () => onRemove(dir),
+                      borderRadius: BorderRadius.circular(6),
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: Icon(
+                          Icons.close,
+                          size: 16,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(height: 4),
+        InkWell(
+          onTap: onAdd,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             child: Row(
               children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(icon, color: scheme.onSurfaceVariant, size: 20),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: TextStyle(
-                          color: scheme.onSurface,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        subtitle,
-                        style: TextStyle(
-                          color: scheme.onSurfaceVariant,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                // Badge con contador
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    '${dirs.length}',
-                    style: TextStyle(
-                      color: scheme.onSurfaceVariant,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
+                Icon(Icons.add, color: scheme.primary, size: 18),
+                const SizedBox(width: 6),
+                Text(
+                  'Agregar directorio',
+                  style: TextStyle(
+                    color: scheme.primary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
                   ),
                 ),
               ],
             ),
           ),
-
-          // ── Lista de directorios ──
-          if (dirs.isEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: Text(
-                'Sin directorios añadidos',
-                style: TextStyle(
-                  color: scheme.onSurfaceVariant,
-                  fontSize: 12,
-                  fontStyle: FontStyle.italic,
-                ),
-              ),
-            )
-          else
-            ...dirs.map(
-              (dir) => Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 4,
-                ),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.folder,
-                        size: 18,
-                        color: scheme.onSurfaceVariant,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          dir,
-                          style: TextStyle(
-                            color: scheme.onSurface,
-                            fontSize: 12,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      InkWell(
-                        onTap: () => onRemove(dir),
-                        borderRadius: BorderRadius.circular(6),
-                        child: Padding(
-                          padding: const EdgeInsets.all(4),
-                          child: Icon(
-                            Icons.close,
-                            size: 16,
-                            color: scheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-
-          // ── Botón agregar ──
-          const SizedBox(height: 4),
-          InkWell(
-            onTap: onAdd,
-            borderRadius: BorderRadius.circular(12),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              child: Row(
-                children: [
-                  Icon(Icons.add, color: scheme.primary, size: 18),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Agregar directorio',
-                    style: TextStyle(
-                      color: scheme.primary,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
@@ -772,9 +702,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // TARJETA DE CUENTA
-  // ─────────────────────────────────────────────────────────────
   Widget _buildAccountCard(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Container(

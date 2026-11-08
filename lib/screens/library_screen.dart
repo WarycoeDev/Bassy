@@ -7,10 +7,19 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen> {
+class _LibraryScreenState extends State<LibraryScreen>
+    with SingleTickerProviderStateMixin {
   // Filtro activo: 0 = Todo, 1 = Canciones, 2 = Playlists, 3 = Álbumes,
   //               4 = Artistas, 5 = Podcasts, 6 = Descargas
   int _selectedFilter = 0;
+
+  bool _slideFromRight = true;
+
+  late final AnimationController _slideController;
+  late Animation<Offset> _slideAnimation;
+  late final Animation<double> _fadeAnimation;
+
+  final ScrollController _scrollController = ScrollController();
 
   final List<String> _filters = const [
     'Todo',
@@ -23,98 +32,204 @@ class _LibraryScreenState extends State<LibraryScreen> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+
+    _slideController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 260),
+      value: 1.0,
+    );
+
+    _slideAnimation = Tween<Offset>(begin: Offset.zero, end: Offset.zero)
+        .animate(
+          CurvedAnimation(parent: _slideController, curve: Curves.easeOutCubic),
+        );
+
+    _fadeAnimation = CurvedAnimation(
+      parent: _slideController,
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  void dispose() {
+    _slideController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  // Cambia el filtro con animación de slide y scroll al inicio.
+  void _changeFilter(int index) {
+    if (index == _selectedFilter) return;
+
+    // 1) Resetear scroll PRIMERO, mientras el ScrollController sigue montado.
+    if (_scrollController.hasClients) {
+      _scrollController.jumpTo(0);
+    }
+
+    // 2) Dirección según el índice destino.
+    _slideFromRight = index > _selectedFilter;
+
+    // 3) Reconfigurar la animación para que entre desde el lado correcto.
+    final begin = _slideFromRight
+        ? const Offset(0.30, 0)
+        : const Offset(-0.30, 0);
+
+    _slideAnimation = Tween<Offset>(begin: begin, end: Offset.zero).animate(
+      CurvedAnimation(parent: _slideController, curve: Curves.easeOutCubic),
+    );
+
+    // 4) setState para que build() se ejecute y el nuevo child se construya.
+    setState(() {
+      _selectedFilter = index;
+    });
+
+    // 5) Reiniciar y lanzar la animación.
+    _slideController
+      ..reset()
+      ..forward();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
       backgroundColor: scheme.surface,
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 16),
-              _buildHeader(context),
-              const SizedBox(height: 24),
-              _buildFilterChips(context),
-              const SizedBox(height: 24),
-
-              // ── Contenido según el filtro activo ──
-              ..._buildFilteredContent(context),
-
-              const SizedBox(height: 24),
-            ],
-          ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildHeader(context),
+            ),
+            const SizedBox(height: 24),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildFilterChips(context),
+            ),
+            const SizedBox(height: 24),
+            Expanded(
+              child: ClipRect(
+                child: AnimatedBuilder(
+                  animation: _slideController,
+                  builder: (context, _) {
+                    // IMPORTANTE: el contenido se construye DENTRO del builder,
+                    // no como `child` cacheado, para que se reconstruya con
+                    // cada setState y con cada frame de animación.
+                    return FadeTransition(
+                      opacity: _fadeAnimation,
+                      child: SlideTransition(
+                        position: _slideAnimation,
+                        child: SingleChildScrollView(
+                          key: ValueKey<int>(_selectedFilter),
+                          controller: _scrollController,
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              ..._buildFilteredContent(context),
+                              const SizedBox(height: 24),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Construye las secciones según el filtro seleccionado
+  // Construye las secciones según el filtro seleccionado.
   // ─────────────────────────────────────────────────────────────
   List<Widget> _buildFilteredContent(BuildContext context) {
-    // "Todo" muestra todas las secciones
     if (_selectedFilter == 0) {
       return [
-        _buildSectionTitle(context, 'Canciones'),
+        _buildSectionTitle(
+          context,
+          'Canciones',
+          onSeeAll: () => _changeFilter(1),
+        ),
         const SizedBox(height: 12),
         _buildSongs(context),
         const SizedBox(height: 24),
-        _buildSectionTitle(context, 'Playlists'),
+        _buildSectionTitle(
+          context,
+          'Playlists',
+          onSeeAll: () => _changeFilter(2),
+        ),
         const SizedBox(height: 12),
         _buildPlaylists(context),
         const SizedBox(height: 24),
-        _buildSectionTitle(context, 'Álbumes'),
+        _buildSectionTitle(
+          context,
+          'Álbumes',
+          onSeeAll: () => _changeFilter(3),
+        ),
         const SizedBox(height: 12),
         _buildAlbums(context),
         const SizedBox(height: 24),
-        _buildSectionTitle(context, 'Artistas'),
+        _buildSectionTitle(
+          context,
+          'Artistas',
+          onSeeAll: () => _changeFilter(4),
+        ),
         const SizedBox(height: 12),
         _buildArtists(context),
         const SizedBox(height: 24),
-        _buildSectionTitle(context, 'Podcasts'),
+        _buildSectionTitle(
+          context,
+          'Podcasts',
+          onSeeAll: () => _changeFilter(5),
+        ),
         const SizedBox(height: 12),
         _buildPodcasts(context),
       ];
     }
 
-    // Filtros individuales
     switch (_selectedFilter) {
-      case 1: // Canciones
+      case 1:
         return [
-          _buildSectionTitle(context, 'Canciones'),
+          _buildSectionTitle(context, 'Canciones', showSeeAll: false),
           const SizedBox(height: 12),
           _buildSongs(context),
         ];
-      case 2: // Playlists
+      case 2:
         return [
-          _buildSectionTitle(context, 'Playlists'),
+          _buildSectionTitle(context, 'Playlists', showSeeAll: false),
           const SizedBox(height: 12),
-          _buildPlaylists(context),
+          _buildPlaylistsDetailed(context),
         ];
-      case 3: // Álbumes
+      case 3:
         return [
-          _buildSectionTitle(context, 'Álbumes'),
+          _buildSectionTitle(context, 'Álbumes', showSeeAll: false),
           const SizedBox(height: 12),
-          _buildAlbums(context),
+          _buildAlbumsDetailed(context),
         ];
-      case 4: // Artistas
+      case 4:
         return [
-          _buildSectionTitle(context, 'Artistas'),
+          _buildSectionTitle(context, 'Artistas', showSeeAll: false),
           const SizedBox(height: 12),
-          _buildArtists(context),
+          _buildArtistsDetailed(context),
         ];
-      case 5: // Podcasts
+      case 5:
         return [
-          _buildSectionTitle(context, 'Podcasts'),
+          _buildSectionTitle(context, 'Podcasts', showSeeAll: false),
           const SizedBox(height: 12),
-          _buildPodcasts(context),
+          _buildPodcastsDetailed(context),
         ];
-      case 6: // Descargas
+      case 6:
         return [
-          _buildSectionTitle(context, 'Descargas'),
+          _buildSectionTitle(context, 'Descargas', showSeeAll: false),
           const SizedBox(height: 12),
           _buildDownloads(context),
         ];
@@ -124,7 +239,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // HEADER (mismo patrón que HomeScreen)
+  // HEADER
   // ─────────────────────────────────────────────────────────────
   Widget _buildHeader(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -173,7 +288,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // FILTER CHIPS — ahora FUNCIONALES (onTap actualiza el estado)
+  // FILTER CHIPS
   // ─────────────────────────────────────────────────────────────
   Widget _buildFilterChips(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -185,7 +300,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         itemBuilder: (context, index) {
           final isSelected = index == _selectedFilter;
           return GestureDetector(
-            onTap: () => setState(() => _selectedFilter = index),
+            onTap: () => _changeFilter(index),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               margin: const EdgeInsets.only(right: 10),
@@ -212,9 +327,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // SECTION TITLE (mismo patrón que HomeScreen)
+  // SECTION TITLE — "Ver todo" opcional y funcional
   // ─────────────────────────────────────────────────────────────
-  Widget _buildSectionTitle(BuildContext context, String title) {
+  Widget _buildSectionTitle(
+    BuildContext context,
+    String title, {
+    bool showSeeAll = true,
+    VoidCallback? onSeeAll,
+  }) {
     final scheme = Theme.of(context).colorScheme;
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -227,17 +347,30 @@ class _LibraryScreenState extends State<LibraryScreen> {
             fontWeight: FontWeight.bold,
           ),
         ),
-        Text(
-          'Ver todo',
-          style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
-        ),
+        if (showSeeAll)
+          GestureDetector(
+            onTap: onSeeAll,
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              child: Text(
+                'Ver todo',
+                style: TextStyle(
+                  color: scheme.primary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // CANCIONES — lista vertical compacta estilo "Escuchado recientemente"
-  // ─────────────────────────────────────────────────────────────
+  // ═════════════════════════════════════════════════════════════
+  // MODO "TODO" — horizontal
+  // ═════════════════════════════════════════════════════════════
+
   Widget _buildSongs(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final songs = [
@@ -306,9 +439,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // PLAYLISTS — tarjetas grandes con icono y botón play
-  // ─────────────────────────────────────────────────────────────
   Widget _buildPlaylists(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final playlists = [
@@ -407,9 +537,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // ÁLBUMES — tarjetas con degradado (mismo patrón que "Mix para ti")
-  // ─────────────────────────────────────────────────────────────
   Widget _buildAlbums(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final albums = [
@@ -497,9 +624,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // ARTISTAS — círculos con nombre
-  // ─────────────────────────────────────────────────────────────
   Widget _buildArtists(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final artists = [
@@ -558,9 +682,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // PODCASTS — tarjetas horizontales con icono
-  // ─────────────────────────────────────────────────────────────
   Widget _buildPodcasts(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final podcasts = [
@@ -634,9 +755,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // DESCARGAS — lista con estado descargado
-  // ─────────────────────────────────────────────────────────────
   Widget _buildDownloads(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final downloads = [
@@ -699,6 +817,390 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
         );
       }).toList(),
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════
+  // VISTAS DETALLADAS (filtros individuales)
+  // ═════════════════════════════════════════════════════════════
+
+  Widget _buildPlaylistsDetailed(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final playlists = [
+      {
+        'title': 'Road Trip',
+        'count': 42,
+        'total': '2 h 48 min',
+        'icon': Icons.directions_car,
+        'color': scheme.primaryContainer,
+      },
+      {
+        'title': 'Chill Vibes',
+        'count': 28,
+        'total': '1 h 52 min',
+        'icon': Icons.nightlight,
+        'color': scheme.secondaryContainer,
+      },
+      {
+        'title': 'Workout',
+        'count': 35,
+        'total': '2 h 14 min',
+        'icon': Icons.fitness_center,
+        'color': scheme.tertiaryContainer,
+      },
+      {
+        'title': 'Focus',
+        'count': 19,
+        'total': '1 h 08 min',
+        'icon': Icons.psychology,
+        'color': scheme.surfaceContainerHigh,
+      },
+      {
+        'title': 'Party Mix',
+        'count': 51,
+        'total': '3 h 22 min',
+        'icon': Icons.celebration,
+        'color': scheme.primaryContainer,
+      },
+      {
+        'title': 'Acoustic',
+        'count': 23,
+        'total': '1 h 30 min',
+        'icon': Icons.piano,
+        'color': scheme.secondaryContainer,
+      },
+    ];
+
+    return Column(
+      children: playlists.map((playlist) {
+        return _buildDetailCard(
+          context: context,
+          leading: _buildCover(
+            context,
+            icon: playlist['icon'] as IconData,
+            color: playlist['color'] as Color,
+            size: 64,
+            rounded: 12,
+          ),
+          title: playlist['title'] as String,
+          subtitle: '${playlist['count']} canciones',
+          meta: playlist['total'] as String,
+          trailing: _buildPlayTrailing(context),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildAlbumsDetailed(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final albums = [
+      {
+        'title': 'After Hours',
+        'artist': 'The Weeknd',
+        'year': '2020',
+        'songs': 14,
+        'total': '56 min',
+      },
+      {
+        'title': 'Future Nostalgia',
+        'artist': 'Dua Lipa',
+        'year': '2020',
+        'songs': 11,
+        'total': '43 min',
+      },
+      {
+        'title': 'Justice',
+        'artist': 'Justin Bieber',
+        'year': '2021',
+        'songs': 16,
+        'total': '58 min',
+      },
+      {
+        'title': 'Un Verano Sin Ti',
+        'artist': 'Bad Bunny',
+        'year': '2022',
+        'songs': 23,
+        'total': '1 h 22 min',
+      },
+      {
+        'title': 'KG0516',
+        'artist': 'Karol G',
+        'year': '2021',
+        'songs': 16,
+        'total': '54 min',
+      },
+      {
+        'title': 'Harry\'s House',
+        'artist': 'Harry Styles',
+        'year': '2022',
+        'songs': 13,
+        'total': '47 min',
+      },
+    ];
+
+    return Column(
+      children: albums.map((album) {
+        return _buildDetailCard(
+          context: context,
+          leading: _buildCover(
+            context,
+            icon: Icons.album,
+            color: scheme.surfaceContainerHigh,
+            size: 64,
+            rounded: 10,
+            label: album['title'] as String,
+          ),
+          title: album['title'] as String,
+          subtitle: '${album['artist']} · ${album['year']}',
+          meta: '${album['songs']} pistas · ${album['total']}',
+          trailing: Icon(
+            Icons.more_vert,
+            color: scheme.onSurfaceVariant,
+            size: 20,
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildArtistsDetailed(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final artists = [
+      {'name': 'The Weeknd', 'songs': 12, 'albums': 4},
+      {'name': 'Dua Lipa', 'songs': 8, 'albums': 3},
+      {'name': 'Bad Bunny', 'songs': 15, 'albums': 5},
+      {'name': 'Karol G', 'songs': 10, 'albums': 3},
+      {'name': 'Harry Styles', 'songs': 9, 'albums': 2},
+      {'name': 'Taylor Swift', 'songs': 20, 'albums': 8},
+      {'name': 'Drake', 'songs': 14, 'albums': 6},
+      {'name': 'Ariana Grande', 'songs': 11, 'albums': 4},
+    ];
+
+    return Column(
+      children: artists.map((artist) {
+        return _buildDetailCard(
+          context: context,
+          leading: CircleAvatar(
+            radius: 32,
+            backgroundColor: scheme.surfaceContainerHigh,
+            child: Icon(Icons.person, color: scheme.onSurfaceVariant, size: 32),
+          ),
+          title: artist['name'] as String,
+          subtitle:
+              '${artist['songs']} canciones · ${artist['albums']} álbumes',
+          trailing: Icon(
+            Icons.chevron_right,
+            color: scheme.onSurfaceVariant,
+            size: 24,
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildPodcastsDetailed(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final podcasts = [
+      {
+        'title': 'Tecnología Hoy',
+        'episodes': 124,
+        'total': '18 h 40 min',
+        'icon': Icons.memory,
+        'color': scheme.primaryContainer,
+      },
+      {
+        'title': 'Ciencia Curiosa',
+        'episodes': 87,
+        'total': '12 h 05 min',
+        'icon': Icons.science,
+        'color': scheme.secondaryContainer,
+      },
+      {
+        'title': 'Historias Reales',
+        'episodes': 56,
+        'total': '9 h 12 min',
+        'icon': Icons.book,
+        'color': scheme.tertiaryContainer,
+      },
+      {
+        'title': 'Misterios Sin Resolver',
+        'episodes': 42,
+        'total': '7 h 30 min',
+        'icon': Icons.search,
+        'color': scheme.surfaceContainerHigh,
+      },
+      {
+        'title': 'Negocios & Café',
+        'episodes': 63,
+        'total': '10 h 18 min',
+        'icon': Icons.coffee,
+        'color': scheme.primaryContainer,
+      },
+    ];
+
+    return Column(
+      children: podcasts.map((podcast) {
+        return _buildDetailCard(
+          context: context,
+          leading: _buildCover(
+            context,
+            icon: podcast['icon'] as IconData,
+            color: podcast['color'] as Color,
+            size: 64,
+            rounded: 12,
+          ),
+          title: podcast['title'] as String,
+          subtitle: '${podcast['episodes']} episodios',
+          meta: podcast['total'] as String,
+          trailing: _buildPlayTrailing(context),
+        );
+      }).toList(),
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════
+  // WIDGETS REUTILIZABLES
+  // ═════════════════════════════════════════════════════════════
+
+  Widget _buildDetailCard({
+    required BuildContext context,
+    required Widget leading,
+    required String title,
+    String? subtitle,
+    String? meta,
+    required Widget trailing,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          leading,
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14.5,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 12.5,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                if (meta != null) ...[
+                  const SizedBox(height: 5),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.schedule,
+                        size: 12,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        meta,
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 11.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          trailing,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCover(
+    BuildContext context, {
+    required IconData icon,
+    required Color color,
+    required double size,
+    required double rounded,
+    String? label,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(rounded),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [color, scheme.surfaceContainerHigh],
+        ),
+      ),
+      child: Stack(
+        children: [
+          if (label != null)
+            Positioned(
+              top: 6,
+              left: 6,
+              right: 6,
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: scheme.onSurface,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 9,
+                  height: 1.1,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          Center(
+            child: Icon(
+              icon,
+              color: label == null
+                  ? scheme.onSurface
+                  : scheme.onSurface.withOpacity(0.35),
+              size: label == null ? size * 0.42 : size * 0.32,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlayTrailing(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: scheme.primary.withOpacity(0.12),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(Icons.play_arrow, color: scheme.primary, size: 22),
     );
   }
 }
