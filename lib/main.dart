@@ -1,9 +1,25 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'app/app_shell.dart';
+import 'services/media_scanner.dart';
+import 'services/settings_service.dart';
 import 'widgets/permission_gate.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 1) Primer arranque: crea settings.json con los defaults en disco
+  //    (ReplayGain off, transiciones off, sin directorios).
+  //    Debe ejecutarse ANTES que cualquier otro servicio que dependa
+  //    de la configuración persistida.
+  await SettingsService.instance.load();
+
+  // 2) Ahora sí, lanzamos el escaneo inicial en segundo plano. Ya puede
+  //    leer los ajustes persistidos de forma segura.
+  unawaited(MediaScanner.instance.ensureInitialScan());
+
   runApp(const BassyApp());
 }
 
@@ -12,7 +28,6 @@ class BassyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Escala de grises
     const grey50 = Color(0xFF0A0A0A);
     const grey100 = Color(0xFF121212);
     const grey200 = Color(0xFF1E1E1E);

@@ -22,16 +22,16 @@ class AppSettings {
   List<String> podcastDirs;
 
   AppSettings({
-    this.replayGainEnabled = true,
+    this.replayGainEnabled = false,
     this.volumeBoost = 0.0,
-    this.transitionsEnabled = true,
+    this.transitionsEnabled = false,
     this.transitionMode = 0,
     this.crossfadeSeconds = 4.0,
     this.fadeSeconds = 3.0,
     List<String>? musicDirs,
     List<String>? podcastDirs,
-  }) : musicDirs = musicDirs ?? ['/storage/emulated/0/Music'],
-       podcastDirs = podcastDirs ?? ['/storage/emulated/0/Podcasts'];
+  }) : musicDirs = musicDirs ?? <String>[],
+       podcastDirs = podcastDirs ?? <String>[];
 
   Map<String, dynamic> toJson() => {
     'replayGainEnabled': replayGainEnabled,
@@ -45,18 +45,18 @@ class AppSettings {
   };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
-    replayGainEnabled: json['replayGainEnabled'] as bool? ?? true,
+    replayGainEnabled: json['replayGainEnabled'] as bool? ?? false,
     volumeBoost: (json['volumeBoost'] as num?)?.toDouble() ?? 0.0,
-    transitionsEnabled: json['transitionsEnabled'] as bool? ?? true,
+    transitionsEnabled: json['transitionsEnabled'] as bool? ?? false,
     transitionMode: (json['transitionMode'] as num?)?.toInt() ?? 0,
     crossfadeSeconds: (json['crossfadeSeconds'] as num?)?.toDouble() ?? 4.0,
     fadeSeconds: (json['fadeSeconds'] as num?)?.toDouble() ?? 3.0,
     musicDirs:
         (json['musicDirs'] as List?)?.map((e) => e.toString()).toList() ??
-        ['/storage/emulated/0/Music'],
+        <String>[],
     podcastDirs:
         (json['podcastDirs'] as List?)?.map((e) => e.toString()).toList() ??
-        ['/storage/emulated/0/Podcasts'],
+        <String>[],
   );
 }
 
@@ -99,25 +99,46 @@ class SettingsService {
   /// Ruta legible (útil para mostrar en "Acerca de" o depurar).
   Future<String> get filePath async => (await _resolveFile()).path;
 
-  /// Carga los ajustes. Si no existe el archivo o está corrupto,
-  /// devuelve los valores por defecto.
+  /// Carga los ajustes. Si no existe el archivo (primer arranque) o está
+  /// corrupto, lo crea/reescribe con los valores por defecto y lo devuelve.
   Future<AppSettings> load() async {
     try {
       if (_cache != null) {
         return AppSettings.fromJson(_cache!);
       }
+
       final file = await _resolveFile();
+
+      // Primer arranque: no existe → crear archivo con defaults.
       if (!await file.exists()) {
-        return AppSettings();
+        final defaults = AppSettings();
+        await save(defaults);
+        return defaults;
       }
+
       final raw = await file.readAsString();
-      if (raw.trim().isEmpty) return AppSettings();
+
+      // Archivo vacío → reescribir defaults.
+      if (raw.trim().isEmpty) {
+        final defaults = AppSettings();
+        await save(defaults);
+        return defaults;
+      }
+
       final decoded = jsonDecode(raw) as Map<String, dynamic>;
       _cache = decoded;
       return AppSettings.fromJson(decoded);
     } catch (e) {
       debugPrint('SettingsService.load error: $e');
-      return AppSettings();
+      // Archivo corrupto o error de IO → intentar dejar un archivo válido.
+      try {
+        final defaults = AppSettings();
+        await save(defaults);
+        return defaults;
+      } catch (_) {
+        // Último recurso: devolver defaults en memoria.
+        return AppSettings();
+      }
     }
   }
 

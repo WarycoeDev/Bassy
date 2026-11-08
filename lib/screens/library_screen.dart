@@ -14,15 +14,10 @@ class LibraryScreen extends StatefulWidget {
 }
 
 class _LibraryScreenState extends State<LibraryScreen> {
-  // Filtro activo: 0 = Todo, 1 = Canciones, 2 = Playlists, 3 = Álbumes,
-  //               4 = Artistas, 5 = Podcasts, 6 = Descargas
   int _selectedFilter = 0;
-
   bool _slideFromRight = true;
-
   final ScrollController _scrollController = ScrollController();
 
-  // ── Estado del scanner ──
   List<Song> _songs = const [];
   List<Song> _podcasts = const [];
   List<String> _scanErrors = const [];
@@ -42,13 +37,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     'Descargas',
   ];
 
-  // Altura fija de cada SongTile: 52 cover + 8*2 padding + 10 margen bottom
   static const double _songTileExtent = 78;
 
   @override
   void initState() {
     super.initState();
-    _loadLibrary();
+    _startWatching();
   }
 
   @override
@@ -58,27 +52,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
     super.dispose();
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // CARGA (stream en vivo)
-  // ─────────────────────────────────────────────────────────────
-  Future<void> _loadLibrary() async {
-    if (_scanning) return;
-
-    // Si ya hay resultado previo, pintarlo de inmediato (evita parpadeo).
+  void _startWatching() {
     final last = MediaScanner.instance.lastResult;
     setState(() {
       _loadingLibrary = last == null;
-      _scanning = true;
-      _processedFiles = 0;
-      _scanErrors = const [];
+      _scanning = false;
+      _processedFiles = last?.totalCount ?? 0;
+      _scanErrors = last?.errors ?? const [];
       if (last != null) {
         _songs = last.songs;
         _podcasts = last.podcasts;
       }
     });
 
-    await _scanSub?.cancel();
-    _scanSub = MediaScanner.instance.scanStream().listen(
+    _scanSub?.cancel();
+    _scanSub = MediaScanner.instance.watchStream().listen(
       (p) {
         if (!mounted) return;
         setState(() {
@@ -86,33 +74,36 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _podcasts = p.podcasts;
           _scanErrors = p.errors;
           _processedFiles = p.processedFiles;
-          if (p.done) {
-            _scanning = false;
-            _loadingLibrary = false;
-          } else if (_songs.isNotEmpty || _podcasts.isNotEmpty) {
-            _loadingLibrary = false;
-          }
+          _loadingLibrary = false;
         });
       },
       onError: (Object e) {
         if (!mounted) return;
         setState(() {
           _scanErrors = [..._scanErrors, 'Error: $e'];
-          _scanning = false;
-          _loadingLibrary = false;
-        });
-      },
-      onDone: () {
-        if (!mounted) return;
-        setState(() {
-          _scanning = false;
           _loadingLibrary = false;
         });
       },
     );
   }
 
-  // Cambia el filtro con animación de slide y scroll al inicio.
+  Future<void> _manualRescan() async {
+    setState(() {
+      _scanning = true;
+      _scanErrors = const [];
+      _processedFiles = 0;
+    });
+    final result = await MediaScanner.instance.scan();
+    if (!mounted) return;
+    setState(() {
+      _songs = result.songs;
+      _podcasts = result.podcasts;
+      _scanErrors = result.errors;
+      _scanning = false;
+      _loadingLibrary = false;
+    });
+  }
+
   void _changeFilter(int index) {
     if (index == _selectedFilter) return;
 
@@ -122,7 +113,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _selectedFilter = index;
     });
 
-    // Resetear scroll después de que el nuevo ListView monte.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.jumpTo(0);
@@ -183,11 +173,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // CONTENIDO SCROLLABLE (lazy por filtro)
-  // ─────────────────────────────────────────────────────────────
   Widget _buildScrollableContent(BuildContext context) {
-    // Filtro "Todo": ListView con secciones mixtas.
     if (_selectedFilter == 0) {
       return ListView(
         controller: _scrollController,
@@ -238,19 +224,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
     }
 
-    // Filtro "Canciones": ListView.builder puro (100% lazy).
     if (_selectedFilter == 1) {
       return _buildSongsList(context);
     }
 
-    // Filtro "Podcasts": ListView.builder puro.
     if (_selectedFilter == 5) {
       return _buildPodcastsList(context);
     }
 
-    // Resto de filtros: ListView con contenido estático (mock o detallado).
-    // Ya NO se muestra el título superior porque la categoría está
-    // seleccionada en los chips de arriba.
     return ListView(
       controller: _scrollController,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -262,7 +243,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // Contenido de filtros que NO son canciones/podcasts (mock / detallado).
   List<Widget> _buildFilteredContent(BuildContext context) {
     switch (_selectedFilter) {
       case 2:
@@ -278,9 +258,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // BARRA DE PROGRESO DEL ESCANEO
-  // ─────────────────────────────────────────────────────────────
   Widget _buildScanProgress(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
@@ -361,9 +338,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // HEADER
-  // ─────────────────────────────────────────────────────────────
   Widget _buildHeader(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final total = _songs.length + _podcasts.length;
@@ -405,7 +379,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             _buildIconButton(
               context,
               Icons.refresh,
-              onTap: _scanning ? null : _loadLibrary,
+              onTap: _scanning ? null : _manualRescan,
             ),
           ],
         ),
@@ -439,9 +413,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // FILTER CHIPS
-  // ─────────────────────────────────────────────────────────────
   Widget _buildFilterChips(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return SizedBox(
@@ -478,9 +449,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // SECTION TITLE
-  // ─────────────────────────────────────────────────────────────
   Widget _buildSectionTitle(
     BuildContext context,
     String title, {
@@ -519,9 +487,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // CANCIONES — versión compacta (para "Todo", limitada)
-  // ═════════════════════════════════════════════════════════════
   Widget _buildSongs(BuildContext context, {int? limit}) {
     if (_loadingLibrary) {
       return const Padding(
@@ -557,9 +522,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // CANCIONES — lista completa lazy (para filtro "Canciones")
-  // ═════════════════════════════════════════════════════════════
   Widget _buildSongsList(BuildContext context) {
     if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
@@ -629,7 +591,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
           const SizedBox(height: 12),
           TextButton.icon(
-            onPressed: _scanning ? null : _loadLibrary,
+            onPressed: _scanning ? null : _manualRescan,
             icon: const Icon(Icons.refresh, size: 18),
             label: const Text('Escanear de nuevo'),
           ),
@@ -638,9 +600,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // PLAYLISTS (mock horizontal)
-  // ═════════════════════════════════════════════════════════════
   Widget _buildPlaylists(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final playlists = [
@@ -739,9 +698,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // ÁLBUMES (mock horizontal)
-  // ═════════════════════════════════════════════════════════════
   Widget _buildAlbums(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final albums = [
@@ -829,9 +785,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // ARTISTAS (mock horizontal)
-  // ═════════════════════════════════════════════════════════════
   Widget _buildArtists(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final artists = [
@@ -890,9 +843,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // PODCASTS — versión compacta (para "Todo", limitada)
-  // ═════════════════════════════════════════════════════════════
   Widget _buildPodcasts(BuildContext context, {int? limit}) {
     if (_loadingLibrary) {
       return const SizedBox.shrink();
@@ -972,9 +922,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // PODCASTS — lista completa lazy (para filtro "Podcasts")
-  // ═════════════════════════════════════════════════════════════
   Widget _buildPodcastsList(BuildContext context) {
     if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
@@ -1061,9 +1008,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // DESCARGAS (mock)
-  // ═════════════════════════════════════════════════════════════
   Widget _buildDownloads(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final downloads = [
@@ -1129,9 +1073,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // VISTAS DETALLADAS (mock)
-  // ═════════════════════════════════════════════════════════════
   Widget _buildPlaylistsDetailed(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final playlists = [
@@ -1306,9 +1247,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // ═════════════════════════════════════════════════════════════
-  // WIDGETS REUTILIZABLES
-  // ═════════════════════════════════════════════════════════════
   Widget _buildDetailCard({
     required BuildContext context,
     required Widget leading,

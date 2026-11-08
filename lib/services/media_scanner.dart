@@ -9,7 +9,6 @@ import 'metadata_cache.dart';
 import 'metadata_reader.dart';
 import 'settings_service.dart';
 
-/// Resultado final del escaneo.
 class ScanResult {
   final List<Song> songs;
   final List<Song> podcasts;
@@ -26,21 +25,11 @@ class ScanResult {
   static const empty = ScanResult(songs: [], podcasts: [], errors: []);
 }
 
-/// Progreso emitido durante el escaneo (para feedback en vivo).
 class ScanProgress {
-  /// Canciones encontradas hasta ahora (solo música).
   final List<Song> songs;
-
-  /// Podcasts encontrados hasta ahora.
   final List<Song> podcasts;
-
-  /// Archivos ya procesados (música + podcasts).
   final int processedFiles;
-
-  /// Errores acumulados hasta ahora.
   final List<String> errors;
-
-  /// `true` cuando el escaneo terminó.
   final bool done;
 
   const ScanProgress({
@@ -72,132 +61,307 @@ class MediaScanner {
   bool _scanning = false;
   bool get isScanning => _scanning;
 
-  /// Último resultado completo (para no reescanear al volver a Library).
   ScanResult? _lastResult;
   ScanResult? get lastResult => _lastResult;
 
-  /// Escanea y emite progreso en vivo. El último evento tiene `done = true`.
-  Stream<ScanProgress> scanStream() async* {
-    if (_scanning) {
-      debugPrint('MediaScanner: ya hay un escaneo en curso');
-      // Emitimos el último resultado si lo hay; si no, vacío.
-      yield ScanProgress(
-        songs: _lastResult?.songs ?? const [],
-        podcasts: _lastResult?.podcasts ?? const [],
-        processedFiles: _lastResult?.totalCount ?? 0,
-        errors: _lastResult?.errors ?? const [],
-        done: true,
-      );
-      return;
+  bool _initialScanDone = false;
+  Completer<void>? _initialScanCompleter;
+
+  // Estado vivo del watcher (mutable entre eventos).
+  final List<Song> _liveSongs = [];
+  final List<Song> _livePodcasts = [];
+  final List<String> _liveErrors = [];
+
+  // Watcher persistente: se crea una sola vez.
+  StreamController<ScanProgress>? _watchController;
+  final List<StreamSubscription<FileSystemEvent>> _watchSubs = [];
+  final Map<String, Timer> _debounce = {};
+  final List<FileSystemEvent> _pending = [];
+  bool _draining = false;
+
+  // ─────────────────────────────────────────────────────────────
+  // ESCANEO INICIAL (llamar UNA vez al arrancar la app)
+  // ─────────────────────────────────────────────────────────────
+  Future<void> ensureInitialScan() {
+    if (_initialScanDone) return Future.value();
+    if (_initialScanCompleter != null) return _initialScanCompleter!.future;
+
+    _initialScanCompleter = Completer<void>();
+    _doInitialScan()
+        .then((_) {
+          _initialScanDone = true;
+          _initialScanCompleter!.complete();
+        })
+        .catchError((Object e, StackTrace st) {
+          _initialScanCompleter!.completeError(e, st);
+        });
+    return _initialScanCompleter!.future;
+  }
+
+  Future<void> _doInitialScan() async {
+    _liveErrors.clear();
+    _liveSongs.clear();
+    _livePodcasts.clear();
+
+    final settings = await SettingsService.instance.load();
+
+    await for (final s in _scanDirsStream(
+      dirs: settings.musicDirs,
+      kind: MediaKind.music,
+      errors: _liveErrors,
+    )) {
+      _liveSongs.add(s);
     }
-    _scanning = true;
 
-    final errors = <String>[];
-    final songs = <Song>[];
-    final podcasts = <Song>[];
-    int processed = 0;
+    await for (final s in _scanDirsStream(
+      dirs: settings.podcastDirs,
+      kind: MediaKind.podcast,
+      errors: _liveErrors,
+    )) {
+      _livePodcasts.add(s);
+    }
 
-    // Emitimos estado inicial.
-    yield ScanProgress(
-      songs: List.unmodifiable(songs),
-      podcasts: List.unmodifiable(podcasts),
-      processedFiles: processed,
-      errors: List.unmodifiable(errors),
-      done: false,
-    );
+    _sortInPlace(_liveSongs);
+    _sortInPlace(_livePodcasts);
+
+    final existing = <String>{
+      ..._liveSongs.map((s) => s.path),
+      ..._livePodcasts.map((s) => s.path),
+    };
+    await MetadataCache.instance.prune(existing);
+    await MetadataCache.instance.flush();
+
+    _publishResult();
+    _emitSnapshot();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // WATCHER (solo observa; no escanea)
+  // ─────────────────────────────────────────────────────────────
+  Stream<ScanProgress> watchStream() {
+    if (_watchController == null || _watchController!.isClosed) {
+      _watchController = StreamController<ScanProgress>.broadcast(
+        onListen: _startWatcher,
+        onCancel: _stopWatcherIfNoListeners,
+      );
+    }
+
+    if (_lastResult != null) {
+      scheduleMicrotask(() {
+        if (_watchController == null || _watchController!.isClosed) return;
+        _watchController!.add(
+          ScanProgress(
+            songs: _lastResult!.songs,
+            podcasts: _lastResult!.podcasts,
+            processedFiles: _lastResult!.totalCount,
+            errors: _lastResult!.errors,
+            done: false,
+          ),
+        );
+      });
+    }
+
+    return _watchController!.stream;
+  }
+
+  Future<void> _startWatcher() async {
+    if (_watchSubs.isNotEmpty) return;
 
     try {
       final settings = await SettingsService.instance.load();
+      final allDirs = <String>{...settings.musicDirs, ...settings.podcastDirs};
 
-      // Música
-      await for (final s in _scanDirsStream(
-        dirs: settings.musicDirs,
-        kind: MediaKind.music,
-        errors: errors,
-      )) {
-        songs.add(s);
-        processed++;
-        yield ScanProgress(
-          songs: List.unmodifiable(songs),
-          podcasts: List.unmodifiable(podcasts),
-          processedFiles: processed,
-          errors: List.unmodifiable(errors),
-          done: false,
-        );
+      for (final dirPath in allDirs) {
+        final dir = Directory(dirPath);
+        if (!await dir.exists()) {
+          _liveErrors.add('No existe: $dirPath');
+          continue;
+        }
+        try {
+          final sub = dir
+              .watch(recursive: true)
+              .listen(
+                _schedule,
+                onError: (Object e) => _liveErrors.add('Watcher $dirPath: $e'),
+              );
+          _watchSubs.add(sub);
+        } catch (e) {
+          _liveErrors.add('No se pudo observar $dirPath: $e');
+        }
       }
-
-      // Podcasts
-      await for (final s in _scanDirsStream(
-        dirs: settings.podcastDirs,
-        kind: MediaKind.podcast,
-        errors: errors,
-      )) {
-        podcasts.add(s);
-        processed++;
-        yield ScanProgress(
-          songs: List.unmodifiable(songs),
-          podcasts: List.unmodifiable(podcasts),
-          processedFiles: processed,
-          errors: List.unmodifiable(errors),
-          done: false,
-        );
-      }
-
-      // Orden final + caché
-      songs.sort(
-        (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
-      );
-      podcasts.sort(
-        (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
-      );
-
-      final existing = <String>{
-        ...songs.map((s) => s.path),
-        ...podcasts.map((s) => s.path),
-      };
-      await MetadataCache.instance.prune(existing);
-      await MetadataCache.instance.flush();
-
-      _lastResult = ScanResult(
-        songs: List.unmodifiable(songs),
-        podcasts: List.unmodifiable(podcasts),
-        errors: List.unmodifiable(errors),
-      );
     } catch (e) {
-      errors.add('Error general: $e');
-      debugPrint('MediaScanner.scan error: $e');
+      _liveErrors.add('Watcher: $e');
+    }
+  }
+
+  void _stopWatcherIfNoListeners() {
+    if (_watchController == null || _watchController!.isClosed) return;
+    if (!_watchController!.hasListener) {
+      for (final s in _watchSubs) {
+        s.cancel();
+      }
+      _watchSubs.clear();
+      for (final t in _debounce.values) {
+        t.cancel();
+      }
+      _debounce.clear();
+      _pending.clear();
+    }
+  }
+
+  void _emitSnapshot() {
+    if (_watchController == null || _watchController!.isClosed) return;
+    _watchController!.add(
+      ScanProgress(
+        songs: List.unmodifiable(_liveSongs),
+        podcasts: List.unmodifiable(_livePodcasts),
+        processedFiles: _liveSongs.length + _livePodcasts.length,
+        errors: List.unmodifiable(_liveErrors),
+        done: false,
+      ),
+    );
+  }
+
+  void _schedule(FileSystemEvent ev) {
+    final key = ev.path;
+    _debounce[key]?.cancel();
+    _debounce[key] = Timer(const Duration(milliseconds: 400), () {
+      _pending.add(ev);
+      _drain();
+    });
+  }
+
+  Future<void> _drain() async {
+    if (_draining) return;
+    _draining = true;
+    try {
+      while (_pending.isNotEmpty) {
+        final ev = _pending.removeAt(0);
+        try {
+          await _handleFsEvent(ev);
+          _publishResult();
+          _emitSnapshot();
+        } catch (e) {
+          debugPrint('Watcher: error en ${ev.path}: $e');
+        }
+      }
     } finally {
-      _scanning = false;
+      _draining = false;
     }
+  }
 
-    debugPrint(
-      'MediaScanner: ${songs.length} canciones, ${podcasts.length} podcasts',
-    );
+  // ─────────────────────────────────────────────────────────────
+  // HANDLER DE EVENTOS FS
+  // ─────────────────────────────────────────────────────────────
+  Future<void> _handleFsEvent(FileSystemEvent ev) async {
+    final path = ev.path;
+    final ext = p.extension(path).replaceFirst('.', '').toLowerCase();
+    final isAudio = _audioExts.contains(ext);
 
-    yield ScanProgress(
-      songs: List.unmodifiable(songs),
-      podcasts: List.unmodifiable(podcasts),
-      processedFiles: processed,
-      errors: List.unmodifiable(errors),
-      done: true,
+    switch (ev.type) {
+      case FileSystemEvent.create:
+      case FileSystemEvent.modify:
+        if (isAudio) {
+          final file = File(path);
+          if (!await file.exists()) return;
+          final kind = await _kindForPath(path);
+          final song = await _buildSong(
+            entity: file,
+            ext: ext,
+            kind: kind,
+            cache: MetadataCache.instance,
+            coversDir: await MetadataCache.instance.coversDir(),
+          );
+          if (song == null) return;
+          final list = kind == MediaKind.music ? _liveSongs : _livePodcasts;
+          final idx = list.indexWhere((s) => s.path == path);
+          if (idx >= 0) {
+            list[idx] = song;
+          } else {
+            list.add(song);
+          }
+          _sortInPlace(list);
+        } else if (ev is FileSystemCreateEvent && ev.isDirectory) {
+          final kind = await _kindForPath(path);
+          await for (final s in _scanDirsStream(
+            dirs: [path],
+            kind: kind,
+            errors: _liveErrors,
+          )) {
+            final list = kind == MediaKind.music ? _liveSongs : _livePodcasts;
+            if (!list.any((x) => x.path == s.path)) list.add(s);
+          }
+          _sortInPlace(_liveSongs);
+          _sortInPlace(_livePodcasts);
+        }
+        break;
+
+      case FileSystemEvent.delete:
+        if (isAudio) {
+          _liveSongs.removeWhere((s) => s.path == path);
+          _livePodcasts.removeWhere((s) => s.path == path);
+          await MetadataCache.instance.prune({
+            ..._liveSongs.map((s) => s.path),
+            ..._livePodcasts.map((s) => s.path),
+          });
+        } else {
+          final prefix = path.endsWith(p.separator)
+              ? path
+              : '$path${p.separator}';
+          final had =
+              _liveSongs.any((s) => s.path.startsWith(prefix)) ||
+              _livePodcasts.any((s) => s.path.startsWith(prefix));
+          if (had) {
+            _liveSongs.removeWhere((s) => s.path.startsWith(prefix));
+            _livePodcasts.removeWhere((s) => s.path.startsWith(prefix));
+            await MetadataCache.instance.prune({
+              ..._liveSongs.map((s) => s.path),
+              ..._livePodcasts.map((s) => s.path),
+            });
+          }
+        }
+        break;
+
+      case FileSystemEvent.move:
+        _liveSongs.removeWhere((s) => s.path == path);
+        _livePodcasts.removeWhere((s) => s.path == path);
+        break;
+    }
+  }
+
+  Future<MediaKind> _kindForPath(String path) async {
+    final settings = await SettingsService.instance.load();
+    for (final d in settings.podcastDirs) {
+      if (path == d || p.isWithin(d, path)) return MediaKind.podcast;
+    }
+    return MediaKind.music;
+  }
+
+  void _sortInPlace(List<Song> list) {
+    list.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+  }
+
+  void _publishResult() {
+    _lastResult = ScanResult(
+      songs: List.unmodifiable(_liveSongs),
+      podcasts: List.unmodifiable(_livePodcasts),
+      errors: List.unmodifiable(_liveErrors),
     );
   }
 
-  /// Versión "one-shot" que consume el stream y devuelve el resultado final.
+  // ─────────────────────────────────────────────────────────────
+  // ONE-SHOT para refresh manual
+  // ─────────────────────────────────────────────────────────────
   Future<ScanResult> scan() async {
-    ScanProgress? last;
-    await for (final p in scanStream()) {
-      last = p;
-    }
-    if (last == null) return ScanResult.empty;
-    return ScanResult(
-      songs: last.songs,
-      podcasts: last.podcasts,
-      errors: last.errors,
-    );
+    _initialScanDone = false;
+    _initialScanCompleter = null;
+    await ensureInitialScan();
+    return _lastResult ?? ScanResult.empty;
   }
 
-  /// Emite cada [Song] encontrado en [dirs].
+  // ─────────────────────────────────────────────────────────────
+  // Helpers de walk / build
+  // ─────────────────────────────────────────────────────────────
   Stream<Song> _scanDirsStream({
     required List<String> dirs,
     required MediaKind kind,
@@ -237,13 +401,11 @@ class MediaScanner {
         followLinks: false,
       )) {
         if (entity is! File) continue;
-
         final ext = p
             .extension(entity.path)
             .replaceFirst('.', '')
             .toLowerCase();
         if (!_audioExts.contains(ext)) continue;
-
         try {
           final song = await _buildSong(
             entity: entity,
@@ -284,7 +446,6 @@ class MediaScanner {
       album = cached.album;
       duration = cached.duration;
       coverPath = cached.coverPath;
-
       if (coverPath != null && !await File(coverPath).exists()) {
         coverPath = null;
       }
