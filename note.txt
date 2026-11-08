@@ -1,0 +1,69 @@
+git fetch origin
+git reset --hard origin/main
+git clean -fd
+
+git add .
+git commit -m ""
+git push
+
+flutter run --release -d ZY22MVWFP4
+flutter build apk --release
+flutter run --release -d ugdeofcujrx8e6bm
+
+dart pub global activate fastforge
+export PATH="$PATH":"$HOME/.pub-cache/bin"
+flutter build linux --release
+fastforge package --platform linux --targets deb
+fastforge package --platform linux --targets appimage
+
+stargazer vs impostor
+
+source "$HOME/.cargo/env"
+
+separar en otro hilo el escaneo de los archivos
+
+cd /home/rotsen/Projects/decibex
+flutter clean
+flutter pub get
+flutter build linux --release
+
+
+cd /home/rotsen/Projects/decibex
+
+APP="decibex"
+VERSION="0.1.0"
+ARCH="amd64"
+BUNDLE="build/linux/x64/release/bundle"
+PKG="build/deb/${APP}_${VERSION}_${ARCH}"
+
+test -d "$BUNDLE" || exit 1
+test -x "$BUNDLE/DecibeX" || { echo "No se encuentra el ejecutable DecibeX"; exit 1; }
+
+mkdir -p "$PKG/DEBIAN"
+mkdir -p "$PKG/opt/decibex"
+mkdir -p "$PKG/usr/share/applications"
+
+cp -a "$BUNDLE/." "$PKG/opt/decibex/"
+
+cat > "$PKG/DEBIAN/control" <<EOF
+Package: decibex
+Version: $VERSION
+Section: sound
+Priority: optional
+Architecture: $ARCH
+Maintainer: DecibeX
+Description: Reproductor de musica DecibeX
+ Reproductor de musica multiplataforma desarrollado con Flutter.
+EOF
+
+cat > "$PKG/usr/share/applications/decibex.desktop" <<EOF
+[Desktop Entry]
+Name=DecibeX
+Comment=Reproductor de musica
+Exec=/opt/decibex/DecibeX
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Player;
+EOF
+
+dpkg-deb --root-owner-group --build "$PKG" "build/decibex_${VERSION}_${ARCH}.deb"

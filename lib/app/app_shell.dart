@@ -14,6 +14,7 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   int _selectedIndex = 0;
+  int _previousIndex = 0;
 
   final List<Widget> _screens = const [
     HomeScreen(),
@@ -46,13 +47,29 @@ class _AppShellState extends State<AppShell> {
   ];
 
   void _onItemTapped(int index) {
-    setState(() => _selectedIndex = index);
+    if (index == _selectedIndex) return;
+    setState(() {
+      _previousIndex = _selectedIndex;
+      _selectedIndex = index;
+    });
   }
+
+  int get _slideDirection => _selectedIndex > _previousIndex ? 1 : -1;
 
   @override
   Widget build(BuildContext context) {
     final isWide = MediaQuery.sizeOf(context).width >= 800;
     final scheme = Theme.of(context).colorScheme;
+
+    // Misma animación en ambos layouts: fade + slide direccional + scale.
+    final animatedContent = ClipRect(
+      child: _AnimatedTabContent(
+        selectedIndex: _selectedIndex,
+        previousIndex: _previousIndex,
+        slideDirection: _slideDirection,
+        screens: _screens,
+      ),
+    );
 
     if (isWide) {
       // ---------- Tablet / PC ----------
@@ -73,7 +90,7 @@ class _AppShellState extends State<AppShell> {
               thickness: 1,
               color: scheme.outlineVariant,
             ),
-            Expanded(child: _screens[_selectedIndex]),
+            Expanded(child: animatedContent),
           ],
         ),
       );
@@ -81,7 +98,29 @@ class _AppShellState extends State<AppShell> {
 
     // ---------- Móvil ----------
     return Scaffold(
-      appBar: AppBar(title: Text(_destinations[_selectedIndex].label)),
+      appBar: AppBar(
+        title: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 250),
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          transitionBuilder: (child, animation) {
+            return FadeTransition(
+              opacity: animation,
+              child: SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(0, 0.2),
+                  end: Offset.zero,
+                ).animate(animation),
+                child: child,
+              ),
+            );
+          },
+          child: Text(
+            _destinations[_selectedIndex].label,
+            key: ValueKey<int>(_selectedIndex),
+          ),
+        ),
+      ),
       drawer: _StyledDrawer(
         selectedIndex: _selectedIndex,
         onItemTapped: (i) {
@@ -91,7 +130,82 @@ class _AppShellState extends State<AppShell> {
         destinations: _destinations,
         scheme: scheme,
       ),
-      body: _screens[_selectedIndex],
+      body: animatedContent,
+    );
+  }
+}
+
+// ============================================================
+// CONTENIDO ANIMADO ENTRE PESTAÑAS (idéntico en todos los tamaños)
+// ============================================================
+class _AnimatedTabContent extends StatelessWidget {
+  final int selectedIndex;
+  final int previousIndex;
+  final int slideDirection;
+  final List<Widget> screens;
+
+  const _AnimatedTabContent({
+    required this.selectedIndex,
+    required this.previousIndex,
+    required this.slideDirection,
+    required this.screens,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 320),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      layoutBuilder: (currentChild, previousChildren) {
+        // Stack passthrough: respeta el tamaño del padre (Expanded en wide).
+        // Las pantallas salientes se ignoran para eventos.
+        return Stack(
+          fit: StackFit.passthrough,
+          children: [
+            ...previousChildren.map((child) => IgnorePointer(child: child)),
+            if (currentChild != null) currentChild,
+          ],
+        );
+      },
+      transitionBuilder: (child, animation) {
+        final isIncoming = child.key == ValueKey<int>(selectedIndex);
+
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        );
+
+        // Fade siempre presente.
+        final faded = FadeTransition(opacity: curved, child: child);
+
+        // Scale sutil: solo la entrante crece 0.98 -> 1.0.
+        final scaled = ScaleTransition(
+          scale: Tween<double>(
+            begin: isIncoming ? 0.98 : 1.0,
+            end: 1.0,
+          ).animate(curved),
+          child: faded,
+        );
+
+        // Slide direccional: entra desde donde toca según el índice.
+        final beginOffset = Offset(
+          isIncoming ? 0.18 * slideDirection : -0.18 * slideDirection,
+          0,
+        );
+
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: beginOffset,
+            end: Offset.zero,
+          ).animate(curved),
+          child: scaled,
+        );
+      },
+      child: KeyedSubtree(
+        key: ValueKey<int>(selectedIndex),
+        child: screens[selectedIndex],
+      ),
     );
   }
 }
@@ -398,6 +512,7 @@ class _DrawerItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = selected ? scheme.onSurface : scheme.onSurfaceVariant;
+
     return Material(
       color: selected ? scheme.surfaceContainerHigh : Colors.transparent,
       borderRadius: BorderRadius.circular(14),
@@ -433,6 +548,8 @@ class _DrawerItem extends StatelessWidget {
   }
 }
 
+// ============================================================
+// MODELO
 // ============================================================
 class _NavDestination {
   final IconData icon;
