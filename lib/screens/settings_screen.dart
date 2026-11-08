@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../services/settings_service.dart';
@@ -463,11 +464,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: 'Directorios donde se escanean canciones',
             dirs: _settings.musicDirs,
             onRemove: (dir) => _update((s) => s.musicDirs.remove(dir)),
-            onAdd: () => _addDirectory(
+            onAdd: () => _pickDirectory(
               context,
               title: 'Agregar directorio de música',
-              onAdded: (path) => _update((s) => s.musicDirs.add(path)),
               existing: _settings.musicDirs,
+              onAdded: (path) => _update((s) => s.musicDirs.add(path)),
             ),
           ),
           _divider(context),
@@ -478,11 +479,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: 'Directorios donde se escanean episodios',
             dirs: _settings.podcastDirs,
             onRemove: (dir) => _update((s) => s.podcastDirs.remove(dir)),
-            onAdd: () => _addDirectory(
+            onAdd: () => _pickDirectory(
               context,
               title: 'Agregar directorio de podcasts',
-              onAdded: (path) => _update((s) => s.podcastDirs.add(path)),
               existing: _settings.podcastDirs,
+              onAdded: (path) => _update((s) => s.podcastDirs.add(path)),
             ),
           ),
         ],
@@ -642,45 +643,71 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Future<void> _addDirectory(
+  // ─────────────────────────────────────────────────────────────
+  // SELECTOR DE DIRECTORIOS (nativo con file_picker)
+  // ─────────────────────────────────────────────────────────────
+  Future<void> _pickDirectory(
     BuildContext context, {
     required String title,
     required void Function(String) onAdded,
     required List<String> existing,
   }) async {
-    final controller = TextEditingController();
-    final path = await showDialog<String>(
+    try {
+      final selected = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: title,
+      );
+
+      if (selected == null || selected.trim().isEmpty) return;
+
+      // Normaliza (evita duplicados con o sin slash final)
+      final normalized = selected.trim().replaceAll(RegExp(r'/+$'), '');
+      final alreadyExists = existing.any(
+        (d) => d.replaceAll(RegExp(r'/+$'), '') == normalized,
+      );
+
+      if (alreadyExists) {
+        if (context.mounted) {
+          await _showInfoDialog(
+            context,
+            title: 'Directorio duplicado',
+            message: 'Esa carpeta ya está en la lista.',
+          );
+        }
+        return;
+      }
+
+      onAdded(normalized);
+    } catch (e) {
+      if (context.mounted) {
+        await _showInfoDialog(
+          context,
+          title: 'Error',
+          message: 'No se pudo abrir el selector de carpetas:\n$e',
+        );
+      }
+    }
+  }
+
+  Future<void> _showInfoDialog(
+    BuildContext context, {
+    required String title,
+    required String message,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
+        icon: Icon(Icons.info_outline, color: scheme.primary),
         title: Text(title),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            labelText: 'Ruta del directorio',
-            hintText: '/storage/emulated/0/...',
-          ),
-          autofocus: true,
-        ),
+        content: Text(message),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar'),
-          ),
-          TextButton(
-            onPressed: () {
-              final value = controller.text.trim();
-              if (value.isNotEmpty && !existing.contains(value)) {
-                Navigator.pop(ctx, value);
-              }
-            },
-            child: const Text('Añadir'),
+            child: const Text('Entendido'),
           ),
         ],
       ),
     );
-    if (path != null && path.isNotEmpty) {
-      onAdded(path);
-    }
   }
 
   // ─────────────────────────────────────────────────────────────
