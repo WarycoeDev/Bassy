@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../models/playlist.dart';
 import '../models/song.dart';
 import '../services/media_scanner.dart';
 import '../widgets/song_tile.dart';
+import 'playlist_detail_screen.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -16,7 +19,14 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   int _selectedFilter = 0;
   bool _slideFromRight = true;
-  final ScrollController _scrollController = ScrollController();
+
+  // Un ScrollController por pestaña para evitar compartir posiciones
+  // entre ListViews simultáneos (AnimatedSwitcher mantiene vivo el saliente).
+  final Map<int, ScrollController> _scrollControllers = {};
+
+  ScrollController _controllerFor(int index) {
+    return _scrollControllers.putIfAbsent(index, () => ScrollController());
+  }
 
   List<Song> _songs = const [];
   List<Song> _podcasts = const [];
@@ -25,6 +35,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _scanning = false;
   int _processedFiles = 0;
   String? _scanStatus;
+
+  // Grupos memoizados (se recalculan solo cuando cambia _songs/_podcasts).
+  List<Playlist> _albumPlaylists = const [];
+  List<Playlist> _artistPlaylists = const [];
+  List<Playlist> _podcastPlaylists = const [];
 
   StreamSubscription<ScanProgress>? _scanSub;
 
@@ -49,9 +64,35 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void dispose() {
     _scanSub?.cancel();
-    _scrollController.dispose();
+    for (final c in _scrollControllers.values) {
+      c.dispose();
+    }
+    _scrollControllers.clear();
     super.dispose();
   }
+
+  // -------------------------------------------------------------------------
+  // Agrupaciones / carátulas
+  // -------------------------------------------------------------------------
+
+  void _recomputeGroups() {
+    _albumPlaylists = Playlist.fromAlbums(_songs);
+    _artistPlaylists = Playlist.fromArtists(_songs);
+    _podcastPlaylists = Playlist.fromPodcasts(_podcasts);
+  }
+
+  /// Primera carátula disponible entre las canciones de una playlist.
+  String? _playlistCover(Playlist playlist) {
+    for (final s in playlist.songs) {
+      final p = s.coverPath;
+      if (p != null && p.isNotEmpty) return p;
+    }
+    return null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Ciclo de escaneo
+  // -------------------------------------------------------------------------
 
   void _startWatching() {
     final last = MediaScanner.instance.lastResult;
@@ -64,6 +105,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _songs = last.songs;
         _podcasts = last.podcasts;
       }
+      _recomputeGroups();
     });
 
     _scanSub?.cancel();
@@ -78,6 +120,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _loadingLibrary = false;
           _scanning = p.scanning;
           _scanStatus = p.statusMessage;
+          _recomputeGroups();
         });
       },
       onError: (Object e) {
@@ -111,8 +154,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _scanning = false;
       _scanStatus = null;
       _loadingLibrary = false;
+      _recomputeGroups();
     });
   }
+
+  // -------------------------------------------------------------------------
+  // Navegación
+  // -------------------------------------------------------------------------
 
   void _changeFilter(int index) {
     if (index == _selectedFilter) return;
@@ -124,11 +172,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.jumpTo(0);
+      final c = _scrollControllers[index];
+      if (c != null && c.hasClients) {
+        c.jumpTo(0);
       }
     });
   }
+
+  void _openPlaylist(BuildContext context, Playlist playlist) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PlaylistDetailScreen(playlist: playlist),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // build
+  // -------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -186,7 +247,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildScrollableContent(BuildContext context) {
     if (_selectedFilter == 0) {
       return ListView(
-        controller: _scrollController,
+        controller: _controllerFor(0),
         padding: const EdgeInsets.symmetric(horizontal: 16),
         children: [
           const SizedBox(height: 8),
@@ -243,7 +304,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
 
     return ListView(
-      controller: _scrollController,
+      controller: _controllerFor(_selectedFilter),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       children: [
         const SizedBox(height: 8),
@@ -267,6 +328,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         return [];
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Progreso / cabecera / chips
+  // -------------------------------------------------------------------------
 
   Widget _buildScanProgress(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -416,7 +481,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         child: Icon(
           icon,
           color: onTap == null
-              ? scheme.onSurfaceVariant.withOpacity(0.4)
+              ? scheme.onSurfaceVariant.withValues(alpha: 0.4)
               : scheme.onSurface,
           size: 22,
         ),
@@ -516,13 +581,55 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
     }
 
-    final count = limit == null ? _songs.length : _songs.length.clamp(0, limit);
+    final extent = _songTileExtent;
 
+    // Cuando se usa en la pestaña "Todo" (con limit), mostramos TODAS las
+    // canciones en un contenedor de altura fija con scroll propio.
+    if (limit != null) {
+      final scheme = Theme.of(context).colorScheme;
+      const visibleRows = 4.5;
+      final boxHeight = extent * visibleRows + 8; // +8 por el padding vertical
+
+      return Container(
+        height: boxHeight,
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: scheme.outlineVariant.withValues(alpha: 0.6),
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: ListView.separated(
+          primary: false,
+          physics: const ClampingScrollPhysics(),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          itemCount: _songs.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 2),
+          itemBuilder: (context, index) {
+            final song = _songs[index];
+            return SizedBox(
+              height: extent,
+              child: RepaintBoundary(
+                key: ValueKey<String>(song.path),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: SongTile(song: song),
+                ),
+              ),
+            );
+          },
+        ),
+      );
+    }
+
+    // Listado completo en la pestaña "Canciones" (sin cambios).
     return ListView.builder(
       shrinkWrap: true,
+      primary: false,
       physics: const NeverScrollableScrollPhysics(),
-      itemCount: count,
-      itemExtent: _songTileExtent,
+      itemCount: _songs.length,
+      itemExtent: extent,
       itemBuilder: (context, index) {
         final song = _songs[index];
         return RepaintBoundary(
@@ -534,12 +641,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildSongsList(BuildContext context) {
+    final controller = _controllerFor(1);
+
     if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_songs.isEmpty) {
       return ListView(
-        controller: _scrollController,
+        controller: controller,
         padding: const EdgeInsets.all(16),
         children: [
           _buildEmptyState(
@@ -555,7 +664,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
 
     return ListView.builder(
-      controller: _scrollController,
+      controller: controller,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       itemCount: _songs.length,
       itemExtent: _songTileExtent,
@@ -568,6 +677,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       },
     );
   }
+
+  // -------------------------------------------------------------------------
+  // Estado vacío
+  // -------------------------------------------------------------------------
 
   Widget _buildEmptyState(
     BuildContext context, {
@@ -611,242 +724,230 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _buildPlaylists(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final playlists = [
-      {
-        'title': 'Road Trip',
-        'count': '42 canciones',
-        'icon': Icons.directions_car,
-      },
-      {
-        'title': 'Chill Vibes',
-        'count': '28 canciones',
-        'icon': Icons.nightlight,
-      },
-      {
-        'title': 'Workout',
-        'count': '35 canciones',
-        'icon': Icons.fitness_center,
-      },
-      {'title': 'Focus', 'count': '19 canciones', 'icon': Icons.psychology},
-    ];
+  // -------------------------------------------------------------------------
+  // Playlists (placeholder — sin persistencia todavía)
+  // -------------------------------------------------------------------------
 
-    return SizedBox(
-      height: 200,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: playlists.length,
-        itemBuilder: (context, index) {
-          final playlist = playlists[index];
-          return Container(
-            width: 150,
-            margin: const EdgeInsets.only(right: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  height: 140,
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: scheme.outlineVariant),
-                  ),
-                  child: Stack(
-                    children: [
-                      Center(
-                        child: Icon(
-                          playlist['icon'] as IconData,
-                          size: 52,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                      Positioned(
-                        bottom: 10,
-                        right: 10,
-                        child: Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: BoxDecoration(
-                            color: scheme.primary,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            Icons.play_arrow,
-                            color: scheme.onPrimary,
-                            size: 18,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  playlist['title'] as String,
-                  style: TextStyle(
-                    color: scheme.onSurface,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 14,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  playlist['count'] as String,
-                  style: TextStyle(
-                    color: scheme.onSurfaceVariant,
-                    fontSize: 12,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          );
-        },
-      ),
+  Widget _buildPlaylists(BuildContext context) {
+    return _buildEmptyState(
+      context,
+      icon: Icons.queue_music,
+      title: 'Sin playlists',
+      subtitle: 'Las playlists personalizadas llegarán pronto.',
     );
   }
+
+  Widget _buildPlaylistsDetailed(BuildContext context) =>
+      _buildPlaylists(context);
+
+  // -------------------------------------------------------------------------
+  // Álbumes
+  // -------------------------------------------------------------------------
 
   Widget _buildAlbums(BuildContext context) {
+    if (_loadingLibrary) return const SizedBox.shrink();
+    final albums = _albumPlaylists;
+    if (albums.isEmpty) {
+      return _buildEmptyState(
+        context,
+        icon: Icons.album_outlined,
+        title: 'No hay álbumes',
+        subtitle: 'Las canciones necesitan metadatos de álbum para agruparse.',
+      );
+    }
     final scheme = Theme.of(context).colorScheme;
-    final albums = [
-      {'title': 'After Hours', 'artist': 'The Weeknd', 'year': '2020'},
-      {'title': 'Future Nostalgia', 'artist': 'Dua Lipa', 'year': '2020'},
-      {'title': 'Justice', 'artist': 'Justin Bieber', 'year': '2021'},
-    ];
-
+    final list = albums.take(10).toList();
     return SizedBox(
-      height: 180,
+      // 140 cover + 8 sep + 19 título + 2 sep + 17 subtítulo + 6 margen
+      height: 192,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
-        itemCount: albums.length,
+        itemCount: list.length,
         itemBuilder: (context, index) {
-          final album = albums[index];
-          return Container(
-            width: 150,
-            margin: const EdgeInsets.only(right: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  height: 140,
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        scheme.surfaceContainerHigh,
-                        scheme.surfaceContainer,
+          final album = list[index];
+          final coverPath = _playlistCover(album);
+          return GestureDetector(
+            onTap: () => _openPlaylist(context, album),
+            child: Container(
+              width: 150,
+              margin: const EdgeInsets.only(right: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    height: 140,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: scheme.outlineVariant),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _buildCoverImageOrIcon(
+                          context,
+                          coverPath: coverPath,
+                          fallbackIcon: Icons.album,
+                          iconSize: 52,
+                        ),
+                        Positioned(
+                          bottom: 8,
+                          right: 8,
+                          child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: scheme.primary,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              Icons.play_arrow,
+                              color: scheme.onPrimary,
+                              size: 20,
+                            ),
+                          ),
+                        ),
                       ],
                     ),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: scheme.outlineVariant),
                   ),
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        top: 12,
-                        left: 12,
-                        right: 12,
-                        child: Text(
-                          album['title'] as String,
-                          style: TextStyle(
-                            color: scheme.onSurface,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        bottom: 8,
-                        right: 8,
-                        child: Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: BoxDecoration(
-                            color: scheme.primary,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            Icons.play_arrow,
-                            color: scheme.onPrimary,
-                            size: 20,
-                          ),
-                        ),
-                      ),
-                    ],
+                  const SizedBox(height: 8),
+                  Text(
+                    album.title,
+                    style: TextStyle(
+                      color: scheme.onSurface,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '${album['artist']} · ${album['year']}',
-                  style: TextStyle(
-                    color: scheme.onSurfaceVariant,
-                    fontSize: 12,
+                  const SizedBox(height: 2),
+                  Text(
+                    '${album.subtitle} · ${album.count}',
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 12,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+                ],
+              ),
             ),
           );
         },
       ),
     );
   }
+
+  Widget _buildAlbumsDetailed(BuildContext context) {
+    if (_loadingLibrary)
+      return const Center(child: CircularProgressIndicator());
+    final albums = _albumPlaylists;
+    if (albums.isEmpty) {
+      return _buildEmptyState(
+        context,
+        icon: Icons.album_outlined,
+        title: 'No hay álbumes',
+        subtitle: 'Las canciones necesitan metadatos de álbum.',
+      );
+    }
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: albums.map((album) {
+        final coverPath = _playlistCover(album);
+        return GestureDetector(
+          onTap: () => _openPlaylist(context, album),
+          child: _buildDetailCard(
+            context: context,
+            leading: _buildSquareCover(
+              context,
+              coverPath: coverPath,
+              fallbackIcon: Icons.album,
+              size: 64,
+              rounded: 10,
+            ),
+            title: album.title,
+            subtitle: album.subtitle,
+            meta: '${album.count} pistas · ${album.totalDurationLabel}',
+            trailing: Icon(
+              Icons.chevron_right,
+              color: scheme.onSurfaceVariant,
+              size: 24,
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Artistas
+  // -------------------------------------------------------------------------
 
   Widget _buildArtists(BuildContext context) {
+    if (_loadingLibrary) return const SizedBox.shrink();
+    final artists = _artistPlaylists;
+    if (artists.isEmpty) {
+      return _buildEmptyState(
+        context,
+        icon: Icons.person_outline,
+        title: 'No hay artistas',
+        subtitle:
+            'Las canciones necesitan metadatos de artista para agruparse.',
+      );
+    }
     final scheme = Theme.of(context).colorScheme;
-    final artists = [
-      {'name': 'The Weeknd', 'songs': '12 canciones'},
-      {'name': 'Dua Lipa', 'songs': '8 canciones'},
-      {'name': 'Bad Bunny', 'songs': '15 canciones'},
-      {'name': 'Karol G', 'songs': '10 canciones'},
-    ];
-
+    final list = artists.take(10).toList();
     return SizedBox(
-      height: 120,
+      // 76 avatar + 8 sep + 19 nombre + 17 contador + 16 margen
+      height: 136,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
-        itemCount: artists.length,
+        itemCount: list.length,
         itemBuilder: (context, index) {
-          final artist = artists[index];
-          return Container(
-            width: 100,
-            margin: const EdgeInsets.only(right: 12),
-            child: Column(
-              children: [
-                CircleAvatar(
-                  radius: 38,
-                  backgroundColor: scheme.surfaceContainerHigh,
-                  child: Icon(
-                    Icons.person,
-                    color: scheme.onSurfaceVariant,
-                    size: 38,
+          final artist = list[index];
+          final coverPath = _playlistCover(artist);
+          return GestureDetector(
+            onTap: () => _openPlaylist(context, artist),
+            child: Container(
+              width: 100,
+              margin: const EdgeInsets.only(right: 12),
+              child: Column(
+                children: [
+                  ClipOval(
+                    child: SizedBox(
+                      width: 76,
+                      height: 76,
+                      child: _buildCoverImageOrIcon(
+                        context,
+                        coverPath: coverPath,
+                        fallbackIcon: Icons.person,
+                        iconSize: 38,
+                      ),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  artist['name'] as String,
-                  style: TextStyle(
-                    color: scheme.onSurface,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
+                  const SizedBox(height: 8),
+                  Text(
+                    artist.title,
+                    style: TextStyle(
+                      color: scheme.onSurface,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  artist['songs'] as String,
-                  style: TextStyle(
-                    color: scheme.onSurfaceVariant,
-                    fontSize: 11,
+                  Text(
+                    '${artist.count} canciones',
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 11,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+                ],
+              ),
             ),
           );
         },
@@ -854,11 +955,59 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _buildPodcasts(BuildContext context, {int? limit}) {
-    if (_loadingLibrary) {
-      return const SizedBox.shrink();
+  Widget _buildArtistsDetailed(BuildContext context) {
+    if (_loadingLibrary)
+      return const Center(child: CircularProgressIndicator());
+    final artists = _artistPlaylists;
+    if (artists.isEmpty) {
+      return _buildEmptyState(
+        context,
+        icon: Icons.person_outline,
+        title: 'No hay artistas',
+        subtitle: 'Las canciones necesitan metadatos de artista.',
+      );
     }
-    if (_podcasts.isEmpty) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: artists.map((artist) {
+        final coverPath = _playlistCover(artist);
+        return GestureDetector(
+          onTap: () => _openPlaylist(context, artist),
+          child: _buildDetailCard(
+            context: context,
+            leading: ClipOval(
+              child: SizedBox(
+                width: 64,
+                height: 64,
+                child: _buildCoverImageOrIcon(
+                  context,
+                  coverPath: coverPath,
+                  fallbackIcon: Icons.person,
+                  iconSize: 32,
+                ),
+              ),
+            ),
+            title: artist.title,
+            subtitle: artist.subtitle,
+            trailing: Icon(
+              Icons.chevron_right,
+              color: scheme.onSurfaceVariant,
+              size: 24,
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Podcasts
+  // -------------------------------------------------------------------------
+
+  Widget _buildPodcasts(BuildContext context, {int? limit}) {
+    if (_loadingLibrary) return const SizedBox.shrink();
+    final podcasts = _podcastPlaylists;
+    if (podcasts.isEmpty) {
       return _buildEmptyState(
         context,
         icon: Icons.podcasts_outlined,
@@ -866,8 +1015,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         subtitle: 'Agrega carpetas de podcasts en Ajustes.',
       );
     }
-    final list = limit == null ? _podcasts : _podcasts.take(limit).toList();
     final scheme = Theme.of(context).colorScheme;
+    final list = limit == null ? podcasts : podcasts.take(limit).toList();
     return SizedBox(
       height: 90,
       child: ListView.builder(
@@ -875,57 +1024,61 @@ class _LibraryScreenState extends State<LibraryScreen> {
         itemCount: list.length,
         itemBuilder: (context, index) {
           final pod = list[index];
-          return Container(
-            width: 220,
-            margin: const EdgeInsets.only(right: 12),
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainer,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 64,
-                  height: 64,
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh,
+          final coverPath = _playlistCover(pod);
+          return GestureDetector(
+            onTap: () => _openPlaylist(context, pod),
+            child: Container(
+              width: 220,
+              margin: const EdgeInsets.only(right: 12),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainer,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  ClipRRect(
                     borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(
-                    Icons.mic,
-                    color: scheme.onSurfaceVariant,
-                    size: 30,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        pod.title,
-                        style: TextStyle(
-                          color: scheme.onSurface,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                        overflow: TextOverflow.ellipsis,
+                    child: SizedBox(
+                      width: 64,
+                      height: 64,
+                      child: _buildCoverImageOrIcon(
+                        context,
+                        coverPath: coverPath,
+                        fallbackIcon: Icons.mic,
+                        iconSize: 30,
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${pod.extension.toUpperCase()} · ${pod.durationLabel}',
-                        style: TextStyle(
-                          color: scheme.onSurfaceVariant,
-                          fontSize: 12,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          pod.title,
+                          style: TextStyle(
+                            color: scheme.onSurface,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${pod.count} episodios · ${pod.totalDurationLabel}',
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 12,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           );
         },
@@ -934,12 +1087,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildPodcastsList(BuildContext context) {
-    if (_loadingLibrary) {
+    final controller = _controllerFor(5);
+
+    if (_loadingLibrary)
       return const Center(child: CircularProgressIndicator());
-    }
-    if (_podcasts.isEmpty) {
+    final podcasts = _podcastPlaylists;
+    if (podcasts.isEmpty) {
       return ListView(
-        controller: _scrollController,
+        controller: controller,
         padding: const EdgeInsets.all(16),
         children: [
           _buildEmptyState(
@@ -951,310 +1106,151 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ],
       );
     }
-
     final scheme = Theme.of(context).colorScheme;
     return ListView.builder(
-      controller: _scrollController,
+      controller: controller,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: _podcasts.length,
+      itemCount: podcasts.length,
       itemExtent: 90,
       itemBuilder: (context, index) {
-        final pod = _podcasts[index];
+        final pod = podcasts[index];
+        final coverPath = _playlistCover(pod);
         return RepaintBoundary(
-          key: ValueKey<String>(pod.path),
-          child: Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainer,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 64,
-                  height: 64,
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh,
+          key: ValueKey<String>(pod.id),
+          child: GestureDetector(
+            onTap: () => _openPlaylist(context, pod),
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainer,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  ClipRRect(
                     borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(
-                    Icons.mic,
-                    color: scheme.onSurfaceVariant,
-                    size: 30,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        pod.title,
-                        style: TextStyle(
-                          color: scheme.onSurface,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                        overflow: TextOverflow.ellipsis,
+                    child: SizedBox(
+                      width: 64,
+                      height: 64,
+                      child: _buildCoverImageOrIcon(
+                        context,
+                        coverPath: coverPath,
+                        fallbackIcon: Icons.mic,
+                        iconSize: 30,
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${pod.extension.toUpperCase()} · ${pod.durationLabel}',
-                        style: TextStyle(
-                          color: scheme.onSurfaceVariant,
-                          fontSize: 12,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          pod.title,
+                          style: TextStyle(
+                            color: scheme.onSurface,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${pod.count} episodios · ${pod.totalDurationLabel}',
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 12,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
+                ],
+              ),
             ),
           ),
         );
       },
     );
   }
+
+  // -------------------------------------------------------------------------
+  // Descargas (placeholder)
+  // -------------------------------------------------------------------------
 
   Widget _buildDownloads(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final downloads = [
-      {'title': 'Blinding Lights', 'artist': 'The Weeknd', 'size': '8.2 MB'},
-      {'title': 'Levitating', 'artist': 'Dua Lipa', 'size': '7.8 MB'},
-      {'title': 'Peaches', 'artist': 'Justin Bieber', 'size': '6.4 MB'},
-    ];
-
-    return Column(
-      children: downloads.map((item) {
-        return Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: scheme.surfaceContainer,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(Icons.download_done, color: scheme.primary),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      item['title'] as String,
-                      style: TextStyle(
-                        color: scheme.onSurface,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      item['artist'] as String,
-                      style: TextStyle(
-                        color: scheme.onSurfaceVariant,
-                        fontSize: 12,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              Text(
-                item['size'] as String,
-                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
-              ),
-            ],
-          ),
-        );
-      }).toList(),
+    return _buildEmptyState(
+      context,
+      icon: Icons.download_outlined,
+      title: 'Sin descargas',
+      subtitle: 'Aún no hay descargas registradas.',
     );
   }
 
-  Widget _buildPlaylistsDetailed(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final playlists = [
-      {
-        'title': 'Road Trip',
-        'count': 42,
-        'total': '2 h 48 min',
-        'icon': Icons.directions_car,
-        'color': scheme.primaryContainer,
-      },
-      {
-        'title': 'Chill Vibes',
-        'count': 28,
-        'total': '1 h 52 min',
-        'icon': Icons.nightlight,
-        'color': scheme.secondaryContainer,
-      },
-      {
-        'title': 'Workout',
-        'count': 35,
-        'total': '2 h 14 min',
-        'icon': Icons.fitness_center,
-        'color': scheme.tertiaryContainer,
-      },
-      {
-        'title': 'Focus',
-        'count': 19,
-        'total': '1 h 08 min',
-        'icon': Icons.psychology,
-        'color': scheme.surfaceContainerHigh,
-      },
-      {
-        'title': 'Party Mix',
-        'count': 51,
-        'total': '3 h 22 min',
-        'icon': Icons.celebration,
-        'color': scheme.primaryContainer,
-      },
-      {
-        'title': 'Acoustic',
-        'count': 23,
-        'total': '1 h 30 min',
-        'icon': Icons.piano,
-        'color': scheme.secondaryContainer,
-      },
-    ];
+  // -------------------------------------------------------------------------
+  // Widgets auxiliares
+  // -------------------------------------------------------------------------
 
-    return Column(
-      children: playlists.map((playlist) {
-        return _buildDetailCard(
-          context: context,
-          leading: _buildCover(
-            context,
-            icon: playlist['icon'] as IconData,
-            color: playlist['color'] as Color,
-            size: 64,
-            rounded: 12,
-          ),
-          title: playlist['title'] as String,
-          subtitle: '${playlist['count']} canciones',
-          meta: playlist['total'] as String,
-          trailing: _buildPlayTrailing(context),
-        );
-      }).toList(),
+  /// Imagen desde archivo o ícono fallback, ocupa todo el espacio disponible
+  /// (usar dentro de un `SizedBox`/`Stack` de tamaño fijo).
+  Widget _buildCoverImageOrIcon(
+    BuildContext context, {
+    required String? coverPath,
+    required IconData fallbackIcon,
+    required double iconSize,
+  }) {
+    if (coverPath != null) {
+      return Image.file(
+        File(coverPath),
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) =>
+            _buildIconFill(context, icon: fallbackIcon, iconSize: iconSize),
+      );
+    }
+    return _buildIconFill(context, icon: fallbackIcon, iconSize: iconSize);
+  }
+
+  Widget _buildIconFill(
+    BuildContext context, {
+    required IconData icon,
+    required double iconSize,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      color: scheme.surfaceContainerHigh,
+      alignment: Alignment.center,
+      child: Icon(icon, size: iconSize, color: scheme.onSurfaceVariant),
     );
   }
 
-  Widget _buildAlbumsDetailed(BuildContext context) {
+  /// Cover cuadrado de tamaño fijo con imagen o fallback con borde.
+  Widget _buildSquareCover(
+    BuildContext context, {
+    required String? coverPath,
+    required IconData fallbackIcon,
+    required double size,
+    required double rounded,
+  }) {
     final scheme = Theme.of(context).colorScheme;
-    final albums = [
-      {
-        'title': 'After Hours',
-        'artist': 'The Weeknd',
-        'year': '2020',
-        'songs': 14,
-        'total': '56 min',
-      },
-      {
-        'title': 'Future Nostalgia',
-        'artist': 'Dua Lipa',
-        'year': '2020',
-        'songs': 11,
-        'total': '43 min',
-      },
-      {
-        'title': 'Justice',
-        'artist': 'Justin Bieber',
-        'year': '2021',
-        'songs': 16,
-        'total': '58 min',
-      },
-      {
-        'title': 'Un Verano Sin Ti',
-        'artist': 'Bad Bunny',
-        'year': '2022',
-        'songs': 23,
-        'total': '1 h 22 min',
-      },
-      {
-        'title': 'KG0516',
-        'artist': 'Karol G',
-        'year': '2021',
-        'songs': 16,
-        'total': '54 min',
-      },
-      {
-        'title': "Harry's House",
-        'artist': 'Harry Styles',
-        'year': '2022',
-        'songs': 13,
-        'total': '47 min',
-      },
-    ];
-
-    return Column(
-      children: albums.map((album) {
-        return _buildDetailCard(
-          context: context,
-          leading: _buildCover(
-            context,
-            icon: Icons.album,
-            color: scheme.surfaceContainerHigh,
-            size: 64,
-            rounded: 10,
-            label: album['title'] as String,
-          ),
-          title: album['title'] as String,
-          subtitle: '${album['artist']} · ${album['year']}',
-          meta: '${album['songs']} pistas · ${album['total']}',
-          trailing: Icon(
-            Icons.more_vert,
-            color: scheme.onSurfaceVariant,
-            size: 20,
-          ),
-        );
-      }).toList(),
-    );
-  }
-
-  Widget _buildArtistsDetailed(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final artists = [
-      {'name': 'The Weeknd', 'songs': 12, 'albums': 4},
-      {'name': 'Dua Lipa', 'songs': 8, 'albums': 3},
-      {'name': 'Bad Bunny', 'songs': 15, 'albums': 5},
-      {'name': 'Karol G', 'songs': 10, 'albums': 3},
-      {'name': 'Harry Styles', 'songs': 9, 'albums': 2},
-      {'name': 'Taylor Swift', 'songs': 20, 'albums': 8},
-      {'name': 'Drake', 'songs': 14, 'albums': 6},
-      {'name': 'Ariana Grande', 'songs': 11, 'albums': 4},
-    ];
-
-    return Column(
-      children: artists.map((artist) {
-        return _buildDetailCard(
-          context: context,
-          leading: CircleAvatar(
-            radius: 32,
-            backgroundColor: scheme.surfaceContainerHigh,
-            child: Icon(Icons.person, color: scheme.onSurfaceVariant, size: 32),
-          ),
-          title: artist['name'] as String,
-          subtitle:
-              '${artist['songs']} canciones · ${artist['albums']} álbumes',
-          trailing: Icon(
-            Icons.chevron_right,
-            color: scheme.onSurfaceVariant,
-            size: 24,
-          ),
-        );
-      }).toList(),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(rounded),
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          border: Border.all(color: scheme.outlineVariant),
+        ),
+        child: _buildCoverImageOrIcon(
+          context,
+          coverPath: coverPath,
+          fallbackIcon: fallbackIcon,
+          iconSize: size * 0.45,
+        ),
+      ),
     );
   }
 
@@ -1332,71 +1328,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
           trailing,
         ],
       ),
-    );
-  }
-
-  Widget _buildCover(
-    BuildContext context, {
-    required IconData icon,
-    required Color color,
-    required double size,
-    required double rounded,
-    String? label,
-  }) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(rounded),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [color, scheme.surfaceContainerHigh],
-        ),
-      ),
-      child: Stack(
-        children: [
-          if (label != null)
-            Positioned(
-              top: 6,
-              left: 6,
-              right: 6,
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: scheme.onSurface,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 9,
-                  height: 1.1,
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          Center(
-            child: Icon(
-              icon,
-              color: label == null
-                  ? scheme.onSurface
-                  : scheme.onSurface.withOpacity(0.35),
-              size: label == null ? size * 0.42 : size * 0.32,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPlayTrailing(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: scheme.primary.withOpacity(0.12),
-        shape: BoxShape.circle,
-      ),
-      child: Icon(Icons.play_arrow, color: scheme.primary, size: 22),
     );
   }
 }
