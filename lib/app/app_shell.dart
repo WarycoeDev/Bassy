@@ -1,9 +1,11 @@
+// lib/screens/app_shell.dart
 import 'package:flutter/material.dart';
 
 import '../screens/home_screen.dart';
 import '../screens/library_screen.dart';
 import '../screens/search_screen.dart';
 import '../screens/settings_screen.dart';
+import '../widgets/mini_player.dart';
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
@@ -61,7 +63,6 @@ class _AppShellState extends State<AppShell> {
     final isWide = MediaQuery.sizeOf(context).width >= 800;
     final scheme = Theme.of(context).colorScheme;
 
-    // Misma animación en ambos layouts: fade + slide direccional + scale.
     final animatedContent = ClipRect(
       child: _AnimatedTabContent(
         selectedIndex: _selectedIndex,
@@ -97,6 +98,9 @@ class _AppShellState extends State<AppShell> {
     }
 
     // ---------- Móvil ----------
+    // El miniplayer ya no está en bottomNavigationBar: se dibuja en un Stack
+    // ENCIMA del contenido, así que el body ocupa toda la pantalla y no se
+    // reserva ningún espacio para el miniplayer.
     return Scaffold(
       appBar: AppBar(
         title: AnimatedSwitcher(
@@ -130,13 +134,29 @@ class _AppShellState extends State<AppShell> {
         destinations: _destinations,
         scheme: scheme,
       ),
-      body: animatedContent,
+      body: Stack(
+        children: [
+          // Contenido a pantalla completa, por debajo del miniplayer
+          Positioned.fill(child: animatedContent),
+
+          // Miniplayer flotante sobre el contenido
+          const Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: SafeArea(
+              top: false,
+              child: MiniPlayerBar(),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
 
 // ============================================================
-// CONTENIDO ANIMADO ENTRE PESTAÑAS (idéntico en todos los tamaños)
+// CONTENIDO ANIMADO ENTRE PESTAÑAS
 // ============================================================
 class _AnimatedTabContent extends StatelessWidget {
   final int selectedIndex;
@@ -158,8 +178,6 @@ class _AnimatedTabContent extends StatelessWidget {
       switchInCurve: Curves.easeOutCubic,
       switchOutCurve: Curves.easeInCubic,
       layoutBuilder: (currentChild, previousChildren) {
-        // Stack passthrough: respeta el tamaño del padre (Expanded en wide).
-        // Las pantallas salientes se ignoran para eventos.
         return Stack(
           fit: StackFit.passthrough,
           children: [
@@ -176,10 +194,8 @@ class _AnimatedTabContent extends StatelessWidget {
           curve: Curves.easeOutCubic,
         );
 
-        // Fade siempre presente.
         final faded = FadeTransition(opacity: curved, child: child);
 
-        // Scale sutil: solo la entrante crece 0.98 -> 1.0.
         final scaled = ScaleTransition(
           scale: Tween<double>(
             begin: isIncoming ? 0.98 : 1.0,
@@ -188,7 +204,6 @@ class _AnimatedTabContent extends StatelessWidget {
           child: faded,
         );
 
-        // Slide direccional: entra desde donde toca según el índice.
         final beginOffset = Offset(
           isIncoming ? 0.18 * slideDirection : -0.18 * slideDirection,
           0,
@@ -233,7 +248,7 @@ class _DrawerPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Header con degradado (igual que el Drawer)
+          // Header con degradado
           Container(
             padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
             decoration: BoxDecoration(
@@ -301,43 +316,8 @@ class _DrawerPanel extends StatelessWidget {
               },
             ),
           ),
-          // Footer
-          Divider(height: 1, color: scheme.outlineVariant),
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  radius: 18,
-                  backgroundColor: scheme.surfaceContainerHigh,
-                  child: Icon(
-                    Icons.person,
-                    size: 20,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    'Usuario',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyLarge?.copyWith(color: scheme.onSurface),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(
-                    Icons.logout_rounded,
-                    size: 20,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                  onPressed: () {},
-                  tooltip: 'Salir',
-                ),
-              ],
-            ),
-          ),
+          // Miniplayer tipo tarjeta
+          const MiniPlayerCard(),
         ],
       ),
     );
@@ -373,7 +353,7 @@ class _StyledDrawer extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Header con degradado en escala de grises
+            // Header con degradado
             Container(
               padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
               decoration: BoxDecoration(
@@ -445,43 +425,6 @@ class _StyledDrawer extends StatelessWidget {
                     ),
                   );
                 },
-              ),
-            ),
-            // Footer
-            Divider(height: 1, color: scheme.outlineVariant),
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 18,
-                    backgroundColor: scheme.surfaceContainerHigh,
-                    child: Icon(
-                      Icons.person,
-                      size: 20,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      'Usuario',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodyLarge?.copyWith(color: scheme.onSurface),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  IconButton(
-                    icon: Icon(
-                      Icons.logout_rounded,
-                      size: 20,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                    onPressed: () {},
-                    tooltip: 'Salir',
-                  ),
-                ],
               ),
             ),
           ],
