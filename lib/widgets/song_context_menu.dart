@@ -1,5 +1,6 @@
 // lib/widgets/song_context_menu.dart
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models/playlist.dart';
@@ -39,45 +40,13 @@ class SongContextMenu {
   }
 
   static List<ActionMenuItem> _buildQueueActions(Song song) {
-    final c = PlaybackController.instance;
-    final handler = c.isReady ? c.handler : null;
-
-    final inQueue =
-        handler?.songs.any((s) => s.path == song.path) ?? false;
-    final isCurrent = handler?.currentSong?.path == song.path;
-
     return [
       ActionMenuItem(
         icon: Icons.playlist_play,
         label: 'Sobrescribir cola y reproducir',
-        onTap: () async {
-          if (handler == null) return;
-          await handler.setQueue([song], startIndex: 0);
-          await handler.play();
-        },
+        onTap: () => _replaceQueueAndPlay(song),
       ),
-      if (!inQueue)
-        ActionMenuItem(
-          icon: Icons.queue_music,
-          label: 'Añadir a la cola',
-          onTap: () async {
-            if (handler == null) return;
-            await handler.addToQueue(song);
-          },
-        )
-      else
-        ActionMenuItem(
-          icon: Icons.playlist_remove,
-          label: 'Quitar de la cola',
-          isDestructive: true,
-          enabled: !(isCurrent ?? false),
-          onTap: () async {
-            if (handler == null) return;
-            final idx =
-                handler.songs.indexWhere((s) => s.path == song.path);
-            if (idx >= 0) await handler.removeFromQueue(idx);
-          },
-        ),
+      ..._queueAddRemove(song),
     ];
   }
 
@@ -154,8 +123,7 @@ class SongContextMenu {
   static List<ActionMenuItem> _queueAddRemove(Song song) {
     final c = PlaybackController.instance;
     final handler = c.isReady ? c.handler : null;
-    final inQueue =
-        handler?.songs.any((s) => s.path == song.path) ?? false;
+    final inQueue = handler?.songs.any((s) => s.path == song.path) ?? false;
     final isCurrent = handler?.currentSong?.path == song.path;
 
     if (!inQueue) {
@@ -175,21 +143,30 @@ class SongContextMenu {
         icon: Icons.playlist_remove,
         label: 'Quitar de la cola',
         isDestructive: true,
-        enabled: !(isCurrent ?? false),
+        enabled: !isCurrent,
         onTap: () async {
           if (handler == null) return;
-          final idx =
-              handler.songs.indexWhere((s) => s.path == song.path);
+          final idx = handler.songs.indexWhere((s) => s.path == song.path);
           if (idx >= 0) await handler.removeFromQueue(idx);
         },
       ),
     ];
   }
 
-  static Future<void> _playNow(Song song) async {
+  // ---------- Reproducción ----------
+
+  static Future<void> _playNow(Song song) => _replaceQueueAndPlay(song);
+
+  /// Vacía la cola, deja solo [song] y la reproduce desde 0,
+  /// deteniendo lo que sonaba antes.
+  static Future<void> _replaceQueueAndPlay(Song song) async {
     final c = PlaybackController.instance;
     if (!c.isReady) return;
-    await c.handler.playSong(song);
+    try {
+      await c.playOnly(song);
+    } catch (e) {
+      debugPrint('SongContextMenu: no se pudo reproducir -> $e');
+    }
   }
 
   // ---------- Acciones específicas de canción ----------
@@ -242,9 +219,7 @@ class SongContextMenu {
 
     return [
       ActionMenuItem(
-        icon: isPlayed
-            ? Icons.check_circle
-            : Icons.check_circle_outline,
+        icon: isPlayed ? Icons.check_circle : Icons.check_circle_outline,
         label: isPlayed
             ? 'Marcar como no reproducido'
             : 'Marcar como reproducido',

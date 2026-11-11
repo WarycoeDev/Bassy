@@ -53,6 +53,10 @@ class PlaybackController {
   }) =>
       handler.setQueue(songs, startIndex: startIndex, autoPlay: autoPlay);
 
+  /// Vacía la cola, deja solo [song] y la reproduce desde 0,
+  /// cortando lo que sonaba antes.
+  Future<void> playOnly(Song song) => handler.playOnly(song);
+
   Future<void> playSong(Song song) => handler.playSong(song);
   Future<void> play() => handler.play();
   Future<void> pause() => handler.pause();
