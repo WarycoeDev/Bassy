@@ -116,7 +116,7 @@ class _BassyAppState extends State<BassyApp> {
     );
 
     return MaterialApp(
-      debugShowCheckedModeBanner: false,
+      debugShowCheckedModeBanner: true,
       title: 'Bassy',
       theme: ThemeData(
         useMaterial3: true,

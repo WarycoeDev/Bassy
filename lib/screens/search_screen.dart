@@ -8,11 +8,17 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/playlist.dart';
 import '../models/song.dart';
 import '../services/media_scanner.dart';
+import '../widgets/nested_navigator_scope.dart';
 import '../widgets/song_tile.dart';
 import 'playlist_detail_screen.dart';
 
 class SearchScreen extends StatefulWidget {
-  const SearchScreen({super.key});
+  const SearchScreen({super.key, this.onExitRoot});
+
+  /// Se invoca cuando el usuario pulsa atrás estando ya en la raíz de
+  /// Search (no hay rutas internas que popear). El padre (AppShell) decide
+  /// qué hacer: volver a Inicio, salir de la app, etc.
+  final VoidCallback? onExitRoot;
 
   @override
   State<SearchScreen> createState() => _SearchScreenState();
@@ -352,9 +358,13 @@ class _SearchScreenState extends State<SearchScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Navigator(
-      key: _navKey,
-      onGenerateRoute: (_) => MaterialPageRoute(builder: _buildHome),
+    // NestedNavigatorScope gestiona el back:
+    //  - Si hay rutas internas (PlaylistDetailScreen, etc.) → las popea.
+    //  - Si estamos en la raíz de Search → delega en onExitRoot.
+    return NestedNavigatorScope(
+      navigatorKey: _navKey,
+      onExitRoot: widget.onExitRoot,
+      child: _buildHome(context),
     );
   }
 

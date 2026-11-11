@@ -23,89 +23,108 @@ class PlaylistDetailScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    return Scaffold(
-      backgroundColor: scheme.surface,
-      appBar: AppBar(
+    // Garantiza que el back cierre ESTA pantalla, viva en el Navigator
+    // que viva (Library anidado, Search anidado, raíz, etc.).
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        final nav = Navigator.of(context);
+        if (nav.canPop()) {
+          nav.pop();
+        }
+      },
+      child: Scaffold(
         backgroundColor: scheme.surface,
-        elevation: 0,
-        title: Text(
-          playlist.title,
-          style: TextStyle(
-            color: scheme.onSurface,
-            fontWeight: FontWeight.bold,
+        appBar: AppBar(
+          backgroundColor: scheme.surface,
+          elevation: 0,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            tooltip: 'Atrás',
+            onPressed: () => Navigator.of(context).maybePop(),
           ),
-          overflow: TextOverflow.ellipsis,
+          title: Text(
+            playlist.title,
+            style: TextStyle(
+              color: scheme.onSurface,
+              fontWeight: FontWeight.bold,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
-      ),
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              child: Row(
-                children: [
-                  _buildCover(context),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          playlist.subtitle,
-                          style: TextStyle(
-                            color: scheme.onSurfaceVariant,
-                            fontSize: 13,
+        body: SafeArea(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Row(
+                  children: [
+                    _buildCover(context),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            playlist.subtitle,
+                            style: TextStyle(
+                              color: scheme.onSurfaceVariant,
+                              fontSize: 13,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          '${playlist.count} elementos · ${playlist.totalDurationLabel}',
-                          style: TextStyle(
-                            color: scheme.onSurfaceVariant,
-                            fontSize: 12,
+                          const SizedBox(height: 6),
+                          Text(
+                            '${playlist.count} elementos · ${playlist.totalDurationLabel}',
+                            style: TextStyle(
+                              color: scheme.onSurfaceVariant,
+                              fontSize: 12,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 12),
-                        FilledButton.icon(
-                          onPressed: playlist.songs.isEmpty ? null : () {},
-                          icon: const Icon(Icons.play_arrow, size: 20),
-                          label: const Text('Reproducir todo'),
-                        ),
-                      ],
+                          const SizedBox(height: 12),
+                          FilledButton.icon(
+                            onPressed:
+                                playlist.songs.isEmpty ? null : () {},
+                            icon: const Icon(Icons.play_arrow, size: 20),
+                            label: const Text('Reproducir todo'),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            Divider(height: 1, color: scheme.outlineVariant),
-            Expanded(
-              child: playlist.songs.isEmpty
-                  ? Center(
-                      child: Text(
-                        'Sin elementos',
-                        style: TextStyle(color: scheme.onSurfaceVariant),
+              Divider(height: 1, color: scheme.outlineVariant),
+              Expanded(
+                child: playlist.songs.isEmpty
+                    ? Center(
+                        child: Text(
+                          'Sin elementos',
+                          style:
+                              TextStyle(color: scheme.onSurfaceVariant),
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 8,
+                        ),
+                        itemCount: playlist.songs.length,
+                        itemExtent: 78,
+                        itemBuilder: (context, index) {
+                          final song = playlist.songs[index];
+                          return RepaintBoundary(
+                            key: ValueKey<String>(song.path),
+                            child: SongTile(song: song),
+                          );
+                        },
                       ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 8,
-                      ),
-                      itemCount: playlist.songs.length,
-                      itemExtent: 78,
-                      itemBuilder: (context, index) {
-                        final song = playlist.songs[index];
-                        return RepaintBoundary(
-                          key: ValueKey<String>(song.path),
-                          child: SongTile(song: song),
-                        );
-                      },
-                    ),
-            ),
-          ],
+              ),
+            ],
+          ),
         ),
       ),
     );

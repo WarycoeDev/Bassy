@@ -211,7 +211,7 @@ class SongContextMenu {
         enabled: hasAlbum,
         onTap: () {
           if (!hasAlbum) return;
-          _openPlaylist(context, album);
+          _openPlaylist(context, album!);
         },
       ),
       ActionMenuItem(
@@ -220,7 +220,7 @@ class SongContextMenu {
         enabled: hasArtist,
         onTap: () {
           if (!hasArtist) return;
-          _openPlaylist(context, artist);
+          _openPlaylist(context, artist!);
         },
       ),
       ActionMenuItem(
@@ -286,34 +286,28 @@ class SongContextMenu {
 
   // ---------- Navegación a álbum / artista ----------
 
+  /// Abre la playlist en el Navigator correcto:
+  ///
+  ///  - Si este [context] resuelve al Navigator anidado de Library,
+  ///    empuja allí (mantiene el drawer lateral visible en PC).
+  ///  - En cualquier otro caso (Search, otra pestaña, raíz), empuja en
+  ///    el Navigator que corresponda a este [context], que es el anidado
+  ///    de esa pestaña. El back lo gestionará el [NestedNavigatorScope]
+  ///    de esa pestaña (o el de [PlaylistDetailScreen] como respaldo).
   static void _openPlaylist(BuildContext context, Playlist playlist) {
-  final route = MaterialPageRoute<void>(
-    builder: (_) => PlaylistDetailScreen(playlist: playlist),
-  );
-  // Si el tile vive dentro de Library, usa su Navigator anidado (mantiene
-  // el drawer lateral visible en PC). Si vive en Search (u otra pestaña),
-  // usa el Navigator del propio contexto, que es el anidado de esa pestaña.
-  if (_isInsideLibrary(context)) {
-    LibraryScreen.pushInLibrary(context, route);
-  } else {
-    Navigator.of(context).push(route);
-  }
-}
+    final route = MaterialPageRoute<void>(
+      builder: (_) => PlaylistDetailScreen(playlist: playlist),
+    );
 
-/// Comprueba si [context] está debajo del Navigator anidado de Library.
-static bool _isInsideLibrary(BuildContext context) {
-  final libNav = LibraryScreen.currentNavigator;
-  if (libNav == null) return false;
-  var found = false;
-  context.visitAncestorElements((element) {
-    if (identical(element, libNav.context as Element)) {
-      found = true;
-      return false;
+    final nav = Navigator.of(context);
+    final libNav = LibraryScreen.currentNavigator;
+
+    if (libNav != null && libNav.mounted && identical(nav, libNav)) {
+      libNav.push(route);
+    } else {
+      nav.push(route);
     }
-    return true;
-  });
-  return found;
-}
+  }
 
   static Playlist? _findAlbum(Song song) {
     if (!song.hasAlbum) return null;

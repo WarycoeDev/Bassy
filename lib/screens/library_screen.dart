@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../models/playlist.dart';
 import '../models/song.dart';
 import '../services/media_scanner.dart';
+import '../widgets/nested_navigator_scope.dart';
 import '../widgets/song_tile.dart';
 import 'playlist_detail_screen.dart';
 
@@ -63,10 +64,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<Playlist> _podcastPlaylists = const [];
 
   StreamSubscription<ScanProgress>? _scanSub;
-
-  /// Fuerza un rebuild del PopScope cuando cambia la profundidad del
-  /// Navigator anidado (para recalcular `canPop`).
-  int _navDepth = 1;
 
   final List<String> _filters = const [
     'Todo',
@@ -212,19 +209,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void _openPlaylist(BuildContext context, Playlist playlist) {
     final nav = _navKey.currentState;
     if (nav == null) return;
-    nav
-        .push(
-          MaterialPageRoute(
-            builder: (_) => PlaylistDetailScreen(playlist: playlist),
-          ),
-        )
-        .then((_) {
-          if (!mounted) return;
-          // La profundidad del Navigator cambió: forzamos reevaluación de
-          // `canPop` en el PopScope.
-          setState(() => _navDepth = _navKey.currentState?.canPop() == true ? 2 : 1);
-        });
-    setState(() => _navDepth = 2);
+    nav.push(
+      MaterialPageRoute(
+        builder: (_) => PlaylistDetailScreen(playlist: playlist),
+      ),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -233,51 +222,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // `canPop` del PopScope: true  -> dejamos que Flutter haga el pop normal
-    //                              (lo capturará el AppShell / raíz).
-    //                          false -> interceptamos para popear el Navigator
-    //                              anidado de Library y NO recursar.
-    //
-    // `_navKey.currentState?.canPop()` no se puede consultar de forma fiable
-    // antes del primer frame; usamos `_navDepth` como señal aproximada y lo
-    // sincronizamos tras cada push/pop.
-    final innerCanPop = _navKey.currentState?.canPop() ?? (_navDepth > 1);
-
-    return PopScope(
-      // Si hay algo dentro de Library: bloqueamos y popemos a mano.
-      // Si estamos en la raíz de Library: NO bloqueamos, dejamos que el
-      // sistema (AppShell) reciba el back. Así nunca llamamos a maybePop
-      // sobre el Navigator que contiene a este PopScope.
-      canPop: !innerCanPop,
-      onPopInvokedWithResult: (didPop, result) {
-        if (didPop) return; // ya se popeo (rama canPop == true)
-        final nav = _navKey.currentState;
-        if (nav != null && nav.canPop()) {
-          nav.pop();
-          setState(() =>
-              _navDepth = nav.canPop() ? 2 : 1);
-          return;
-        }
-        // Sin rutas internas: delegamos al padre. NO llamamos a
-        // Navigator.of(context).maybePop() — eso reentraría en este mismo
-        // PopScope y provocaría el bucle infinito de microtareas.
-        widget.onExitRoot?.call();
-      },
-      child: Navigator(
-        key: _navKey,
-        onGenerateRoute: (settings) {
-          return MaterialPageRoute(
-            settings: settings,
-            builder: (_) => _buildLibraryHome(context),
-          );
-        },
-      ),
+    // NestedNavigatorScope gestiona el back:
+    //  - Si hay rutas internas → las popea.
+    //  - Si estamos en la raíz → delega en onExitRoot.
+    return NestedNavigatorScope(
+      navigatorKey: _navKey,
+      onExitRoot: widget.onExitRoot,
+      child: _buildLibraryHome(context),
     );
   }
 
   // =========================================================================
   // A partir de aquí, TODO EL RESTO DEL ARCHIVO PERMANECE IGUAL.
-  // Se incluye completo para que el script sea autocontenido.
   // =========================================================================
 
   Widget _buildLibraryHome(BuildContext context) {
