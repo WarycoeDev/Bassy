@@ -213,41 +213,47 @@ class SongTile extends StatelessWidget {
   }
 
   Future<void> _defaultOnTap(BuildContext context) async {
-    final c = PlaybackController.instance;
+  final c = PlaybackController.instance;
 
-    if (!c.isReady) {
-      debugPrint('SongTile: PlaybackController no listo');
+  if (!c.isReady) {
+    debugPrint('SongTile: PlaybackController no listo');
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('El reproductor aún no está listo…'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+    return;
+  }
+
+  final handler = c.handler;
+
+  if (handler.songs.isEmpty) {
+    try {
+      await handler.setQueue([song], startIndex: 0, autoPlay: true);
+    } catch (e, st) {
+      debugPrint('SongTile: fallo al reproducir -> $e\n$st');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('El reproductor aún no está listo…'),
-            duration: Duration(seconds: 2),
-          ),
+          SnackBar(content: Text('No se pudo reproducir: $e')),
         );
       }
-      return;
     }
+    return;
+  }
 
-    final handler = c.handler;
-
-    if (handler.songs.isEmpty) {
-      try {
-        await handler.setQueue([song], startIndex: 0, autoPlay: true);
-      } catch (e, st) {
-        debugPrint('SongTile: fallo al reproducir -> $e\n$st');
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('No se pudo reproducir: $e')),
-          );
-        }
-      }
-      return;
-    }
-
-    if (context.mounted) {
+  if (context.mounted) {
+    // Podcasts: tap normal abre el menú de contexto completo,
+    // no el menú reducido de cola.
+    if (song.kind == MediaKind.podcast) {
+      await SongContextMenu.showSheet(context, song);
+    } else {
       await SongContextMenu.showQueueSheet(context, song);
     }
   }
+}
 }
 
 class _PlayingBadge extends StatelessWidget {

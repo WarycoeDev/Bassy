@@ -92,8 +92,20 @@ class SongContextMenu {
     BuildContext context,
     Song song,
   ) {
-    // Acciones comunes (canción y podcast): cola + organización.
-    final common = <ActionMenuItem>[
+    // Para podcasts: solo reproducción + acciones propias de podcast.
+    if (song.kind == MediaKind.podcast) {
+      return [
+        ActionMenuItem(
+          icon: Icons.play_arrow,
+          label: 'Reproducir ahora',
+          onTap: () => _playNow(song),
+        ),
+        ..._podcastActions(context, song),
+      ];
+    }
+
+    // Canciones: acciones completas (cola + organización + navegación).
+    return [
       ActionMenuItem(
         icon: Icons.play_arrow,
         label: 'Reproducir ahora',
@@ -110,13 +122,8 @@ class SongContextMenu {
         label: 'Añadir a favoritos',
         onTap: () => _todo(context, 'Añadir a favoritos'),
       ),
+      ..._musicActions(context, song),
     ];
-
-    final specific = song.kind == MediaKind.podcast
-        ? _podcastActions(context, song)
-        : _musicActions(context, song);
-
-    return [...common, ...specific];
   }
 
   /// Bloque reutilizable "Añadir / Quitar de la cola" según estado.
@@ -245,11 +252,6 @@ class SongContextMenu {
         icon: Icons.timer_outlined,
         label: 'Dormir después de…',
         onTap: () => _todo(context, 'Sleep timer'),
-      ),
-      ActionMenuItem(
-        icon: Icons.share_outlined,
-        label: 'Compartir episodio',
-        onTap: () => _todo(context, 'Compartir episodio'),
       ),
       ActionMenuItem(
         icon: Icons.info_outline,
