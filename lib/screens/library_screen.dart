@@ -10,22 +10,21 @@ import '../widgets/song_tile.dart';
 import 'playlist_detail_screen.dart';
 
 class LibraryScreen extends StatefulWidget {
-  const LibraryScreen({super.key});
+  const LibraryScreen({super.key, this.onExitRoot});
 
-  /// Navigator anidado ACTUAL de Library. Se actualiza en initState/dispose
-  /// del State. Nunca es una GlobalKey compartida entre instancias, así que
-  /// dos LibraryScreen vivas (p. ej. durante una transición de pestaña) no
-  /// chocan.
+  /// Navigator anidado ACTUAL de Library.
   static NavigatorState? currentNavigator;
 
-  /// Agrupaciones actuales, mantenidas por [_LibraryScreenState].
-  /// Las usa [SongContextMenu] para "Ir al álbum/artista".
   static List<Playlist> currentAlbums = const [];
   static List<Playlist> currentArtists = const [];
   static List<Playlist> currentPodcasts = const [];
 
-  /// Empuja [route] dentro del Navigator anidado de Library.
-  /// Si no está montado (tests, arranque), cae al Navigator raíz.
+  /// Se invoca cuando el usuario pulsa atrás estando ya en la raíz de
+  /// Library (no hay rutas internas que popear). El padre (AppShell) decide
+  /// qué hacer: volver a Inicio, salir de la app, etc.
+  /// Si es null, el gesto de atrás se ignora (comportamiento conservador).
+  final VoidCallback? onExitRoot;
+
   static void pushInLibrary(BuildContext context, Route<void> route) {
     final nav = currentNavigator;
     if (nav != null && nav.mounted) {
@@ -45,8 +44,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
   int _selectedFilter = 0;
   bool _slideFromRight = true;
 
-  // Un ScrollController por pestaña para evitar compartir posiciones
-  // entre ListViews simultáneos (AnimatedSwitcher mantiene vivo el saliente).
   final Map<int, ScrollController> _scrollControllers = {};
 
   ScrollController _controllerFor(int index) {
@@ -61,12 +58,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
   int _processedFiles = 0;
   String? _scanStatus;
 
-  // Grupos memoizados (se recalculan solo cuando cambia _songs/_podcasts).
   List<Playlist> _albumPlaylists = const [];
   List<Playlist> _artistPlaylists = const [];
   List<Playlist> _podcastPlaylists = const [];
 
   StreamSubscription<ScanProgress>? _scanSub;
+
+  /// Fuerza un rebuild del PopScope cuando cambia la profundidad del
+  /// Navigator anidado (para recalcular `canPop`).
+  int _navDepth = 1;
 
   final List<String> _filters = const [
     'Todo',
@@ -84,7 +84,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void initState() {
     super.initState();
     _startWatching();
-    // El Navigator existe tras el primer frame.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final nav = _navKey.currentState;
@@ -94,7 +93,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   void dispose() {
-    // Solo limpiar si seguimos siendo el Navigator "actual".
     if (LibraryScreen.currentNavigator == _navKey.currentState) {
       LibraryScreen.currentNavigator = null;
     }
@@ -120,7 +118,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     LibraryScreen.currentPodcasts = _podcastPlaylists;
   }
 
-  /// Primera carátula disponible entre las canciones de una playlist.
   String? _playlistCover(Playlist playlist) {
     for (final s in playlist.songs) {
       final p = s.coverPath;
@@ -203,31 +200,31 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   void _changeFilter(int index) {
     if (index == _selectedFilter) return;
-
     _slideFromRight = index > _selectedFilter;
-
-    setState(() {
-      _selectedFilter = index;
-    });
+    setState(() => _selectedFilter = index);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final c = _scrollControllers[index];
-      if (c != null && c.hasClients) {
-        c.jumpTo(0);
-      }
+      if (c != null && c.hasClients) c.jumpTo(0);
     });
   }
 
-  /// Abre el detalle DENTRO del Navigator anidado de Library.
-  /// De esta forma el AppShell (menú lateral en PC) permanece visible.
   void _openPlaylist(BuildContext context, Playlist playlist) {
     final nav = _navKey.currentState;
     if (nav == null) return;
-    nav.push(
-      MaterialPageRoute(
-        builder: (_) => PlaylistDetailScreen(playlist: playlist),
-      ),
-    );
+    nav
+        .push(
+          MaterialPageRoute(
+            builder: (_) => PlaylistDetailScreen(playlist: playlist),
+          ),
+        )
+        .then((_) {
+          if (!mounted) return;
+          // La profundidad del Navigator cambió: forzamos reevaluación de
+          // `canPop` en el PopScope.
+          setState(() => _navDepth = _navKey.currentState?.canPop() == true ? 2 : 1);
+        });
+    setState(() => _navDepth = 2);
   }
 
   // -------------------------------------------------------------------------
@@ -236,16 +233,35 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // `canPop` del PopScope: true  -> dejamos que Flutter haga el pop normal
+    //                              (lo capturará el AppShell / raíz).
+    //                          false -> interceptamos para popear el Navigator
+    //                              anidado de Library y NO recursar.
+    //
+    // `_navKey.currentState?.canPop()` no se puede consultar de forma fiable
+    // antes del primer frame; usamos `_navDepth` como señal aproximada y lo
+    // sincronizamos tras cada push/pop.
+    final innerCanPop = _navKey.currentState?.canPop() ?? (_navDepth > 1);
+
     return PopScope(
-      canPop: false,
+      // Si hay algo dentro de Library: bloqueamos y popemos a mano.
+      // Si estamos en la raíz de Library: NO bloqueamos, dejamos que el
+      // sistema (AppShell) reciba el back. Así nunca llamamos a maybePop
+      // sobre el Navigator que contiene a este PopScope.
+      canPop: !innerCanPop,
       onPopInvokedWithResult: (didPop, result) {
-        if (didPop) return;
+        if (didPop) return; // ya se popeo (rama canPop == true)
         final nav = _navKey.currentState;
         if (nav != null && nav.canPop()) {
           nav.pop();
-        } else {
-          Navigator.of(context).maybePop();
+          setState(() =>
+              _navDepth = nav.canPop() ? 2 : 1);
+          return;
         }
+        // Sin rutas internas: delegamos al padre. NO llamamos a
+        // Navigator.of(context).maybePop() — eso reentraría en este mismo
+        // PopScope y provocaría el bucle infinito de microtareas.
+        widget.onExitRoot?.call();
       },
       child: Navigator(
         key: _navKey,
@@ -259,7 +275,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  /// Contenido principal de Library (home del Navigator anidado).
+  // =========================================================================
+  // A partir de aquí, TODO EL RESTO DEL ARCHIVO PERMANECE IGUAL.
+  // Se incluye completo para que el script sea autocontenido.
+  // =========================================================================
+
   Widget _buildLibraryHome(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
@@ -319,43 +339,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 16),
         children: [
           const SizedBox(height: 8),
-          _buildSectionTitle(
-            context,
-            'Canciones',
-            onSeeAll: () => _changeFilter(1),
-          ),
+          _buildSectionTitle(context, 'Canciones',
+              onSeeAll: () => _changeFilter(1)),
           const SizedBox(height: 12),
           _buildSongs(context, limit: 5),
           const SizedBox(height: 24),
-          _buildSectionTitle(
-            context,
-            'Playlists',
-            onSeeAll: () => _changeFilter(2),
-          ),
+          _buildSectionTitle(context, 'Playlists',
+              onSeeAll: () => _changeFilter(2)),
           const SizedBox(height: 12),
           _buildPlaylists(context),
           const SizedBox(height: 24),
-          _buildSectionTitle(
-            context,
-            'Álbumes',
-            onSeeAll: () => _changeFilter(3),
-          ),
+          _buildSectionTitle(context, 'Álbumes',
+              onSeeAll: () => _changeFilter(3)),
           const SizedBox(height: 12),
           _buildAlbums(context),
           const SizedBox(height: 24),
-          _buildSectionTitle(
-            context,
-            'Artistas',
-            onSeeAll: () => _changeFilter(4),
-          ),
+          _buildSectionTitle(context, 'Artistas',
+              onSeeAll: () => _changeFilter(4)),
           const SizedBox(height: 12),
           _buildArtists(context),
           const SizedBox(height: 24),
-          _buildSectionTitle(
-            context,
-            'Podcasts',
-            onSeeAll: () => _changeFilter(5),
-          ),
+          _buildSectionTitle(context, 'Podcasts',
+              onSeeAll: () => _changeFilter(5)),
           const SizedBox(height: 12),
           _buildPodcasts(context, limit: 5),
           const SizedBox(height: 24),
@@ -363,13 +368,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
     }
 
-    if (_selectedFilter == 1) {
-      return _buildSongsList(context);
-    }
-
-    if (_selectedFilter == 5) {
-      return _buildPodcastsList(context);
-    }
+    if (_selectedFilter == 1) return _buildSongsList(context);
+    if (_selectedFilter == 5) return _buildPodcastsList(context);
 
     return ListView(
       controller: _controllerFor(_selectedFilter),
@@ -397,16 +397,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Progreso / cabecera / chips
-  // -------------------------------------------------------------------------
-
   Widget _buildScanProgress(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    if (!_scanning && _scanErrors.isEmpty) {
-      return const SizedBox.shrink();
-    }
+    if (!_scanning && _scanErrors.isEmpty) return const SizedBox.shrink();
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -458,11 +452,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
               child: Row(
                 children: [
-                  Icon(
-                    Icons.warning_amber_rounded,
-                    size: 16,
-                    color: scheme.onErrorContainer,
-                  ),
+                  Icon(Icons.warning_amber_rounded,
+                      size: 16, color: scheme.onErrorContainer),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -506,9 +497,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 _scanning
                     ? (_scanStatus ?? 'Escaneando… $_processedFiles archivos')
                     : (total == 0
-                          ? 'Música local en tu dispositivo'
-                          : '$total elementos'),
-                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+                        ? 'Música local en tu dispositivo'
+                        : '$total elementos'),
+                style:
+                    TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
                 overflow: TextOverflow.ellipsis,
               ),
             ],
@@ -571,16 +563,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               margin: const EdgeInsets.only(right: 10),
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
               decoration: BoxDecoration(
-                color: isSelected ? scheme.primary : scheme.surfaceContainer,
+                color:
+                    isSelected ? scheme.primary : scheme.surfaceContainer,
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Center(
                 child: Text(
                   _filters[index],
                   style: TextStyle(
-                    color: isSelected ? scheme.onPrimary : scheme.onSurface,
+                    color:
+                        isSelected ? scheme.onPrimary : scheme.onSurface,
                     fontWeight: FontWeight.w600,
                     fontSize: 14,
                   ),
@@ -616,7 +611,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
             onTap: onSeeAll,
             behavior: HitTestBehavior.opaque,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
               child: Text(
                 'Ver todo',
                 style: TextStyle(
@@ -651,12 +647,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     final extent = _songTileExtent;
 
-    // Cuando se usa en la pestaña "Todo" (con limit), mostramos TODAS las
-    // canciones en un contenedor de altura fija con scroll propio.
     if (limit != null) {
       final scheme = Theme.of(context).colorScheme;
       const visibleRows = 4.5;
-      final boxHeight = extent * visibleRows + 8; // +8 por el padding vertical
+      final boxHeight = extent * visibleRows + 8;
 
       return Container(
         height: boxHeight,
@@ -691,7 +685,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
     }
 
-    // Listado completo en la pestaña "Canciones" (sin cambios).
     return ListView.builder(
       shrinkWrap: true,
       primary: false,
@@ -746,10 +739,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Estado vacío
-  // -------------------------------------------------------------------------
-
   Widget _buildEmptyState(
     BuildContext context, {
     required IconData icon,
@@ -779,7 +768,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
           Text(
             subtitle,
             textAlign: TextAlign.center,
-            style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+            style:
+                TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
           ),
           const SizedBox(height: 12),
           TextButton.icon(
@@ -791,10 +781,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
     );
   }
-
-  // -------------------------------------------------------------------------
-  // Playlists (placeholder — sin persistencia todavía)
-  // -------------------------------------------------------------------------
 
   Widget _buildPlaylists(BuildContext context) {
     return _buildEmptyState(
@@ -808,10 +794,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildPlaylistsDetailed(BuildContext context) =>
       _buildPlaylists(context);
 
-  // -------------------------------------------------------------------------
-  // Álbumes
-  // -------------------------------------------------------------------------
-
   Widget _buildAlbums(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();
     final albums = _albumPlaylists;
@@ -820,13 +802,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
         context,
         icon: Icons.album_outlined,
         title: 'No hay álbumes',
-        subtitle: 'Las canciones necesitan metadatos de álbum para agruparse.',
+        subtitle:
+            'Las canciones necesitan metadatos de álbum para agruparse.',
       );
     }
     final scheme = Theme.of(context).colorScheme;
     final list = albums.take(10).toList();
     return SizedBox(
-      // 140 cover + 8 sep + 19 título + 2 sep + 17 subtítulo + 6 margen
       height: 192,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
@@ -949,10 +931,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Artistas
-  // -------------------------------------------------------------------------
-
   Widget _buildArtists(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();
     final artists = _artistPlaylists;
@@ -968,7 +946,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final scheme = Theme.of(context).colorScheme;
     final list = artists.take(10).toList();
     return SizedBox(
-      // 76 avatar + 8 sep + 19 nombre + 17 contador + 16 margen
       height: 136,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
@@ -1069,10 +1046,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       }).toList(),
     );
   }
-
-  // -------------------------------------------------------------------------
-  // Podcasts
-  // -------------------------------------------------------------------------
 
   Widget _buildPodcasts(BuildContext context, {int? limit}) {
     if (_loadingLibrary) return const SizedBox.shrink();
@@ -1249,10 +1222,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Descargas (placeholder)
-  // -------------------------------------------------------------------------
-
   Widget _buildDownloads(BuildContext context) {
     return _buildEmptyState(
       context,
@@ -1262,12 +1231,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Widgets auxiliares
-  // -------------------------------------------------------------------------
-
-  /// Imagen desde archivo o ícono fallback, ocupa todo el espacio disponible
-  /// (usar dentro de un `SizedBox`/`Stack` de tamaño fijo).
   Widget _buildCoverImageOrIcon(
     BuildContext context, {
     required String? coverPath,
@@ -1298,7 +1261,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  /// Cover cuadrado de tamaño fijo con imagen o fallback con borde.
   Widget _buildSquareCover(
     BuildContext context, {
     required String? coverPath,

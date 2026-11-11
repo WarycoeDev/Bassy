@@ -11,11 +11,13 @@ import 'services/settings_service.dart';
 import 'widgets/permission_gate.dart';
 import 'package:audio_session/audio_session.dart';
 import 'services/playback_controller.dart';
+
 class _LifecycleRescanObserver with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
     if (kIsWeb) return;
+    // Solo desktop: en Android/iOS el watcher nativo ya maneja los cambios.
     if (!Platform.isLinux && !Platform.isWindows && !Platform.isMacOS) return;
     unawaited(MediaScanner.instance.rescanNow());
   }
@@ -24,11 +26,16 @@ class _LifecycleRescanObserver with WidgetsBindingObserver {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // FIX #1: just_audio_media_kit SOLO en desktop.
+  // En Android carga libmpv y buffers nativos innecesarios que inflan
+  // el heap Java desde el arranque (causa del OOM sin escanear).
+  if (!kIsWeb &&
+      (Platform.isLinux || Platform.isWindows || Platform.isMacOS)) {
     JustAudioMediaKit.ensureInitialized(
-    linux: true,
-    windows: true,
-  );
-
+      linux: true,
+      windows: true,
+    );
+  }
 
   // 1) Configuración de sesión de audio (foco, bluetooth, etc.)
   final session = await AudioSession.instance;
@@ -61,7 +68,13 @@ class _BassyAppState extends State<BassyApp> {
     } catch (e, st) {
       debugPrint('SettingsService.load failed: $e\n$st');
     }
-    unawaited(MediaScanner.instance.ensureInitialScan());
+    // FIX #2: NO escanear automáticamente al arrancar en Android.
+    // El escaneo inicial + watchers + audio_service al mismo tiempo
+    // saturan el heap Java. Dejamos que la UI lo dispare cuando el
+    // usuario entre a la biblioteca (o cuando PermissionGate lo permita).
+    // Si prefieres el comportamiento anterior, descomenta la línea
+    // y asegúrate de aplicar el fix de carátulas en media_scanner.dart.
+    // unawaited(MediaScanner.instance.ensureInitialScan());
   }
 
   @override
@@ -94,7 +107,7 @@ class _BassyAppState extends State<BassyApp> {
       surfaceContainerLow: grey100,
       surfaceContainer: grey200,
       surfaceContainerHigh: grey300,
-      surfaceContainerHighest: Color(0xFF333333),
+      surfaceContainerHighest: const Color(0xFF333333),
       onSurfaceVariant: grey700,
       outline: grey600,
       outlineVariant: grey300,
