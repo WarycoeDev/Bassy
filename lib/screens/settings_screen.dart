@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:bassy/widgets/directory_picker_dialog.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
@@ -674,45 +675,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _pickDirectory(
-    BuildContext context, {
-    required String title,
-    required Future<void> Function(String) onAdded,
-    required List<String> existing,
-  }) async {
-    try {
-      final selected = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: title,
-      );
+  BuildContext context, {
+  required String title,
+  required Future<void> Function(String) onAdded,
+  required List<String> existing,
+}) async {
+  try {
+    final selected = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => DirectoryPickerDialog(
+        title: title,
+        initialPath: existing.isNotEmpty ? existing.first : null,
+      ),
+    );
 
-      if (selected == null || selected.trim().isEmpty) return;
+    if (selected == null || selected.trim().isEmpty) return;
 
-      final normalized = selected.trim().replaceAll(RegExp(r'/+$'), '');
-      final alreadyExists = existing.any(
-        (d) => d.replaceAll(RegExp(r'/+$'), '') == normalized,
-      );
+    final normalized = selected.trim().replaceAll(RegExp(r'/+$'), '');
+    final alreadyExists = existing.any(
+      (d) => d.replaceAll(RegExp(r'/+$'), '') == normalized,
+    );
 
-      if (alreadyExists) {
-        if (context.mounted) {
-          await _showInfoDialog(
-            context,
-            title: 'Directorio duplicado',
-            message: 'Esa carpeta ya está en la lista.',
-          );
-        }
-        return;
-      }
-
-      await onAdded(normalized);
-    } catch (e) {
+    if (alreadyExists) {
       if (context.mounted) {
         await _showInfoDialog(
           context,
-          title: 'Error',
-          message: 'No se pudo abrir el selector de carpetas:\n$e',
+          title: 'Directorio duplicado',
+          message: 'Esa carpeta ya está en la lista.',
         );
       }
+      return;
+    }
+
+    await onAdded(normalized);
+  } catch (e) {
+    if (context.mounted) {
+      await _showInfoDialog(
+        context,
+        title: 'Error',
+        message: 'No se pudo abrir el selector de carpetas:\n$e',
+      );
     }
   }
+}
 
   Future<void> _showInfoDialog(
     BuildContext context, {
