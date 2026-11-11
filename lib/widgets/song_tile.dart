@@ -14,8 +14,6 @@ class SongTile extends StatelessWidget {
   final VoidCallback? onTap;
   final VoidCallback? onMore;
 
-  /// Si es `true`, muestra el badge de "reproduciendo" cuando esta canción
-  /// es la actual en el `PlaybackController`.
   final bool showPlayingIndicator;
 
   const SongTile({
@@ -26,8 +24,6 @@ class SongTile extends StatelessWidget {
     this.showPlayingIndicator = true,
   });
 
-  // Cache por path + mtime: evita repetir existsSync() en cada build y
-  // se invalida si el archivo cambia (portada actualizada).
   static final Map<String, _CoverCacheEntry> _coverCache = {};
 
   static bool _hasCover(String? cover) {
@@ -84,8 +80,9 @@ class SongTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 4),
+                  // Solo artista (o "Artista desconocido").
                   Text(
-                    song.subtitle,
+                    song.artistOrUnknown,
                     style: TextStyle(
                       color: scheme.onSurfaceVariant,
                       fontSize: 12,
@@ -160,7 +157,7 @@ class SongTile extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: Semantics(
-          label: '${song.title}. ${song.subtitle}. ${song.durationLabel}',
+          label: '${song.title}. ${song.artistOrUnknown}. ${song.durationLabel}',
           button: true,
           onLongPress: () => SongContextMenu.showSheet(context, song),
           child: interactive,
@@ -215,11 +212,6 @@ class SongTile extends StatelessWidget {
     );
   }
 
-  // ---------- Acciones por defecto ----------
-
-  /// Tap normal:
-  /// - Cola vacía → reproduce esta canción.
-  /// - Cola con canciones → menú de COLA (no el de contexto).
   Future<void> _defaultOnTap(BuildContext context) async {
     final c = PlaybackController.instance;
 
@@ -258,9 +250,6 @@ class SongTile extends StatelessWidget {
   }
 }
 
-/// Badge que se suscribe a `currentItem` y muestra `graphic_eq` si esta
-/// canción es la actual. Se aísla en su propio widget para que solo él
-/// se reconstruya cuando cambia la pista.
 class _PlayingBadge extends StatelessWidget {
   final Song song;
   final bool onCover;

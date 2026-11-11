@@ -5,37 +5,16 @@ enum MediaKind { music, podcast }
 
 @immutable
 class Song {
-  /// Ruta absoluta del archivo.
   final String path;
-
-  /// Nombre del archivo sin extensión (título "fallback").
   final String fileName;
-
-  /// Título mostrado.
   final String title;
-
-  /// Artista (si se lee de tags, si no queda vacío).
   final String artist;
-
-  /// Álbum (idem).
   final String album;
-
-  /// Extensión en minúsculas sin punto: mp3, m4a, flac, ogg, opus, wav, aac.
   final String extension;
-
-  /// Tamaño en bytes.
   final int sizeBytes;
-
-  /// Última modificación (útil para invalidar caché).
   final DateTime modified;
-
-  /// Música o podcast, según el directorio donde se encontró.
   final MediaKind kind;
-
-  /// Duración leída de los tags. `Duration.zero` si no se pudo leer.
   final Duration duration;
-
-  /// Ruta absoluta al JPG de carátula extraído (o `null` si no hay).
   final String? coverPath;
 
   const Song({
@@ -52,7 +31,18 @@ class Song {
     this.coverPath,
   });
 
-  /// Tamaño legible tipo "8.2 MB".
+  /// Artista normalizado: valor real o "Artista desconocido".
+  String get artistOrUnknown =>
+      artist.trim().isNotEmpty ? artist.trim() : 'Artista desconocido';
+
+  /// Álbum normalizado: valor real o "Álbum desconocido".
+  String get albumOrUnknown =>
+      album.trim().isNotEmpty ? album.trim() : 'Álbum desconocido';
+
+  /// `true` si el artista está vacío (para no mostrar subtítulos redundantes).
+  bool get hasArtist => artist.trim().isNotEmpty;
+  bool get hasAlbum => album.trim().isNotEmpty;
+
   String get sizeLabel {
     if (sizeBytes < 1024) return '$sizeBytes B';
     const units = ['KB', 'MB', 'GB'];
@@ -65,8 +55,6 @@ class Song {
     return '${v.toStringAsFixed(1)} ${units[i]}';
   }
 
-  /// Duración formateada "3:42" o "1:02:03" si supera la hora.
-  /// "--:--" cuando aún no se conoce.
   String get durationLabel {
     final total = duration.inSeconds;
     if (total <= 0) return '--:--';
@@ -78,18 +66,15 @@ class Song {
     return '$m:$ss';
   }
 
-  /// Subtítulo para el tile: artista · álbum si existen, si no la carpeta padre.
+  /// Subtítulo para el tile: artista · álbum si existen, si no "Artista desconocido".
   String get subtitle {
-    if (artist.isNotEmpty) {
-      return album.isNotEmpty ? '$artist · $album' : artist;
+    if (hasArtist) {
+      return hasAlbum ? '$artist · $album' : artist;
     }
-    if (album.isNotEmpty) return album;
-    final parts = path.split(RegExp(r'[/\\]'));
-    if (parts.length >= 2) return parts[parts.length - 2];
-    return kind == MediaKind.podcast ? 'Podcast' : 'Música';
+    if (hasAlbum) return album;
+    return 'Artista desconocido';
   }
 
-  /// Clave estable para identificar la canción (ruta).
   String get id => path;
 
   Song copyWith({
