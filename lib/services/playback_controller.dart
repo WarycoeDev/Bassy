@@ -42,7 +42,6 @@ class PlaybackController {
 
   // ---- Atajos ----
 
-  /// FIX: propaga `autoPlay` al handler (por defecto reproduce).
   Future<void> setQueue(
     List<Song> songs, {
     int startIndex = 0,
@@ -58,6 +57,10 @@ class PlaybackController {
   Future<void> seek(Duration position) => handler.seek(position);
   Future<void> playFromQueue(int index) => handler.playFromQueue(index);
   Future<void> addToQueue(Song song) => handler.addToQueue(song);
+
+  /// Vacía la cola y detiene la reproducción (usado por el swipe del
+  /// miniplayer para descartar lo que está sonando).
+  Future<void> clearQueue() => handler.clearQueue();
 
   // ---- Streams (nativos, sin rxdart) ----
 

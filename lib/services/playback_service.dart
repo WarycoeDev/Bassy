@@ -237,6 +237,10 @@ class PlaybackAudioHandler extends BaseAudioHandler
     await _player.stop();
   }
 
+  /// Limpia la cola y detiene la reproducción. Método público para la UI
+  /// (ej.: gesto de descartar el miniplayer).
+  Future<void> clearQueue() => _clearQueue();
+
   /// Añade una canción al final de la cola SIN cortar la reproducción.
   Future<void> addToQueue(Song song) async {
     final path = song.path;

@@ -217,13 +217,252 @@ class MiniPlayerCard extends StatelessWidget {
 }
 
 // ============================================================
-// MINIPLAYER TIPO BARRA (móvil, parte inferior)
-// ============================================================
-// ============================================================
 // MINIPLAYER TIPO BARRA FLOTANTE (móvil, sobre el contenido)
 // ============================================================
-class MiniPlayerBar extends StatelessWidget {
+class MiniPlayerBar extends StatefulWidget {
   const MiniPlayerBar({super.key});
+
+  @override
+  State<MiniPlayerBar> createState() => _MiniPlayerBarState();
+}
+
+enum _MiniPlayerVisibility { visible, hiddenBySwipe }
+
+class _MiniPlayerBarState extends State<MiniPlayerBar>
+    with SingleTickerProviderStateMixin {
+  _MiniPlayerVisibility _visibility = _MiniPlayerVisibility.visible;
+
+  AnimationController? _settleController;
+  Animation<Offset>? _offsetAnim;
+  Animation<double>? _opacityAnim;
+
+  Offset _dragOffset = Offset.zero;
+  double _dragOpacity = 1.0;
+
+  Offset _settleOffset = Offset.zero;
+  double _settleOpacity = 1.0;
+
+  bool _animatingOut = false;
+
+  /// `true` cuando el miniplayer acaba de "aparecer" (primera canción
+  /// o tras vaciar la cola) y aún no ha ejecutado su animación de
+  /// entrada. Se consume en el primer build con canción disponible,
+  /// ANTES de pintar, para que no haya frame intermedio en posición
+  /// final (eso causaba el parpadeo).
+  bool _pendingEntrance = false;
+
+  /// Id del último MediaItem mostrado.
+  String? _lastItemId;
+
+  static const double _dragThreshold = 160;
+  static const double _velocityThreshold = 350;
+  static const Offset _closeTarget = Offset(400, 0);
+  static const Offset _hideTarget = Offset(0, 200);
+
+  @override
+  void initState() {
+    super.initState();
+    final c = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    );
+    c.addListener(_onSettleTick);
+    _settleController = c;
+    // Primera aparición: animación de entrada desde abajo.
+    _pendingEntrance = true;
+  }
+
+  void _onSettleTick() {
+    final o = _offsetAnim;
+    final op = _opacityAnim;
+    if (o == null || op == null) return;
+    if (!mounted) return;
+    setState(() {
+      _settleOffset = o.value;
+      _settleOpacity = op.value;
+    });
+  }
+
+  @override
+  void dispose() {
+    final c = _settleController;
+    _settleController = null;
+    _offsetAnim = null;
+    _opacityAnim = null;
+    if (c != null) {
+      c.removeListener(_onSettleTick);
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  /// Limpia el estado visual y deja `_pendingEntrance = true` para que
+  /// la próxima canción aparezca con la animación de entrada.
+  void _resetVisualState({bool triggerEntrance = true}) {
+    _settleController?.reset();
+    _offsetAnim = null;
+    _opacityAnim = null;
+    _dragOffset = Offset.zero;
+    _dragOpacity = 1.0;
+    _settleOffset = Offset.zero;
+    _settleOpacity = 1.0;
+    _animatingOut = false;
+    _visibility = _MiniPlayerVisibility.visible;
+    _pendingEntrance = triggerEntrance;
+  }
+
+  Offset get _effectiveOffset => _dragOffset + _settleOffset;
+  double get _effectiveOpacity =>
+      (_dragOpacity * _settleOpacity).clamp(0.0, 1.0);
+
+  // ---------- Settle helper ----------
+
+  Future<void> _settle({
+    required Offset target,
+    required double targetOpacity,
+    Curve curve = Curves.easeOutCubic,
+    VoidCallback? onDone,
+  }) async {
+    final controller = _settleController;
+    if (!mounted || controller == null) {
+      onDone?.call();
+      return;
+    }
+
+    final startOffset = _effectiveOffset;
+    final startOpacity = _effectiveOpacity;
+
+    _offsetAnim = Tween<Offset>(begin: startOffset, end: target)
+        .chain(CurveTween(curve: curve))
+        .animate(controller);
+    _opacityAnim = Tween<double>(begin: startOpacity, end: targetOpacity)
+        .chain(CurveTween(curve: curve))
+        .animate(controller);
+
+    _dragOffset = Offset.zero;
+    _dragOpacity = 1.0;
+
+    controller.reset();
+    try {
+      await controller.forward().orCancel;
+    } on TickerCanceled {
+      return;
+    }
+    if (!mounted) return;
+    onDone?.call();
+  }
+
+  // ---------- Cierre (swipe derecha) ----------
+
+  Future<void> _closeAndClear() async {
+    if (_animatingOut) return;
+    setState(() => _animatingOut = true);
+
+    await _settle(target: _closeTarget, targetOpacity: 0.0);
+    if (!mounted) return;
+
+    await PlaybackController.instance.clearQueue();
+    if (!mounted) return;
+
+    setState(() {
+      _animatingOut = false;
+      _settleOffset = Offset.zero;
+      _settleOpacity = 1.0;
+      _dragOffset = Offset.zero;
+      _dragOpacity = 1.0;
+    });
+    _settleController?.reset();
+  }
+
+  // ---------- Ocultar (swipe abajo) ----------
+
+  Future<void> _hide() async {
+    if (_animatingOut) return;
+    setState(() => _animatingOut = true);
+
+    await _settle(target: _hideTarget, targetOpacity: 0.0);
+    if (!mounted) return;
+
+    setState(() {
+      _visibility = _MiniPlayerVisibility.hiddenBySwipe;
+      _animatingOut = false;
+      _settleOffset = Offset.zero;
+      _settleOpacity = 1.0;
+      _dragOffset = Offset.zero;
+      _dragOpacity = 1.0;
+    });
+    _settleController?.reset();
+  }
+
+  // ---------- Mostrar (tap en FAB) ----------
+
+  void _show() {
+    if (_visibility == _MiniPlayerVisibility.visible) return;
+    setState(() {
+      _visibility = _MiniPlayerVisibility.visible;
+      _dragOffset = _hideTarget;
+      _dragOpacity = 0.0;
+      _settleOffset = Offset.zero;
+      _settleOpacity = 1.0;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _settle(target: Offset.zero, targetOpacity: 1.0);
+    });
+  }
+
+  // ---------- Snap-back ----------
+
+  void _snapBack() {
+    _settle(target: Offset.zero, targetOpacity: 1.0);
+  }
+
+  // ---------- Gestos ----------
+
+  void _onHorizontalDragUpdate(DragUpdateDetails d) {
+    if (_animatingOut) return;
+    final next = (_dragOffset.dx + d.delta.dx).clamp(0.0, 400.0);
+    setState(() {
+      _dragOffset = Offset(next, 0);
+      _dragOpacity = (1.0 - next / 400.0).clamp(0.0, 1.0);
+    });
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails d) {
+    if (_animatingOut) return;
+    final next = (_dragOffset.dy + d.delta.dy).clamp(0.0, 200.0);
+    setState(() {
+      _dragOffset = Offset(0, next);
+      _dragOpacity = (1.0 - next / 200.0).clamp(0.0, 1.0);
+    });
+  }
+
+  void _onHorizontalDragEnd(DragEndDetails d) {
+    if (_animatingOut) return;
+    final v = d.primaryVelocity ?? 0;
+    final passed = v > _velocityThreshold || _dragOffset.dx > _dragThreshold;
+    if (passed) {
+      _closeAndClear();
+    } else {
+      _snapBack();
+    }
+  }
+
+  void _onVerticalDragEnd(DragEndDetails d) {
+    if (_animatingOut) return;
+    final v = d.primaryVelocity ?? 0;
+    final passed = v > _velocityThreshold || _dragOffset.dy > _dragThreshold;
+    if (passed) {
+      _hide();
+    } else {
+      _snapBack();
+    }
+  }
+
+  void _onDragCancel() {
+    if (_animatingOut) return;
+    _snapBack();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -236,10 +475,136 @@ class MiniPlayerBar extends StatelessWidget {
       stream: controller.currentItem,
       builder: (context, mediaSnap) {
         final song = controller.currentSong;
+        final itemId = mediaSnap.data?.id;
+
+        // --- Sin canción actual ---
         if (song == null || mediaSnap.data == null) {
+          // Reseteamos el estado visual y dejamos pendiente la
+          // animación de entrada para la próxima canción.
+          if (_lastItemId != null ||
+              _dragOffset != Offset.zero ||
+              _settleOffset != Offset.zero ||
+              _visibility != _MiniPlayerVisibility.visible ||
+              _animatingOut ||
+              !_pendingEntrance) {
+            _lastItemId = null;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              if (_lastItemId != null) return; // apareció otra canción
+              setState(() => _resetVisualState(triggerEntrance: true));
+            });
+          }
           return const SizedBox.shrink();
         }
 
+        // --- Hay canción ---
+        if (_lastItemId != itemId) {
+          _lastItemId = itemId;
+          if (!_pendingEntrance) {
+            // Cambio entre canciones con miniplayer ya visible: reset
+            // silencioso para no heredar offsets residuales.
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              if (_lastItemId != itemId) return;
+              setState(() {
+                _settleController?.reset();
+                _offsetAnim = null;
+                _opacityAnim = null;
+                _dragOffset = Offset.zero;
+                _dragOpacity = 1.0;
+                _settleOffset = Offset.zero;
+                _settleOpacity = 1.0;
+              });
+            });
+          }
+        }
+
+        // --- Animación de entrada: PRIMAR ANTES del primer frame ---
+        // Mutamos los campos visuales directamente (sin setState) antes
+        // de devolver el árbol. Así el primer frame ya se pinta abajo y
+        // transparente → el usuario solo ve la animación de subida, sin
+        // un frame intermedio en su posición final (eso era el parpadeo).
+        if (_pendingEntrance) {
+          _pendingEntrance = false;
+          _settleController?.reset();
+          _offsetAnim = null;
+          _opacityAnim = null;
+          _dragOffset = _hideTarget;
+          _dragOpacity = 0.0;
+          _settleOffset = Offset.zero;
+          _settleOpacity = 1.0;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _settle(target: Offset.zero, targetOpacity: 1.0);
+          });
+        }
+
+        // --- Estado oculto: FAB para restaurar ---
+        if (_visibility == _MiniPlayerVisibility.hiddenBySwipe) {
+          return Align(
+            alignment: Alignment.bottomRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 16, bottom: 16),
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0.0, end: 1.0),
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeOutCubic,
+                builder: (context, t, child) {
+                  return Opacity(
+                    opacity: t,
+                    child: Transform.translate(
+                      offset: Offset(0, (1 - t) * 24),
+                      child: child,
+                    ),
+                  );
+                },
+                child: Material(
+                  color: Colors.transparent,
+                  shape: const CircleBorder(),
+                  elevation: 6,
+                  child: Ink(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          scheme.primary,
+                          Color.lerp(
+                            scheme.primary,
+                            scheme.tertiary,
+                            0.3,
+                          )!,
+                        ],
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: scheme.primary.withValues(alpha: 0.35),
+                          blurRadius: 16,
+                          offset: const Offset(0, 6),
+                        ),
+                      ],
+                    ),
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: _show,
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Icon(
+                          Icons.play_circle_fill_rounded,
+                          color: scheme.onPrimary,
+                          size: 30,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+
+        // --- Estado visible: miniplayer + gestos ---
         return StreamBuilder<bool>(
           stream: controller.isPlaying,
           initialData: controller.handler.isPlaying,
@@ -256,8 +621,7 @@ class MiniPlayerBar extends StatelessWidget {
                         .clamp(0.0, 1.0)
                     : 0.0;
 
-                // --- Contenedor flotante ---
-                return Padding(
+                final bar = Padding(
                   padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
                   child: Material(
                     color: Colors.transparent,
@@ -273,7 +637,8 @@ class MiniPlayerBar extends StatelessWidget {
                         ),
                         borderRadius: BorderRadius.circular(20),
                         border: Border.all(
-                          color: scheme.outlineVariant.withValues(alpha: 0.4),
+                          color: scheme.outlineVariant
+                              .withValues(alpha: 0.4),
                         ),
                         boxShadow: [
                           BoxShadow(
@@ -292,12 +657,12 @@ class MiniPlayerBar extends StatelessWidget {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          // --- Barra de progreso fina (pegada al borde superior) ---
                           TweenAnimationBuilder<double>(
                             tween: Tween(begin: 0, end: progress),
                             duration: const Duration(milliseconds: 300),
                             curve: Curves.easeOut,
-                            builder: (_, value, __) => LinearProgressIndicator(
+                            builder: (_, value, __) =>
+                                LinearProgressIndicator(
                               value: value,
                               minHeight: 2.5,
                               backgroundColor:
@@ -327,10 +692,12 @@ class MiniPlayerBar extends StatelessWidget {
                                       Text(
                                         song.title,
                                         maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
+                                        overflow:
+                                            TextOverflow.ellipsis,
                                         style: TextStyle(
                                           color: scheme.onSurface,
-                                          fontWeight: FontWeight.w600,
+                                          fontWeight:
+                                              FontWeight.w600,
                                           fontSize: 14,
                                           letterSpacing: -0.1,
                                         ),
@@ -339,9 +706,11 @@ class MiniPlayerBar extends StatelessWidget {
                                       Text(
                                         song.subtitle,
                                         maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
+                                        overflow:
+                                            TextOverflow.ellipsis,
                                         style: TextStyle(
-                                          color: scheme.onSurfaceVariant,
+                                          color: scheme
+                                              .onSurfaceVariant,
                                           fontSize: 12,
                                         ),
                                       ),
@@ -358,7 +727,8 @@ class MiniPlayerBar extends StatelessWidget {
                                   size: 42,
                                 ),
                                 IconButton(
-                                  icon: const Icon(Icons.skip_next_rounded),
+                                  icon: const Icon(
+                                      Icons.skip_next_rounded),
                                   iconSize: 26,
                                   color: scheme.onSurface,
                                   onPressed: controller.next,
@@ -369,6 +739,23 @@ class MiniPlayerBar extends StatelessWidget {
                           ),
                         ],
                       ),
+                    ),
+                  ),
+                );
+
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onHorizontalDragUpdate: _onHorizontalDragUpdate,
+                  onHorizontalDragEnd: _onHorizontalDragEnd,
+                  onHorizontalDragCancel: _onDragCancel,
+                  onVerticalDragUpdate: _onVerticalDragUpdate,
+                  onVerticalDragEnd: _onVerticalDragEnd,
+                  onVerticalDragCancel: _onDragCancel,
+                  child: Opacity(
+                    opacity: _effectiveOpacity,
+                    child: Transform.translate(
+                      offset: _effectiveOffset,
+                      child: bar,
                     ),
                   ),
                 );
