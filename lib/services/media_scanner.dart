@@ -48,11 +48,9 @@ class ScanProgress {
   int get totalCount => songs.length + podcasts.length;
 }
 
-/// Evento normalizado que unifica `FileSystemEvent` (Dart) y `WatchEvent`
-/// (package:watcher). Así el resto del scanner solo trabaja con un tipo.
 class _FsEvent {
   final String path;
-  final String? oldPath; // solo para MOVE/rename
+  final String? oldPath;
   final _FsEventKind kind;
 
   const _FsEvent(this.kind, this.path, {this.oldPath});
@@ -75,23 +73,29 @@ class MediaScanner {
     'wma',
   };
 
+  /// Cada cuántos archivos procesados emitimos snapshot + cedemos event loop.
+  static const int _progressEvery = 10;
+
+  /// Umbral de "archivo recién creado". Si `mtime` está dentro de esta
+  /// ventana, hacemos la comprobación de estabilidad (stat doble con delay)
+  /// para evitar listar archivos que se están copiando todavía.
+  static const Duration _recentFileWindow = Duration(seconds: 5);
+
+  /// Delay entre los dos `stat` de la comprobación de estabilidad.
+  static const Duration _stabilityDelay = Duration(milliseconds: 150);
+
   bool _scanning = false;
   bool get isScanning => _scanning;
+
+  bool _cancelRequested = false;
+  int _scanProcessedCount = 0;
 
   ScanResult? _lastResult;
   ScanResult? get lastResult => _lastResult;
 
   bool _initialScanDone = false;
-
-  /// Future del escaneo inicial en curso (o ya resuelto).
-  /// Se reutiliza para que las llamadas concurrentes compartan el mismo.
   Future<void>? _initialScanFuture;
-
-  /// Petición de rescan pendiente. Se resuelve cuando el escaneo en curso
-  /// termina, de modo que `scan()`/`rescanNow()` esperan al nuevo resultado.
   Completer<void>? _rescanCompleter;
-
-  /// Evita que `scan()` dispare dos escaneos concurrentes.
   bool _forceRescan = false;
 
   final List<Song> _liveSongs = [];
@@ -106,16 +110,83 @@ class MediaScanner {
   bool _watcherStarting = false;
 
   // ---------------------------------------------------------------------------
+  // Orden estable (inserción con búsqueda binaria)
+  // ---------------------------------------------------------------------------
+
+  static int _compareSongs(Song a, Song b) {
+    final byTitle = a.title.toLowerCase().compareTo(b.title.toLowerCase());
+    if (byTitle != 0) return byTitle;
+    final byArtist = a.artist.toLowerCase().compareTo(b.artist.toLowerCase());
+    if (byArtist != 0) return byArtist;
+    return a.path.compareTo(b.path);
+  }
+
+  int _insertSorted(List<Song> list, Song song) {
+    var lo = 0;
+    var hi = list.length;
+    while (lo < hi) {
+      final mid = (lo + hi) >> 1;
+      if (_compareSongs(list[mid], song) < 0) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    if (lo < list.length && list[lo].path == song.path) {
+      list[lo] = song;
+      return lo;
+    }
+    list.insert(lo, song);
+    return lo;
+  }
+
+  void _sortInPlace(List<Song> list) {
+    list.sort(_compareSongs);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Comprobación de estabilidad de archivo
+  // ---------------------------------------------------------------------------
+
+  /// Devuelve `true` si el archivo parece completamente escrito.
+  ///
+  /// Hace dos `stat` separados por [_stabilityDelay] y compara `size` +
+  /// `mtime`. Si no cambian y `size > 0`, el archivo está estable.
+  ///
+  /// Solo se invoca cuando el archivo es reciente (`mtime < 5s`), así que
+  /// el coste de ~150ms por archivo solo se paga durante una copia activa.
+  Future<bool> _isFileStable(File file) async {
+    try {
+      final s1 = await file.stat();
+      if (s1.size <= 0) return false;
+      await Future<void>.delayed(_stabilityDelay);
+      final s2 = await file.stat();
+      return s1.size == s2.size && s1.modified == s2.modified;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Decide si el archivo se puede procesar ahora.
+  ///
+  /// - Archivos "viejos" (mtime fuera de [_recentFileWindow]): sí.
+  /// - Archivos recientes: solo si [_isFileStable] confirma que ya no crecen.
+  ///
+  /// Si devuelve `false`, el archivo se ignora en este pase; el watcher lo
+  /// recogerá cuando termine de escribirse (evento MODIFY/ADD posterior).
+  Future<bool> _canProcessNow(File file, FileStat stat) async {
+    final age = DateTime.now().difference(stat.modified);
+    if (age >= _recentFileWindow) return true;
+    return _isFileStable(file);
+  }
+
+  // ---------------------------------------------------------------------------
   // Escaneo inicial / rescan
   // ---------------------------------------------------------------------------
 
-  /// Garantiza que la biblioteca se haya escaneado al menos una vez.
-  /// Si ya hay un escaneo en curso, comparte su future. Si ya terminó,
-  /// devuelve un future resuelto inmediatamente.
   Future<void> ensureInitialScan() {
     if (_initialScanDone && !_forceRescan) return Future.value();
 
-    // Si hay un escaneo en curso, devolvemos su future (no completamos nada).
     final inFlight = _initialScanFuture;
     if (inFlight != null) return inFlight;
 
@@ -141,6 +212,8 @@ class MediaScanner {
 
   Future<void> _doInitialScan() async {
     _scanning = true;
+    _cancelRequested = false;
+    _scanProcessedCount = 0;
     _emitSnapshot(statusMessage: 'Escaneando biblioteca…');
 
     _liveErrors.clear();
@@ -150,20 +223,47 @@ class MediaScanner {
     try {
       final settings = await SettingsService.instance.load();
 
+      // --- Música ---
       await for (final s in _scanDirsStream(
         dirs: settings.musicDirs,
         kind: MediaKind.music,
         errors: _liveErrors,
       )) {
-        _liveSongs.add(s);
+        if (_cancelRequested) break;
+        _insertSorted(_liveSongs, s);
+        _scanProcessedCount++;
+        if (_scanProcessedCount % _progressEvery == 0) {
+          _emitSnapshot(
+            statusMessage:
+                'Escaneando… $_scanProcessedCount archivos · ${_liveSongs.length} música',
+          );
+          await Future<void>.delayed(Duration.zero);
+        }
       }
 
-      await for (final s in _scanDirsStream(
-        dirs: settings.podcastDirs,
-        kind: MediaKind.podcast,
-        errors: _liveErrors,
-      )) {
-        _livePodcasts.add(s);
+      // --- Podcasts ---
+      if (!_cancelRequested) {
+        await for (final s in _scanDirsStream(
+          dirs: settings.podcastDirs,
+          kind: MediaKind.podcast,
+          errors: _liveErrors,
+        )) {
+          if (_cancelRequested) break;
+          _insertSorted(_livePodcasts, s);
+          _scanProcessedCount++;
+          if (_scanProcessedCount % _progressEvery == 0) {
+            _emitSnapshot(
+              statusMessage:
+                  'Escaneando… $_scanProcessedCount archivos · ${_livePodcasts.length} podcasts',
+            );
+            await Future<void>.delayed(Duration.zero);
+          }
+        }
+      }
+
+      if (_cancelRequested) {
+        debugPrint('MediaScanner: scan cancelado');
+        return;
       }
 
       _sortInPlace(_liveSongs);
@@ -177,18 +277,22 @@ class MediaScanner {
       await MetadataCache.instance.flush();
 
       _publishResult();
+      _emitSnapshot(
+        statusMessage:
+            'Listo: ${_liveSongs.length} canciones · ${_livePodcasts.length} podcasts',
+      );
     } finally {
       _scanning = false;
+      _scanProcessedCount = 0;
       _emitSnapshot(clearStatus: true);
     }
   }
 
-  /// Fuerza un rescan completo desde cero. Espera a que termine el escaneo
-  /// en curso (si lo hay) y devuelve el nuevo `ScanResult`.
   Future<ScanResult> rescanNow() => scan();
 
   Future<ScanResult> scan() async {
-    // Si ya hay un rescan pendiente, esperamos a ese en lugar de duplicar.
+    _cancelRequested = true;
+
     final pending = _rescanCompleter;
     if (pending != null) {
       await pending.future;
@@ -199,21 +303,17 @@ class MediaScanner {
     _rescanCompleter = completer;
 
     try {
-      // Espera al escaneo actual (si existe) antes de forzar el nuevo.
       final inFlight = _initialScanFuture;
       if (inFlight != null) {
         try {
           await inFlight;
-        } catch (_) {
-          // Si falló, igualmente hacemos el rescan.
-        }
+        } catch (_) {}
       }
 
       _initialScanDone = false;
       _forceRescan = true;
 
       final newFuture = _runForcedScan();
-      // Comparte el nuevo future para llamadas concurrentes.
       _initialScanFuture = newFuture;
       await newFuture;
 
@@ -225,12 +325,8 @@ class MediaScanner {
     }
   }
 
-  /// Ejecuta un escaneo forzado que ignora `_initialScanDone` y siempre
-  /// emite un nuevo resultado. No toca `_initialScanFuture` directamente;
-  /// lo gestiona `scan()`.
   Future<void> _runForcedScan() async {
     final completer = Completer<void>();
-    // Guardamos para que otras llamadas a ensureInitialScan compartan.
     _doInitialScan()
         .then((_) {
           if (!completer.isCompleted) completer.complete();
@@ -241,7 +337,6 @@ class MediaScanner {
         .whenComplete(() {
           _initialScanDone = true;
           _forceRescan = false;
-          // Limpia el future solo si sigue siendo este (no otro rescan).
           if (identical(_initialScanFuture, completer.future)) {
             _initialScanFuture = null;
           }
@@ -281,7 +376,7 @@ class MediaScanner {
   }
 
   // ---------------------------------------------------------------------------
-  // Watchers (package:watcher → recursivo real en Linux/macOS/Windows)
+  // Watchers
   // ---------------------------------------------------------------------------
 
   Future<void> _startWatcher() async {
@@ -300,7 +395,6 @@ class MediaScanner {
           continue;
         }
         try {
-          // DirectoryWatcher de package:watcher es recursivo portable.
           final sub = DirectoryWatcher(dirPath).events.listen(
             _onWatchEvent,
             onError: (Object e) {
@@ -370,8 +464,6 @@ class MediaScanner {
         kind = _FsEventKind.delete;
         break;
       default:
-        // Cambio desconocido: tratarlo como modificación (re-upsert).
-        // Al hacer upsert, si el archivo ya no existe, _upsertPath hace delete.
         kind = _FsEventKind.modify;
         break;
     }
@@ -401,6 +493,7 @@ class MediaScanner {
         } catch (e, st) {
           debugPrint('Watcher: error en ${ev.path}: $e\n$st');
         }
+        await Future<void>.delayed(Duration.zero);
       }
     } finally {
       _draining = false;
@@ -419,20 +512,14 @@ class MediaScanner {
       case _FsEventKind.modify:
         await _upsertPath(ev.path);
         break;
-
       case _FsEventKind.delete:
         await _removePath(ev.path);
         break;
-
       case _FsEventKind.move:
-        // Si tenemos oldPath (package:watcher en Linux/macOS/Windows),
-        // quitamos el viejo y re-escaneamos el nuevo.
         final oldPath = ev.oldPath;
         if (oldPath != null) {
           await _removePath(oldPath);
         } else {
-          // Sin oldPath: puede ser un directorio movido; intentamos limpiar
-          // el path actual por si acaso y re-escaneamos el destino.
           await _removePath(ev.path);
         }
         await _upsertPath(ev.path);
@@ -449,7 +536,11 @@ class MediaScanner {
     final exists = await file.exists();
 
     if (exists && isAudio) {
-      // Archivo de audio nuevo o modificado.
+      // Mismo blindaje que en _walkStream: si el archivo acaba de crearse
+      // y aún se está copiando, no lo procesamos todavía. El watcher
+      // disparará otro MODIFY cuando termine.
+      if (!await _canProcessNow(file, stat)) return;
+
       final kind = await _kindForPath(path);
       final song = await _buildSong(
         entity: file,
@@ -460,51 +551,38 @@ class MediaScanner {
       );
       if (song == null) return;
       final list = kind == MediaKind.music ? _liveSongs : _livePodcasts;
-      final idx = list.indexWhere((s) => s.path == path);
-      if (idx >= 0) {
-        list[idx] = song;
-      } else {
-        list.add(song);
-      }
-      _sortInPlace(list);
+      _insertSorted(list, song);
       return;
     }
 
     if (!exists) {
-      // Puede ser un directorio recién creado (o movido): re-escanearlo.
       final dir = Directory(path);
       if (await dir.exists()) {
         final kind = await _kindForPath(path);
+        final target = kind == MediaKind.music ? _liveSongs : _livePodcasts;
         await for (final s in _scanDirsStream(
           dirs: [path],
           kind: kind,
           errors: _liveErrors,
         )) {
-          final list = kind == MediaKind.music ? _liveSongs : _livePodcasts;
-          if (!list.any((x) => x.path == s.path)) list.add(s);
+          _insertSorted(target, s);
         }
-        _sortInPlace(_liveSongs);
-        _sortInPlace(_livePodcasts);
         return;
       }
-      // Ni archivo ni directorio: borrar.
       await _removePath(path);
       return;
     }
 
-    // `exists` true pero no es audio: puede ser un directorio.
     if (stat.type == FileSystemEntityType.directory) {
       final kind = await _kindForPath(path);
+      final target = kind == MediaKind.music ? _liveSongs : _livePodcasts;
       await for (final s in _scanDirsStream(
         dirs: [path],
         kind: kind,
         errors: _liveErrors,
       )) {
-        final list = kind == MediaKind.music ? _liveSongs : _livePodcasts;
-        if (!list.any((x) => x.path == s.path)) list.add(s);
+        _insertSorted(target, s);
       }
-      _sortInPlace(_liveSongs);
-      _sortInPlace(_livePodcasts);
     }
   }
 
@@ -527,7 +605,6 @@ class MediaScanner {
       return;
     }
 
-    // Directorio (o path sin extensión): borrar todo lo que cuelgue de él.
     final prefix = path.endsWith(p.separator) ? path : '$path${p.separator}';
     bool matches(String p0) => p0 == path || p0.startsWith(prefix);
     final had =
@@ -549,10 +626,6 @@ class MediaScanner {
       if (path == d || p.isWithin(d, path)) return MediaKind.podcast;
     }
     return MediaKind.music;
-  }
-
-  void _sortInPlace(List<Song> list) {
-    list.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
   }
 
   void _publishResult() {
@@ -599,11 +672,11 @@ class MediaScanner {
     _liveErrors.removeWhere((e) => e.contains(dirPath));
 
     _scanning = true;
-    _emitSnapshot(
-      statusMessage: kind == MediaKind.music
-          ? 'Agregando carpeta de música…'
-          : 'Agregando carpeta de podcasts…',
-    );
+    _cancelRequested = false;
+    _scanProcessedCount = 0;
+
+    final label = kind == MediaKind.music ? 'música' : 'podcasts';
+    _emitSnapshot(statusMessage: 'Agregando carpeta de $label…');
 
     try {
       final target = kind == MediaKind.music ? _liveSongs : _livePodcasts;
@@ -613,8 +686,15 @@ class MediaScanner {
         kind: kind,
         errors: _liveErrors,
       )) {
-        if (!target.any((x) => x.path == s.path)) {
-          target.add(s);
+        if (_cancelRequested) break;
+        _insertSorted(target, s);
+        _scanProcessedCount++;
+        if (_scanProcessedCount % _progressEvery == 0) {
+          _emitSnapshot(
+            statusMessage:
+                'Agregando carpeta de $label… $_scanProcessedCount archivos · ${target.length} encontradas',
+          );
+          await Future<void>.delayed(Duration.zero);
         }
       }
 
@@ -623,6 +703,7 @@ class MediaScanner {
       _publishResult();
     } finally {
       _scanning = false;
+      _scanProcessedCount = 0;
       _emitSnapshot(clearStatus: true);
       await _restartWatcher();
     }
@@ -704,12 +785,25 @@ class MediaScanner {
         recursive: true,
         followLinks: false,
       )) {
+        if (_cancelRequested) return;
         if (entity is! File) continue;
-        final ext = p
-            .extension(entity.path)
-            .replaceFirst('.', '')
-            .toLowerCase();
+        final ext =
+            p.extension(entity.path).replaceFirst('.', '').toLowerCase();
         if (!_audioExts.contains(ext)) continue;
+
+        // Comprobación de estabilidad: solo para archivos recientes.
+        // Si aún se están copiando, se ignora en este pase y el watcher
+        // lo recogerá cuando termine (evento MODIFY/ADD posterior).
+        try {
+          final stat = await entity.stat();
+          if (!await _canProcessNow(entity, stat)) {
+            continue;
+          }
+        } catch (e) {
+          debugPrint('No se pudo stat ${entity.path}: $e');
+          continue;
+        }
+
         try {
           final song = await _buildSong(
             entity: entity,

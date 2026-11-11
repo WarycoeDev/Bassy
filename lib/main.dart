@@ -19,14 +19,18 @@ class _LifecycleRescanObserver with WidgetsBindingObserver {
     if (kIsWeb) return;
     // Solo desktop: en Android/iOS el watcher nativo ya maneja los cambios.
     if (!Platform.isLinux && !Platform.isWindows && !Platform.isMacOS) return;
-    unawaited(MediaScanner.instance.rescanNow());
+    // Ya NO se re-escanea al recuperar foco. El watcher (package:watcher)
+    // está suscrito a todas las carpetas y aplica los cambios en caliente.
+    // ensureInitialScan() es no-op si ya se escaneó al menos una vez,
+    // y solo actúa como red de seguridad si por algún motivo no se hizo.
+    unawaited(MediaScanner.instance.ensureInitialScan());
   }
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // FIX #1: just_audio_media_kit SOLO en desktop.
+  // just_audio_media_kit SOLO en desktop.
   // En Android carga libmpv y buffers nativos innecesarios que inflan
   // el heap Java desde el arranque (causa del OOM sin escanear).
   if (!kIsWeb &&
@@ -68,13 +72,10 @@ class _BassyAppState extends State<BassyApp> {
     } catch (e, st) {
       debugPrint('SettingsService.load failed: $e\n$st');
     }
-    // FIX #2: NO escanear automáticamente al arrancar en Android.
+    // NO escanear automáticamente al arrancar en Android.
     // El escaneo inicial + watchers + audio_service al mismo tiempo
     // saturan el heap Java. Dejamos que la UI lo dispare cuando el
     // usuario entre a la biblioteca (o cuando PermissionGate lo permita).
-    // Si prefieres el comportamiento anterior, descomenta la línea
-    // y asegúrate de aplicar el fix de carátulas en media_scanner.dart.
-    // unawaited(MediaScanner.instance.ensureInitialScan());
   }
 
   @override

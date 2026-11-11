@@ -23,7 +23,6 @@ class LibraryScreen extends StatefulWidget {
   /// Se invoca cuando el usuario pulsa atrás estando ya en la raíz de
   /// Library (no hay rutas internas que popear). El padre (AppShell) decide
   /// qué hacer: volver a Inicio, salir de la app, etc.
-  /// Si es null, el gesto de atrás se ignora (comportamiento conservador).
   final VoidCallback? onExitRoot;
 
   static void pushInLibrary(BuildContext context, Route<void> route) {
@@ -222,19 +221,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // NestedNavigatorScope gestiona el back:
-    //  - Si hay rutas internas → las popea.
-    //  - Si estamos en la raíz → delega en onExitRoot.
     return NestedNavigatorScope(
       navigatorKey: _navKey,
       onExitRoot: widget.onExitRoot,
       child: _buildLibraryHome(context),
     );
   }
-
-  // =========================================================================
-  // A partir de aquí, TODO EL RESTO DEL ARCHIVO PERMANECE IGUAL.
-  // =========================================================================
 
   Widget _buildLibraryHome(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -353,10 +345,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Progreso de escaneo — MEJORADO con contador en vivo
+  // -------------------------------------------------------------------------
+
   Widget _buildScanProgress(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
     if (!_scanning && _scanErrors.isEmpty) return const SizedBox.shrink();
+
+    // Texto de progreso: preferimos el statusMessage del scanner, que ya
+    // incluye contadores ("Escaneando… 24 archivos · 12 música").
+    // Fallback por si acaso: contador basado en canciones ya cargadas.
+    final progressText = _scanStatus ??
+        'Escaneando… ${_songs.length + _podcasts.length} encontradas · '
+            '$_processedFiles archivos';
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -377,8 +380,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    _scanStatus ??
-                        'Escaneando… ${_songs.length + _podcasts.length} encontradas · $_processedFiles archivos',
+                    progressText,
                     style: TextStyle(
                       color: scheme.onSurfaceVariant,
                       fontSize: 12,
@@ -433,6 +435,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final scheme = Theme.of(context).colorScheme;
     final total = _songs.length + _podcasts.length;
 
+    // Subtítulo dinámico con contador en vivo durante el escaneo.
+    final subtitle = _scanning
+        ? (_scanStatus ?? 'Escaneando… $_processedFiles archivos')
+        : (total == 0
+            ? 'Música local en tu dispositivo'
+            : '$total elementos');
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
@@ -450,11 +459,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
               const SizedBox(height: 4),
               Text(
-                _scanning
-                    ? (_scanStatus ?? 'Escaneando… $_processedFiles archivos')
-                    : (total == 0
-                        ? 'Música local en tu dispositivo'
-                        : '$total elementos'),
+                subtitle,
                 style:
                     TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
                 overflow: TextOverflow.ellipsis,
