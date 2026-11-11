@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../models/song.dart';
 import '../services/playback_controller.dart';
+import 'song_context_menu.dart';
 
 class SongTile extends StatelessWidget {
   final Song song;
@@ -54,7 +55,7 @@ class SongTile extends StatelessWidget {
     final hasCover = _hasCover(cover);
 
     final tile = InkWell(
-      onTap: onTap ?? _defaultOnTap,
+      onTap: onTap ?? () => _defaultOnTap(context),
       borderRadius: BorderRadius.circular(12),
       child: Container(
         padding: const EdgeInsets.all(8),
@@ -124,7 +125,9 @@ class SongTile extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
                 IconButton(
-                  onPressed: onMore ?? () => _showMoreSheet(context),
+                  // ⋮ → menú de CONTEXTO (bottom sheet).
+                  onPressed: onMore ??
+                      () => SongContextMenu.showSheet(context, song),
                   icon: Icon(
                     Icons.more_vert,
                     color: scheme.onSurfaceVariant,
@@ -143,6 +146,19 @@ class SongTile extends StatelessWidget {
       ),
     );
 
+    // Long-press y clic derecho → MISMO bottom sheet que el ⋮.
+    // El InkWell sigue manejando el tap normal.
+    final interactive = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPressStart: (_) {
+        SongContextMenu.showSheet(context, song);
+      },
+      onSecondaryTapDown: (_) {
+        SongContextMenu.showSheet(context, song);
+      },
+      child: tile,
+    );
+
     // El margin va FUERA del InkWell para que el ripple no se recorte.
     return RepaintBoundary(
       child: Padding(
@@ -150,7 +166,8 @@ class SongTile extends StatelessWidget {
         child: Semantics(
           label: '${song.title}. ${song.subtitle}. ${song.durationLabel}',
           button: true,
-          child: tile,
+          onLongPress: () => SongContextMenu.showSheet(context, song),
+          child: interactive,
         ),
       ),
     );
@@ -204,54 +221,22 @@ class SongTile extends StatelessWidget {
 
   // ---------- Acciones por defecto ----------
 
-  Future<void> _defaultOnTap() async {
+  /// Tap normal:
+  /// - Cola vacía → reproduce esta canción.
+  /// - Cola con canciones → menú de COLA (no el de contexto).
+  Future<void> _defaultOnTap(BuildContext context) async {
     final c = PlaybackController.instance;
     if (!c.isReady) return;
 
     final handler = c.handler;
-    final idx = handler.songs.indexWhere((s) => s.path == song.path);
-    if (idx >= 0) {
-      await handler.skipToQueueItem(idx);
-    } else {
+
+    if (handler.songs.isEmpty) {
       await handler.setQueue([song], startIndex: 0);
       await handler.play();
+      return;
     }
-  }
 
-  void _showMoreSheet(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.play_arrow),
-              title: const Text('Reproducir ahora'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _defaultOnTap();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.queue_music),
-              title: const Text('Añadir a la cola'),
-              onTap: () {
-                Navigator.pop(ctx);
-                final c = PlaybackController.instance;
-                if (c.isReady) c.addToQueue(song);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: const Text('Detalles'),
-              onTap: () => Navigator.pop(ctx),
-            ),
-          ],
-        ),
-      ),
-    );
+    await SongContextMenu.showQueueSheet(context, song);
   }
 }
 
