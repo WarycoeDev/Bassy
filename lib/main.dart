@@ -8,7 +8,8 @@ import 'app/app_shell.dart';
 import 'services/media_scanner.dart';
 import 'services/settings_service.dart';
 import 'widgets/permission_gate.dart';
-
+import 'package:audio_session/audio_session.dart';
+import 'services/playback_controller.dart';
 class _LifecycleRescanObserver with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -19,8 +20,16 @@ class _LifecycleRescanObserver with WidgetsBindingObserver {
   }
 }
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 1) Configuración de sesión de audio (foco, bluetooth, etc.)
+  final session = await AudioSession.instance;
+  await session.configure(const AudioSessionConfiguration.music());
+
+  // 2) Arranca audio_service / audio handler ANTES de runApp
+  await PlaybackController.instance.init();
+
   WidgetsBinding.instance.addObserver(_LifecycleRescanObserver());
   runApp(const BassyApp());
 }

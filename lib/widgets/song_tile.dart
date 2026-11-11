@@ -1,28 +1,49 @@
+// lib/widgets/song_tile.dart
 import 'dart:io';
 
+import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
+import '../services/playback_controller.dart';
 
 class SongTile extends StatelessWidget {
   final Song song;
   final VoidCallback? onTap;
   final VoidCallback? onMore;
 
-  const SongTile({super.key, required this.song, this.onTap, this.onMore});
+  /// Si es `true`, muestra el badge de "reproduciendo" cuando esta canción
+  /// es la actual en el `PlaybackController`.
+  final bool showPlayingIndicator;
 
-  // Cache estático por path: evita repetir existsSync() en cada build.
-  static final Map<String, bool> _coverCache = <String, bool>{};
+  const SongTile({
+    super.key,
+    required this.song,
+    this.onTap,
+    this.onMore,
+    this.showPlayingIndicator = true,
+  });
+
+  // Cache por path + mtime: evita repetir existsSync() en cada build y
+  // se invalida si el archivo cambia (portada actualizada).
+  static final Map<String, _CoverCacheEntry> _coverCache = {};
 
   static bool _hasCover(String? cover) {
-    if (cover == null) return false;
-    return _coverCache.putIfAbsent(cover, () {
-      try {
-        return File(cover).existsSync();
-      } catch (_) {
-        return false;
-      }
-    });
+    if (cover == null || cover.isEmpty) return false;
+    try {
+      final file = File(cover);
+      if (!file.existsSync()) return false;
+
+      final mtime = file.lastModifiedSync().millisecondsSinceEpoch;
+      final cached = _coverCache[cover];
+      if (cached != null && cached.mtime == mtime) return cached.exists;
+
+      _coverCache[cover] = _CoverCacheEntry(exists: true, mtime: mtime);
+      return true;
+    } catch (_) {
+      _coverCache.remove(cover);
+      return false;
+    }
   }
 
   @override
@@ -32,11 +53,10 @@ class SongTile extends StatelessWidget {
     final cover = song.coverPath;
     final hasCover = _hasCover(cover);
 
-    return InkWell(
-      onTap: onTap,
+    final tile = InkWell(
+      onTap: onTap ?? _defaultOnTap,
       borderRadius: BorderRadius.circular(12),
       child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(8),
         decoration: BoxDecoration(
           color: scheme.surfaceContainer,
@@ -44,30 +64,7 @@ class SongTile extends StatelessWidget {
         ),
         child: Row(
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Container(
-                width: 52,
-                height: 52,
-                color: scheme.surfaceContainerHigh,
-                child: hasCover
-                    ? Image.file(
-                        File(cover!),
-                        fit: BoxFit.cover,
-                        // cacheWidth reduce memoria y acelera decode.
-                        cacheWidth: 156,
-                        gaplessPlayback: true,
-                        errorBuilder: (_, __, ___) => Icon(
-                          isPodcast ? Icons.mic : Icons.music_note,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      )
-                    : Icon(
-                        isPodcast ? Icons.mic : Icons.music_note,
-                        color: scheme.onSurfaceVariant,
-                      ),
-              ),
-            ),
+            _buildCover(scheme, cover, hasCover, isPodcast),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -97,8 +94,7 @@ class SongTile extends StatelessWidget {
                 ],
               ),
             ),
-            // Grupo derecho: duración, formato/peso y botón "más"
-            // centrados verticalmente como un solo bloque.
+            // Grupo derecho: duración, formato/peso y botón "más".
             Row(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.center,
@@ -128,14 +124,17 @@ class SongTile extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
                 IconButton(
-                  onPressed: onMore,
+                  onPressed: onMore ?? () => _showMoreSheet(context),
                   icon: Icon(
                     Icons.more_vert,
                     color: scheme.onSurfaceVariant,
                     size: 20,
                   ),
                   visualDensity: VisualDensity.compact,
-                  splashRadius: 20,
+                  style: IconButton.styleFrom(
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  tooltip: 'Más opciones',
                 ),
               ],
             ),
@@ -143,5 +142,172 @@ class SongTile extends StatelessWidget {
         ),
       ),
     );
+
+    // El margin va FUERA del InkWell para que el ripple no se recorte.
+    return RepaintBoundary(
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Semantics(
+          label: '${song.title}. ${song.subtitle}. ${song.durationLabel}',
+          button: true,
+          child: tile,
+        ),
+      ),
+    );
   }
+
+  Widget _buildCover(
+    ColorScheme scheme,
+    String? cover,
+    bool hasCover,
+    bool isPodcast,
+  ) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: SizedBox(
+        width: 52,
+        height: 52,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Container(
+              color: scheme.surfaceContainerHigh,
+              child: hasCover
+                  ? Image.file(
+                      File(cover!),
+                      fit: BoxFit.cover,
+                      cacheWidth: 156,
+                      gaplessPlayback: true,
+                      errorBuilder: (_, __, ___) =>
+                          _fallbackIcon(scheme, isPodcast),
+                    )
+                  : _fallbackIcon(scheme, isPodcast),
+            ),
+            if (showPlayingIndicator)
+              Positioned(
+                right: 2,
+                bottom: 2,
+                child: _PlayingBadge(song: song, onCover: true),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _fallbackIcon(ColorScheme scheme, bool isPodcast) {
+    return Icon(
+      isPodcast ? Icons.mic : Icons.music_note,
+      color: scheme.onSurfaceVariant,
+    );
+  }
+
+  // ---------- Acciones por defecto ----------
+
+  Future<void> _defaultOnTap() async {
+    final c = PlaybackController.instance;
+    if (!c.isReady) return;
+
+    final handler = c.handler;
+    final idx = handler.songs.indexWhere((s) => s.path == song.path);
+    if (idx >= 0) {
+      await handler.skipToQueueItem(idx);
+    } else {
+      await handler.setQueue([song], startIndex: 0);
+      await handler.play();
+    }
+  }
+
+  void _showMoreSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.play_arrow),
+              title: const Text('Reproducir ahora'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _defaultOnTap();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.queue_music),
+              title: const Text('Añadir a la cola'),
+              onTap: () {
+                Navigator.pop(ctx);
+                final c = PlaybackController.instance;
+                if (c.isReady) c.addToQueue(song);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.info_outline),
+              title: const Text('Detalles'),
+              onTap: () => Navigator.pop(ctx),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Badge que se suscribe a `currentItem` y muestra `graphic_eq` si esta
+/// canción es la actual. Se aísla en su propio widget para que solo él
+/// se reconstruya cuando cambia la pista.
+///
+/// Se dibuja superpuesto sobre la carátula (esquina inferior derecha).
+class _PlayingBadge extends StatelessWidget {
+  final Song song;
+  final bool onCover;
+  const _PlayingBadge({required this.song, this.onCover = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = PlaybackController.instance;
+    if (!c.isReady) return const SizedBox.shrink();
+
+    return StreamBuilder<MediaItem?>(
+      stream: c.currentItem,
+      builder: (context, snap) {
+        final isCurrent = snap.data?.id == song.path;
+        if (!isCurrent) return const SizedBox.shrink();
+
+        final icon = Icon(
+          Icons.graphic_eq,
+          size: 14,
+          color: onCover
+              ? Colors.white
+              : Theme.of(context).colorScheme.primary,
+        );
+
+        if (!onCover) {
+          return Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: icon,
+          );
+        }
+
+        // Sobre la carátula: fondo circular oscuro semi-transparente
+        // para asegurar contraste sobre cualquier portada.
+        return Container(
+          padding: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.6),
+            shape: BoxShape.circle,
+          ),
+          child: icon,
+        );
+      },
+    );
+  }
+}
+
+class _CoverCacheEntry {
+  final bool exists;
+  final int mtime;
+  const _CoverCacheEntry({required this.exists, required this.mtime});
 }
