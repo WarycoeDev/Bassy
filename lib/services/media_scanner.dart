@@ -82,7 +82,17 @@ class MediaScanner {
   ScanResult? get lastResult => _lastResult;
 
   bool _initialScanDone = false;
-  Completer<void>? _initialScanCompleter;
+
+  /// Future del escaneo inicial en curso (o ya resuelto).
+  /// Se reutiliza para que las llamadas concurrentes compartan el mismo.
+  Future<void>? _initialScanFuture;
+
+  /// Petición de rescan pendiente. Se resuelve cuando el escaneo en curso
+  /// termina, de modo que `scan()`/`rescanNow()` esperan al nuevo resultado.
+  Completer<void>? _rescanCompleter;
+
+  /// Evita que `scan()` dispare dos escaneos concurrentes.
+  bool _forceRescan = false;
 
   final List<Song> _liveSongs = [];
   final List<Song> _livePodcasts = [];
@@ -96,23 +106,37 @@ class MediaScanner {
   bool _watcherStarting = false;
 
   // ---------------------------------------------------------------------------
-  // Escaneo inicial
+  // Escaneo inicial / rescan
   // ---------------------------------------------------------------------------
 
+  /// Garantiza que la biblioteca se haya escaneado al menos una vez.
+  /// Si ya hay un escaneo en curso, comparte su future. Si ya terminó,
+  /// devuelve un future resuelto inmediatamente.
   Future<void> ensureInitialScan() {
-    if (_initialScanDone) return Future.value();
-    if (_initialScanCompleter != null) return _initialScanCompleter!.future;
+    if (_initialScanDone && !_forceRescan) return Future.value();
 
-    _initialScanCompleter = Completer<void>();
+    // Si hay un escaneo en curso, devolvemos su future (no completamos nada).
+    final inFlight = _initialScanFuture;
+    if (inFlight != null) return inFlight;
+
+    final completer = Completer<void>();
+    final future = completer.future;
+    _initialScanFuture = future;
+
     _doInitialScan()
         .then((_) {
-          _initialScanDone = true;
-          _initialScanCompleter!.complete();
+          if (!completer.isCompleted) completer.complete();
         })
         .catchError((Object e, StackTrace st) {
-          _initialScanCompleter!.completeError(e, st);
+          if (!completer.isCompleted) completer.completeError(e, st);
+        })
+        .whenComplete(() {
+          _initialScanDone = true;
+          _initialScanFuture = null;
+          _forceRescan = false;
         });
-    return _initialScanCompleter!.future;
+
+    return future;
   }
 
   Future<void> _doInitialScan() async {
@@ -157,6 +181,72 @@ class MediaScanner {
       _scanning = false;
       _emitSnapshot(clearStatus: true);
     }
+  }
+
+  /// Fuerza un rescan completo desde cero. Espera a que termine el escaneo
+  /// en curso (si lo hay) y devuelve el nuevo `ScanResult`.
+  Future<ScanResult> rescanNow() => scan();
+
+  Future<ScanResult> scan() async {
+    // Si ya hay un rescan pendiente, esperamos a ese en lugar de duplicar.
+    final pending = _rescanCompleter;
+    if (pending != null) {
+      await pending.future;
+      return _lastResult ?? ScanResult.empty;
+    }
+
+    final completer = Completer<void>();
+    _rescanCompleter = completer;
+
+    try {
+      // Espera al escaneo actual (si existe) antes de forzar el nuevo.
+      final inFlight = _initialScanFuture;
+      if (inFlight != null) {
+        try {
+          await inFlight;
+        } catch (_) {
+          // Si falló, igualmente hacemos el rescan.
+        }
+      }
+
+      _initialScanDone = false;
+      _forceRescan = true;
+
+      final newFuture = _runForcedScan();
+      // Comparte el nuevo future para llamadas concurrentes.
+      _initialScanFuture = newFuture;
+      await newFuture;
+
+      return _lastResult ?? ScanResult.empty;
+    } finally {
+      if (!completer.isCompleted) completer.complete();
+      _rescanCompleter = null;
+      _forceRescan = false;
+    }
+  }
+
+  /// Ejecuta un escaneo forzado que ignora `_initialScanDone` y siempre
+  /// emite un nuevo resultado. No toca `_initialScanFuture` directamente;
+  /// lo gestiona `scan()`.
+  Future<void> _runForcedScan() async {
+    final completer = Completer<void>();
+    // Guardamos para que otras llamadas a ensureInitialScan compartan.
+    _doInitialScan()
+        .then((_) {
+          if (!completer.isCompleted) completer.complete();
+        })
+        .catchError((Object e, StackTrace st) {
+          if (!completer.isCompleted) completer.completeError(e, st);
+        })
+        .whenComplete(() {
+          _initialScanDone = true;
+          _forceRescan = false;
+          // Limpia el future solo si sigue siendo este (no otro rescan).
+          if (identical(_initialScanFuture, completer.future)) {
+            _initialScanFuture = null;
+          }
+        });
+    return completer.future;
   }
 
   // ---------------------------------------------------------------------------
@@ -570,25 +660,6 @@ class MediaScanner {
       _emitSnapshot(clearStatus: true);
       await _restartWatcher();
     }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Rescan completo (para AppLifecycleState.resumed, buffer overflow, etc.)
-  // ---------------------------------------------------------------------------
-
-  /// Fuerza un rescan completo desde cero. Útil cuando el watcher pudo
-  /// haber perdido eventos (p. ej. app en background en PC).
-  Future<ScanResult> rescanNow() async {
-    _initialScanDone = false;
-    _initialScanCompleter = null;
-    return scan();
-  }
-
-  Future<ScanResult> scan() async {
-    _initialScanDone = false;
-    _initialScanCompleter = null;
-    await ensureInitialScan();
-    return _lastResult ?? ScanResult.empty;
   }
 
   // ---------------------------------------------------------------------------

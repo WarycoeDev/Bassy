@@ -20,6 +20,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   int _selectedFilter = 0;
   bool _slideFromRight = true;
 
+  // Navigator anidado: permite abrir playlists/álbumes/artistas DENTRO del
+  // área de Library, sin tapar el menú lateral del AppShell en escritorio.
+  final GlobalKey<NavigatorState> _libraryNavigatorKey =
+      GlobalKey<NavigatorState>();
+
   // Un ScrollController por pestaña para evitar compartir posiciones
   // entre ListViews simultáneos (AnimatedSwitcher mantiene vivo el saliente).
   final Map<int, ScrollController> _scrollControllers = {};
@@ -179,8 +184,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
   }
 
+  /// Abre el detalle DENTRO del Navigator anidado de Library.
+  /// De esta forma el AppShell (menú lateral en PC) permanece visible.
   void _openPlaylist(BuildContext context, Playlist playlist) {
-    Navigator.of(context).push(
+    _libraryNavigatorKey.currentState?.push(
       MaterialPageRoute(
         builder: (_) => PlaylistDetailScreen(playlist: playlist),
       ),
@@ -193,6 +200,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        final nav = _libraryNavigatorKey.currentState;
+        if (nav != null && nav.canPop()) {
+          nav.pop();
+        } else {
+          // Deja que el AppShell / sistema maneje el back.
+          Navigator.of(context).maybePop();
+        }
+      },
+      child: Navigator(
+        key: _libraryNavigatorKey,
+        onGenerateRoute: (settings) {
+          return MaterialPageRoute(
+            settings: settings,
+            builder: (_) => _buildLibraryHome(context),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Contenido principal de Library (home del Navigator anidado).
+  Widget _buildLibraryHome(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -840,8 +873,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildAlbumsDetailed(BuildContext context) {
-    if (_loadingLibrary)
+    if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
+    }
     final albums = _albumPlaylists;
     if (albums.isEmpty) {
       return _buildEmptyState(
@@ -956,8 +990,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildArtistsDetailed(BuildContext context) {
-    if (_loadingLibrary)
+    if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
+    }
     final artists = _artistPlaylists;
     if (artists.isEmpty) {
       return _buildEmptyState(
@@ -1089,8 +1124,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildPodcastsList(BuildContext context) {
     final controller = _controllerFor(5);
 
-    if (_loadingLibrary)
+    if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
+    }
     final podcasts = _podcastPlaylists;
     if (podcasts.isEmpty) {
       return ListView(
