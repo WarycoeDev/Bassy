@@ -2,6 +2,7 @@
 import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
@@ -95,7 +96,6 @@ class SongTile extends StatelessWidget {
                 ],
               ),
             ),
-            // Grupo derecho: duración, formato/peso y botón "más".
             Row(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.center,
@@ -125,7 +125,6 @@ class SongTile extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
                 IconButton(
-                  // ⋮ → menú de CONTEXTO (bottom sheet).
                   onPressed: onMore ??
                       () => SongContextMenu.showSheet(context, song),
                   icon: Icon(
@@ -146,8 +145,6 @@ class SongTile extends StatelessWidget {
       ),
     );
 
-    // Long-press y clic derecho → MISMO bottom sheet que el ⋮.
-    // El InkWell sigue manejando el tap normal.
     final interactive = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onLongPressStart: (_) {
@@ -159,7 +156,6 @@ class SongTile extends StatelessWidget {
       child: tile,
     );
 
-    // El margin va FUERA del InkWell para que el ripple no se recorte.
     return RepaintBoundary(
       child: Padding(
         padding: const EdgeInsets.only(bottom: 10),
@@ -226,25 +222,45 @@ class SongTile extends StatelessWidget {
   /// - Cola con canciones → menú de COLA (no el de contexto).
   Future<void> _defaultOnTap(BuildContext context) async {
     final c = PlaybackController.instance;
-    if (!c.isReady) return;
+
+    if (!c.isReady) {
+      debugPrint('SongTile: PlaybackController no listo');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('El reproductor aún no está listo…'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
 
     final handler = c.handler;
 
     if (handler.songs.isEmpty) {
-      await handler.setQueue([song], startIndex: 0);
-      await handler.play();
+      try {
+        await handler.setQueue([song], startIndex: 0, autoPlay: true);
+      } catch (e, st) {
+        debugPrint('SongTile: fallo al reproducir -> $e\n$st');
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('No se pudo reproducir: $e')),
+          );
+        }
+      }
       return;
     }
 
-    await SongContextMenu.showQueueSheet(context, song);
+    if (context.mounted) {
+      await SongContextMenu.showQueueSheet(context, song);
+    }
   }
 }
 
 /// Badge que se suscribe a `currentItem` y muestra `graphic_eq` si esta
 /// canción es la actual. Se aísla en su propio widget para que solo él
 /// se reconstruya cuando cambia la pista.
-///
-/// Se dibuja superpuesto sobre la carátula (esquina inferior derecha).
 class _PlayingBadge extends StatelessWidget {
   final Song song;
   final bool onCover;
@@ -276,8 +292,6 @@ class _PlayingBadge extends StatelessWidget {
           );
         }
 
-        // Sobre la carátula: fondo circular oscuro semi-transparente
-        // para asegurar contraste sobre cualquier portada.
         return Container(
           padding: const EdgeInsets.all(2),
           decoration: BoxDecoration(

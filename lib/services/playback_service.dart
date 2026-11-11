@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 
 import '../models/song.dart';
@@ -20,6 +21,9 @@ class PlaybackAudioHandler extends BaseAudioHandler
   /// operaciones incrementales (add/remove) sin recargar la pista actual.
   ConcatenatingAudioSource? _queueSource;
 
+  /// Evita que dos llamadas concurrentes a `setQueue` se pisen.
+  Future<void>? _pendingLoad;
+
   PlaybackAudioHandler() {
     // Publica el estado del player como PlaybackState.
     _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
@@ -32,6 +36,14 @@ class PlaybackAudioHandler extends BaseAudioHandler
       _currentIndex = queueIndex;
       mediaItem.add(_toMediaItem(_songs[queueIndex]));
     });
+
+    // Loguea errores del player para no fallar en silencio.
+    _player.playbackEventStream.listen(
+      (_) {},
+      onError: (Object e, StackTrace st) {
+        debugPrint('PlaybackAudioHandler: playback error -> $e\n$st');
+      },
+    );
   }
 
   PlaybackState _transformEvent(PlaybackEvent event) {
@@ -79,10 +91,7 @@ class PlaybackAudioHandler extends BaseAudioHandler
   // ---------- Mapeo cola ↔ fuente ----------
   // La fuente concatenada solo contiene canciones con `path` no vacío.
   // Si todas tienen path (caso normal), ambos índices coinciden.
-  // Estas funciones permiten convivir con canciones sin path.
 
-  /// Devuelve el índice en la fuente concatenada para la canción en
-  /// [queueIndex], o `null` si esa canción no tiene path.
   int? _sourceIndexForQueue(int queueIndex) {
     if (queueIndex < 0 || queueIndex >= _songs.length) return null;
     final p = _songs[queueIndex].path;
@@ -95,8 +104,6 @@ class PlaybackAudioHandler extends BaseAudioHandler
     return sourceIndex;
   }
 
-  /// Devuelve el índice de cola para el [sourceIndex] de la fuente, o
-  /// `null` si no se encuentra.
   int? _queueIndexForSource(int sourceIndex) {
     var s = 0;
     for (var i = 0; i < _songs.length; i++) {
@@ -109,8 +116,6 @@ class PlaybackAudioHandler extends BaseAudioHandler
   }
 
   // ---------- API pública para la UI ----------
-  // OJO: `queue` ya lo provee QueueHandler como BehaviorSubject<List<MediaItem>>.
-  // Por eso exponemos `songs` para la cola tipada de Song.
 
   List<Song> get songs => List.unmodifiable(_songs);
 
@@ -123,71 +128,140 @@ class PlaybackAudioHandler extends BaseAudioHandler
 
   bool get isPlaying => _player.playing;
 
-  // Streams públicos para que la UI no toque `_player`.
   Stream<Duration> get positionStream => _player.positionStream;
   Stream<Duration?> get durationStream => _player.durationStream;
   Stream<bool> get playingStream => _player.playingStream;
 
   // ---------- Control de cola ----------
 
-  /// Reemplaza toda la cola y empieza a reproducir desde [startIndex].
-  /// Este SÍ corta la reproducción (es una recarga completa).
-  Future<void> setQueue(List<Song> songs, {int startIndex = 0}) async {
-    if (songs.isEmpty) return;
-    if (startIndex < 0 || startIndex >= songs.length) startIndex = 0;
-
-    _songs = List<Song>.from(songs);
-    _currentIndex = startIndex;
-
-    // Actualiza el BehaviorSubject heredado de QueueHandler.
-    super.queue.add(_songs.map(_toMediaItem).toList(growable: false));
-    mediaItem.add(_toMediaItem(_songs[startIndex]));
-
-    final sources = <AudioSource>[];
-    for (final s in _songs) {
-      final p = s.path;
-      if (p == null || p.isEmpty) continue;
-      sources.add(AudioSource.file(p));
-    }
-    if (sources.isEmpty) {
-      _queueSource = null;
+  /// Reemplaza toda la cola. Por defecto **reproduce** desde [startIndex].
+  ///
+  /// FIX: antes no llamaba a play() y el player quedaba en `ready` pero
+  /// pausado → la UI lo percibía como "se pausa". Ahora el contrato es
+  /// explícito: `autoPlay = true`.
+  Future<void> setQueue(
+    List<Song> songs, {
+    int startIndex = 0,
+    bool autoPlay = true,
+  }) async {
+    if (songs.isEmpty) {
+      // Cola vacía → limpiar estado en lugar de retornar en silencio.
+      await _clearQueue();
       return;
     }
+    if (startIndex < 0 || startIndex >= songs.length) startIndex = 0;
 
-    final concat = ConcatenatingAudioSource(children: sources);
-    _queueSource = concat;
+    // Serializa cargas concurrentes (evita condiciones de carrera
+    // cuando se pulsa rápido varias canciones).
+    final previous = _pendingLoad;
+    final completer = Completer<void>();
+    _pendingLoad = completer.future;
+    if (previous != null) {
+      try {
+        await previous;
+      } catch (_) {}
+    }
 
-    final initialSourceIndex =
-        _sourceIndexForQueue(startIndex) ?? 0;
+    try {
+      _songs = List<Song>.from(songs);
+      _currentIndex = startIndex;
 
-    await _player.setAudioSource(
-      concat,
-      initialIndex: initialSourceIndex.clamp(0, sources.length - 1),
-      initialPosition: Duration.zero,
-    );
+      super.queue.add(_songs.map(_toMediaItem).toList(growable: false));
+      mediaItem.add(_toMediaItem(_songs[startIndex]));
+
+      // Valida que el path exista antes de crear AudioSource.
+      final sources = <AudioSource>[];
+      for (final s in _songs) {
+        final p = s.path;
+        if (p == null || p.isEmpty) continue;
+        if (!File(p).existsSync()) {
+          debugPrint('PlaybackAudioHandler: path no existe -> $p');
+          continue;
+        }
+        sources.add(AudioSource.file(p));
+      }
+
+      if (sources.isEmpty) {
+        debugPrint(
+          'PlaybackAudioHandler: no hay fuentes válidas en la cola',
+        );
+        _queueSource = null;
+        await _player.stop();
+        mediaItem.add(null);
+        _currentIndex = -1;
+        return;
+      }
+
+      final concat = ConcatenatingAudioSource(children: sources);
+      _queueSource = concat;
+
+      // Recalcula el índice inicial por si se descartaron canciones sin path.
+      final initialSourceIndex =
+          (_sourceIndexForQueue(startIndex) ?? 0)
+              .clamp(0, sources.length - 1);
+
+      // try/catch para no dejar mediaItem apuntando a algo que no suena.
+      try {
+        await _player.setAudioSource(
+          concat,
+          initialIndex: initialSourceIndex,
+          initialPosition: Duration.zero,
+        );
+      } catch (e, st) {
+        debugPrint('PlaybackAudioHandler: setAudioSource falló -> $e\n$st');
+        _queueSource = null;
+        _currentIndex = -1;
+        mediaItem.add(null);
+        await _player.stop();
+        rethrow;
+      }
+
+      // Arranca la reproducción.
+      if (autoPlay) {
+        await _player.play();
+      }
+    } finally {
+      completer.complete();
+      if (identical(_pendingLoad, completer.future)) {
+        _pendingLoad = null;
+      }
+    }
+  }
+
+  Future<void> _clearQueue() async {
+    _songs = const [];
+    _currentIndex = -1;
+    _queueSource = null;
+    super.queue.add(const []);
+    mediaItem.add(null);
+    await _player.stop();
   }
 
   /// Añade una canción al final de la cola SIN cortar la reproducción.
   Future<void> addToQueue(Song song) async {
     final path = song.path;
     if (path == null || path.isEmpty) return;
+    if (!File(path).existsSync()) {
+      debugPrint('PlaybackAudioHandler: addToQueue path no existe -> $path');
+      return;
+    }
 
-    // Actualizamos el modelo de Songs y el BehaviorSubject heredado.
-    _songs = [..._songs, song];
-    super.queue.add(_songs.map(_toMediaItem).toList(growable: false));
-
-    // Si no hay fuente activa todavía, no se puede añadir en caliente:
-    // se delega a setQueue.
+    // Si no hay fuente activa todavía, delegamos a setQueue con
+    // autoPlay=false (encolar no debe arrancar sola la reproducción).
     final source = _queueSource;
     if (source == null) {
+      final newSongs = [..._songs, song];
       await setQueue(
-        _songs,
-        startIndex: _currentIndex < 0 ? 0 : _currentIndex,
+        newSongs,
+        startIndex: _currentIndex < 0 ? newSongs.length - 1 : _currentIndex,
+        autoPlay: false,
       );
       return;
     }
 
     // Añadido incremental: no toca la pista actual.
+    _songs = [..._songs, song];
+    super.queue.add(_songs.map(_toMediaItem).toList(growable: false));
     await source.add(AudioSource.file(path));
   }
 
@@ -198,18 +272,11 @@ class PlaybackAudioHandler extends BaseAudioHandler
     final wasCurrent = index == _currentIndex;
     final newSongs = List<Song>.from(_songs)..removeAt(index);
 
-    // Caso especial: cola vacía tras el borrado.
     if (newSongs.isEmpty) {
-      _songs = const [];
-      _currentIndex = -1;
-      _queueSource = null;
-      super.queue.add(const []);
-      mediaItem.add(null);
-      await _player.stop();
+      await _clearQueue();
       return;
     }
 
-    // Calculamos el nuevo índice de la pista actual tras el borrado.
     int newIndex = _currentIndex;
     if (index < _currentIndex) {
       newIndex = _currentIndex - 1;
@@ -217,8 +284,6 @@ class PlaybackAudioHandler extends BaseAudioHandler
       newIndex = index.clamp(0, newSongs.length - 1);
     }
 
-    // Índice en la fuente ANTES de actualizar _songs (necesitamos el
-    // mapeo con la lista vieja).
     final sourceIndex = _sourceIndexForQueue(index);
 
     _songs = newSongs;
@@ -227,17 +292,18 @@ class PlaybackAudioHandler extends BaseAudioHandler
 
     final source = _queueSource;
     if (source == null || sourceIndex == null) {
-      // Canción sin path o sin fuente: solo actualizamos modelo/UI.
       if (_currentIndex >= 0 && _currentIndex < _songs.length) {
         mediaItem.add(_toMediaItem(_songs[_currentIndex]));
       }
       return;
     }
 
-    // Borrado incremental: no recarga la pista actual.
-    await source.removeAt(sourceIndex);
+    try {
+      await source.removeAt(sourceIndex);
+    } catch (e, st) {
+      debugPrint('PlaybackAudioHandler: removeAt falló -> $e\n$st');
+    }
 
-    // Aseguramos que el MediaItem mostrado apunte a la pista actual.
     if (_currentIndex >= 0 && _currentIndex < _songs.length) {
       mediaItem.add(_toMediaItem(_songs[_currentIndex]));
     }
@@ -245,11 +311,10 @@ class PlaybackAudioHandler extends BaseAudioHandler
 
   Future<void> playSong(Song song) async {
     final idx = _songs.indexWhere((s) => s.path == song.path);
-    if (idx >= 0) {
+    if (idx >= 0 && _queueSource != null) {
       await skipToQueueItem(idx);
     } else {
-      await setQueue([song], startIndex: 0);
-      await play();
+      await setQueue([song], startIndex: 0, autoPlay: true);
     }
   }
 
@@ -258,7 +323,14 @@ class PlaybackAudioHandler extends BaseAudioHandler
   // ---------- Overrides de BaseAudioHandler ----------
 
   @override
-  Future<void> play() => _player.play();
+  Future<void> play() async {
+    // Si no hay fuente cargada, no tiene sentido reproducir.
+    if (_queueSource == null) {
+      debugPrint('PlaybackAudioHandler: play() sin fuente cargada');
+      return;
+    }
+    await _player.play();
+  }
 
   @override
   Future<void> pause() => _player.pause();
@@ -275,22 +347,43 @@ class PlaybackAudioHandler extends BaseAudioHandler
   @override
   Future<void> skipToNext() async {
     if (_currentIndex + 1 >= _songs.length) return;
+    if (_queueSource == null) return;
     await _player.seekToNext();
   }
 
   @override
   Future<void> skipToPrevious() async {
     if (_currentIndex - 1 < 0) return;
+    if (_queueSource == null) return;
     await _player.seekToPrevious();
   }
 
   @override
   Future<void> skipToQueueItem(int index) async {
     if (index < 0 || index >= _songs.length) return;
+
+    // Si no hay fuente cargada, reconstruimos la cola.
+    if (_queueSource == null) {
+      await setQueue(_songs, startIndex: index, autoPlay: true);
+      return;
+    }
+
     final sourceIndex = _sourceIndexForQueue(index);
-    if (sourceIndex == null) return;
+    if (sourceIndex == null) {
+      debugPrint(
+        'PlaybackAudioHandler: skipToQueueItem sin sourceIndex '
+        '(canción sin path?)',
+      );
+      return;
+    }
+
     _currentIndex = index;
-    await _player.seek(Duration.zero, index: sourceIndex);
+    try {
+      await _player.seek(Duration.zero, index: sourceIndex);
+    } catch (e, st) {
+      debugPrint('PlaybackAudioHandler: seek falló -> $e\n$st');
+      return;
+    }
     await _player.play();
   }
 }

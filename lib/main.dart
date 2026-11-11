@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 
 import 'app/app_shell.dart';
 import 'services/media_scanner.dart';
@@ -22,6 +23,12 @@ class _LifecycleRescanObserver with WidgetsBindingObserver {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+    JustAudioMediaKit.ensureInitialized(
+    linux: true,
+    windows: true,
+  );
+
 
   // 1) Configuración de sesión de audio (foco, bluetooth, etc.)
   final session = await AudioSession.instance;

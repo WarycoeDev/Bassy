@@ -1,3 +1,4 @@
+// lib/services/playback_controller.dart
 import 'dart:async';
 
 import 'package:audio_service/audio_service.dart';
@@ -41,8 +42,13 @@ class PlaybackController {
 
   // ---- Atajos ----
 
-  Future<void> setQueue(List<Song> songs, {int startIndex = 0}) =>
-      handler.setQueue(songs, startIndex: startIndex);
+  /// FIX: propaga `autoPlay` al handler (por defecto reproduce).
+  Future<void> setQueue(
+    List<Song> songs, {
+    int startIndex = 0,
+    bool autoPlay = true,
+  }) =>
+      handler.setQueue(songs, startIndex: startIndex, autoPlay: autoPlay);
 
   Future<void> playSong(Song song) => handler.playSong(song);
   Future<void> play() => handler.play();
