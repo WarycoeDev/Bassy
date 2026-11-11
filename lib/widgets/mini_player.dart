@@ -16,6 +16,9 @@ String _fmt(Duration d) {
   return '$m:$s';
 }
 
+/// Umbral para decidir si "previous" reinicia la canción o salta a la anterior.
+const Duration _kRestartThreshold = Duration(seconds: 3);
+
 // ============================================================
 // MINIPLAYER TIPO TARJETA (panel lateral tablet/PC)
 // ============================================================
@@ -52,6 +55,12 @@ class MiniPlayerCard extends StatelessWidget {
                     ? (position.inMilliseconds / duration.inMilliseconds)
                         .clamp(0.0, 1.0)
                     : 0.0;
+
+                // --- Estado de los botones ---
+                final canGoPrevious =
+                    controller.hasPrevious || position > _kRestartThreshold;
+                final canGoNext = controller.hasNext;
+                final canPlayPause = true; // siempre hay canción aquí
 
                 return Container(
                   margin: const EdgeInsets.all(12),
@@ -145,7 +154,8 @@ class MiniPlayerCard extends StatelessWidget {
                             ),
                             const SizedBox(height: 6),
                             Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              mainAxisAlignment:
+                                  MainAxisAlignment.spaceBetween,
                               children: [
                                 Text(
                                   _fmt(position),
@@ -179,25 +189,29 @@ class MiniPlayerCard extends StatelessWidget {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
-                            IconButton(
-                              icon: const Icon(Icons.skip_previous_rounded),
+                            _ControlIconButton(
+                              icon: Icons.skip_previous_rounded,
                               iconSize: 30,
-                              color: scheme.onSurface,
+                              enabled: canGoPrevious,
+                              scheme: scheme,
                               onPressed: controller.previous,
                               tooltip: 'Anterior',
                             ),
                             _PlayButton(
                               isPlaying: isPlaying,
-                              onPressed: isPlaying
-                                  ? controller.pause
-                                  : controller.play,
+                              onPressed: canPlayPause
+                                  ? (isPlaying
+                                      ? controller.pause
+                                      : controller.play)
+                                  : null,
                               scheme: scheme,
                               size: 56,
                             ),
-                            IconButton(
-                              icon: const Icon(Icons.skip_next_rounded),
+                            _ControlIconButton(
+                              icon: Icons.skip_next_rounded,
                               iconSize: 30,
-                              color: scheme.onSurface,
+                              enabled: canGoNext,
+                              scheme: scheme,
                               onPressed: controller.next,
                               tooltip: 'Siguiente',
                             ),
@@ -244,14 +258,8 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
 
   bool _animatingOut = false;
 
-  /// `true` cuando el miniplayer acaba de "aparecer" (primera canción
-  /// o tras vaciar la cola) y aún no ha ejecutado su animación de
-  /// entrada. Se consume en el primer build con canción disponible,
-  /// ANTES de pintar, para que no haya frame intermedio en posición
-  /// final (eso causaba el parpadeo).
   bool _pendingEntrance = false;
 
-  /// Id del último MediaItem mostrado.
   String? _lastItemId;
 
   static const double _dragThreshold = 160;
@@ -268,7 +276,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     );
     c.addListener(_onSettleTick);
     _settleController = c;
-    // Primera aparición: animación de entrada desde abajo.
     _pendingEntrance = true;
   }
 
@@ -296,8 +303,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     super.dispose();
   }
 
-  /// Limpia el estado visual y deja `_pendingEntrance = true` para que
-  /// la próxima canción aparezca con la animación de entrada.
   void _resetVisualState({bool triggerEntrance = true}) {
     _settleController?.reset();
     _offsetAnim = null;
@@ -479,8 +484,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
 
         // --- Sin canción actual ---
         if (song == null || mediaSnap.data == null) {
-          // Reseteamos el estado visual y dejamos pendiente la
-          // animación de entrada para la próxima canción.
           if (_lastItemId != null ||
               _dragOffset != Offset.zero ||
               _settleOffset != Offset.zero ||
@@ -490,7 +493,7 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
             _lastItemId = null;
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
-              if (_lastItemId != null) return; // apareció otra canción
+              if (_lastItemId != null) return;
               setState(() => _resetVisualState(triggerEntrance: true));
             });
           }
@@ -501,8 +504,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
         if (_lastItemId != itemId) {
           _lastItemId = itemId;
           if (!_pendingEntrance) {
-            // Cambio entre canciones con miniplayer ya visible: reset
-            // silencioso para no heredar offsets residuales.
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
               if (_lastItemId != itemId) return;
@@ -519,11 +520,7 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
           }
         }
 
-        // --- Animación de entrada: PRIMAR ANTES del primer frame ---
-        // Mutamos los campos visuales directamente (sin setState) antes
-        // de devolver el árbol. Así el primer frame ya se pinta abajo y
-        // transparente → el usuario solo ve la animación de subida, sin
-        // un frame intermedio en su posición final (eso era el parpadeo).
+        // --- Animación de entrada ---
         if (_pendingEntrance) {
           _pendingEntrance = false;
           _settleController?.reset();
@@ -620,6 +617,11 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                     ? (position.inMilliseconds / duration.inMilliseconds)
                         .clamp(0.0, 1.0)
                     : 0.0;
+
+                // --- Estado de los botones ---
+                final canGoPrevious =
+                    controller.hasPrevious || position > _kRestartThreshold;
+                final canGoNext = controller.hasNext;
 
                 final bar = Padding(
                   padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
@@ -718,21 +720,36 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                                   ),
                                 ),
                                 const SizedBox(width: 4),
+
+                                // Previous (desactivable)
+                                _ControlIconButton(
+                                  icon: Icons.skip_previous_rounded,
+                                  iconSize: 24,
+                                  enabled: canGoPrevious,
+                                  scheme: scheme,
+                                  onPressed: controller.previous,
+                                  tooltip: 'Anterior',
+                                  compact: true,
+                                ),
+
                                 _PlayButton(
                                   isPlaying: isPlaying,
                                   onPressed: isPlaying
                                       ? controller.pause
                                       : controller.play,
                                   scheme: scheme,
-                                  size: 42,
+                                  size: 40,
                                 ),
-                                IconButton(
-                                  icon: const Icon(
-                                      Icons.skip_next_rounded),
-                                  iconSize: 26,
-                                  color: scheme.onSurface,
+
+                                // Next (desactivable)
+                                _ControlIconButton(
+                                  icon: Icons.skip_next_rounded,
+                                  iconSize: 24,
+                                  enabled: canGoNext,
+                                  scheme: scheme,
                                   onPressed: controller.next,
                                   tooltip: 'Siguiente',
+                                  compact: true,
                                 ),
                               ],
                             ),
@@ -769,11 +786,53 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
 }
 
 // ============================================================
+// BOTÓN DE CONTROL REUTILIZABLE (previous/next con estado enabled)
+// ============================================================
+class _ControlIconButton extends StatelessWidget {
+  final IconData icon;
+  final double iconSize;
+  final bool enabled;
+  final ColorScheme scheme;
+  final VoidCallback onPressed;
+  final String tooltip;
+  final bool compact;
+
+  const _ControlIconButton({
+    required this.icon,
+    required this.iconSize,
+    required this.enabled,
+    required this.scheme,
+    required this.onPressed,
+    required this.tooltip,
+    this.compact = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final baseColor = scheme.onSurface;
+    final color = enabled ? baseColor : baseColor.withValues(alpha: 0.3);
+
+    return IconButton(
+      icon: Icon(icon),
+      iconSize: iconSize,
+      color: color,
+      onPressed: enabled ? onPressed : null,
+      tooltip: tooltip,
+      visualDensity: compact ? VisualDensity.compact : null,
+      padding: compact ? EdgeInsets.zero : null,
+      constraints: compact
+          ? const BoxConstraints(minWidth: 34, minHeight: 34)
+          : null,
+    );
+  }
+}
+
+// ============================================================
 // BOTÓN PLAY/PAUSE ANIMADO
 // ============================================================
 class _PlayButton extends StatelessWidget {
   final bool isPlaying;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
   final ColorScheme scheme;
   final double size;
 
@@ -786,44 +845,48 @@ class _PlayButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            scheme.primary,
-            Color.lerp(scheme.primary, scheme.tertiary, 0.3)!,
+    final enabled = onPressed != null;
+    return Opacity(
+      opacity: enabled ? 1.0 : 0.4,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              scheme.primary,
+              Color.lerp(scheme.primary, scheme.tertiary, 0.3)!,
+            ],
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: scheme.primary.withValues(alpha: 0.35),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
           ],
         ),
-        boxShadow: [
-          BoxShadow(
-            color: scheme.primary.withValues(alpha: 0.35),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Material(
-        color: Colors.transparent,
-        shape: const CircleBorder(),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onPressed,
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            transitionBuilder: (child, animation) => ScaleTransition(
-              scale: animation,
-              child: FadeTransition(opacity: animation, child: child),
-            ),
-            child: Icon(
-              isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-              key: ValueKey(isPlaying),
-              color: scheme.onPrimary,
-              size: size * 0.55,
+        child: Material(
+          color: Colors.transparent,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onPressed,
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              transitionBuilder: (child, animation) => ScaleTransition(
+                scale: animation,
+                child: FadeTransition(opacity: animation, child: child),
+              ),
+              child: Icon(
+                isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                key: ValueKey(isPlaying),
+                color: scheme.onPrimary,
+                size: size * 0.55,
+              ),
             ),
           ),
         ),

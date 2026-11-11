@@ -35,75 +35,110 @@ class ActionMenu {
 
   // ---------- Bottom sheet ----------
 
-  static Future<bool> show(
-    BuildContext context, {
-    required List<ActionMenuItem> actions,
-    String? title,
-    String? subtitle,
-    Widget? leading,
-    String? coverPath,
-    IconData fallbackIcon = Icons.more_horiz,
-    String cancelLabel = 'Cancelar',
-  }) async {
-    final result = await showModalBottomSheet<bool>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      backgroundColor: Theme.of(context).colorScheme.surfaceContainerLow,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) {
-        final scheme = Theme.of(ctx).colorScheme;
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (title != null || leading != null || coverPath != null)
-                  _MenuHeader(
-                    title: title,
-                    subtitle: subtitle,
-                    leading: leading,
-                    coverPath: coverPath,
-                    fallbackIcon: fallbackIcon,
-                  ),
-                const SizedBox(height: 4),
-                Container(
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainer,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
+  // lib/widgets/action_menu.dart — solo reemplaza el método show
+
+static Future<bool> show(
+  BuildContext context, {
+  required List<ActionMenuItem> actions,
+  String? title,
+  String? subtitle,
+  Widget? leading,
+  String? coverPath,
+  IconData fallbackIcon = Icons.more_horiz,
+  String cancelLabel = 'Cancelar',
+}) async {
+  final result = await showDialog<bool>(
+    context: context,
+    barrierDismissible: true,
+    builder: (ctx) {
+      final scheme = Theme.of(ctx).colorScheme;
+      return Dialog(
+        backgroundColor: scheme.surfaceContainerLow,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
+        clipBehavior: Clip.antiAlias,
+        insetPadding: const EdgeInsets.symmetric(
+          horizontal: 24,
+          vertical: 40,
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(
+            maxWidth: 400,
+            maxHeight: 600,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (title != null ||
+                  subtitle != null ||
+                  leading != null ||
+                  coverPath != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 8, 8, 0),
+                  child: Row(
                     children: [
-                      for (var i = 0; i < actions.length; i++) ...[
-                        _MenuActionTile(
-                          action: actions[i],
-                          onTap: actions[i].enabled
-                              ? () {
-                                  Navigator.pop(ctx, true);
-                                  actions[i].onTap();
-                                }
-                              : null,
+                      Expanded(
+                        child: _MenuHeader(
+                          title: title,
+                          subtitle: subtitle,
+                          leading: leading,
+                          coverPath: coverPath,
+                          fallbackIcon: fallbackIcon,
                         ),
-                        if (i != actions.length - 1)
-                          Divider(
-                            height: 1,
-                            indent: 56,
-                            color: scheme.outlineVariant.withValues(
-                              alpha: 0.5,
-                            ),
-                          ),
-                      ],
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close),
+                        iconSize: 20,
+                        visualDensity: VisualDensity.compact,
+                        tooltip: 'Cerrar',
+                        onPressed: () => Navigator.pop(ctx, false),
+                      ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 8),
-                Material(
+              const SizedBox(height: 4),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 8),
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainer,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (var i = 0; i < actions.length; i++) ...[
+                          _MenuActionTile(
+                            action: actions[i],
+                            onTap: actions[i].enabled
+                                ? () {
+                                    Navigator.pop(ctx, true);
+                                    actions[i].onTap();
+                                  }
+                                : null,
+                          ),
+                          if (i != actions.length - 1)
+                            Divider(
+                              height: 1,
+                              indent: 56,
+                              color: scheme.outlineVariant.withValues(
+                                alpha: 0.5,
+                              ),
+                            ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                child: Material(
                   color: scheme.surfaceContainer,
                   borderRadius: BorderRadius.circular(16),
                   clipBehavior: Clip.antiAlias,
@@ -124,14 +159,15 @@ class ActionMenu {
                     ),
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-        );
-      },
-    );
-    return result ?? false;
-  }
+        ),
+      );
+    },
+  );
+  return result ?? false;
+}
 
   // ---------- Popup anclado ----------
 

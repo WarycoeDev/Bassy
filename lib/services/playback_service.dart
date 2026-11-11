@@ -24,6 +24,18 @@ class PlaybackAudioHandler extends BaseAudioHandler
   /// Evita que dos llamadas concurrentes a `setQueue` se pisen.
   Future<void>? _pendingLoad;
 
+  /// Umbral a partir del cual "previous" reinicia la canción actual
+  /// en lugar de ir a la anterior.
+  static const _rewindThreshold = Duration(seconds: 3);
+
+  // ---- Estado reactivo de los botones ----
+
+  final _canGoPreviousCtrl = StreamController<bool>.broadcast();
+  final _canGoNextCtrl = StreamController<bool>.broadcast();
+
+  bool _canGoPrevious = false;
+  bool _canGoNext = false;
+
   PlaybackAudioHandler() {
     // Publica el estado del player como PlaybackState.
     _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
@@ -35,7 +47,12 @@ class PlaybackAudioHandler extends BaseAudioHandler
       if (queueIndex == null) return;
       _currentIndex = queueIndex;
       mediaItem.add(_toMediaItem(_songs[queueIndex]));
+      _emitControlsState();
     });
+
+    // Re-evalúa los botones cuando cambia la posición
+    // (para reflejar el cruce del umbral de rewind).
+    _player.positionStream.listen((_) => _emitCanGoPrevious());
 
     // Loguea errores del player para no fallar en silencio.
     _player.playbackEventStream.listen(
@@ -88,6 +105,56 @@ class PlaybackAudioHandler extends BaseAudioHandler
     );
   }
 
+  // ---------- Getters de estado (sincrónicos) ----------
+
+  /// `true` si hay canción siguiente en la cola.
+  bool get hasNext {
+    if (_queueSource == null) return false;
+    return _currentIndex >= 0 && _currentIndex < _songs.length - 1;
+  }
+
+  /// `true` si hay canción anterior en la cola.
+  bool get hasPrevious {
+    if (_queueSource == null) return false;
+    return _currentIndex > 0 && _currentIndex < _songs.length;
+  }
+
+  /// Posición actual sincrónica (para decidir previous sin esperar al stream).
+  Duration get position => _player.position;
+
+  /// `true` si el botón "previous" debe estar habilitado:
+  /// hay canción anterior **o** ya se superó el umbral de rewind.
+  bool get canGoPrevious =>
+      hasPrevious || _player.position > _rewindThreshold;
+
+  /// `true` si el botón "next" debe estar habilitado.
+  bool get canGoNext => hasNext;
+
+  // ---------- Emisión reactiva de los botones ----------
+
+  void _emitCanGoPrevious() {
+    final next = canGoPrevious;
+    if (next == _canGoPrevious) return;
+    _canGoPrevious = next;
+    if (!_canGoPreviousCtrl.isClosed) _canGoPreviousCtrl.add(next);
+  }
+
+  void _emitCanGoNext() {
+    final next = canGoNext;
+    if (next == _canGoNext) return;
+    _canGoNext = next;
+    if (!_canGoNextCtrl.isClosed) _canGoNextCtrl.add(next);
+  }
+
+  /// Emite ambos estados a la vez. Úsalo tras cualquier cambio de cola.
+  void _emitControlsState() {
+    _emitCanGoPrevious();
+    _emitCanGoNext();
+  }
+
+  Stream<bool> get canGoPreviousStream => _canGoPreviousCtrl.stream;
+  Stream<bool> get canGoNextStream => _canGoNextCtrl.stream;
+
   // ---------- Mapeo cola ↔ fuente ----------
   // La fuente concatenada solo contiene canciones con `path` no vacío.
   // Si todas tienen path (caso normal), ambos índices coinciden.
@@ -135,24 +202,17 @@ class PlaybackAudioHandler extends BaseAudioHandler
   // ---------- Control de cola ----------
 
   /// Reemplaza toda la cola. Por defecto **reproduce** desde [startIndex].
-  ///
-  /// FIX: antes no llamaba a play() y el player quedaba en `ready` pero
-  /// pausado → la UI lo percibía como "se pausa". Ahora el contrato es
-  /// explícito: `autoPlay = true`.
   Future<void> setQueue(
     List<Song> songs, {
     int startIndex = 0,
     bool autoPlay = true,
   }) async {
     if (songs.isEmpty) {
-      // Cola vacía → limpiar estado en lugar de retornar en silencio.
       await _clearQueue();
       return;
     }
     if (startIndex < 0 || startIndex >= songs.length) startIndex = 0;
 
-    // Serializa cargas concurrentes (evita condiciones de carrera
-    // cuando se pulsa rápido varias canciones).
     final previous = _pendingLoad;
     final completer = Completer<void>();
     _pendingLoad = completer.future;
@@ -169,7 +229,6 @@ class PlaybackAudioHandler extends BaseAudioHandler
       super.queue.add(_songs.map(_toMediaItem).toList(growable: false));
       mediaItem.add(_toMediaItem(_songs[startIndex]));
 
-      // Valida que el path exista antes de crear AudioSource.
       final sources = <AudioSource>[];
       for (final s in _songs) {
         final p = s.path;
@@ -182,25 +241,22 @@ class PlaybackAudioHandler extends BaseAudioHandler
       }
 
       if (sources.isEmpty) {
-        debugPrint(
-          'PlaybackAudioHandler: no hay fuentes válidas en la cola',
-        );
+        debugPrint('PlaybackAudioHandler: no hay fuentes válidas en la cola');
         _queueSource = null;
         await _player.stop();
         mediaItem.add(null);
         _currentIndex = -1;
+        _emitControlsState();
         return;
       }
 
       final concat = ConcatenatingAudioSource(children: sources);
       _queueSource = concat;
 
-      // Recalcula el índice inicial por si se descartaron canciones sin path.
       final initialSourceIndex =
           (_sourceIndexForQueue(startIndex) ?? 0)
               .clamp(0, sources.length - 1);
 
-      // try/catch para no dejar mediaItem apuntando a algo que no suena.
       try {
         await _player.setAudioSource(
           concat,
@@ -213,13 +269,15 @@ class PlaybackAudioHandler extends BaseAudioHandler
         _currentIndex = -1;
         mediaItem.add(null);
         await _player.stop();
+        _emitControlsState();
         rethrow;
       }
 
-      // Arranca la reproducción.
       if (autoPlay) {
         await _player.play();
       }
+
+      _emitControlsState();
     } finally {
       completer.complete();
       if (identical(_pendingLoad, completer.future)) {
@@ -235,13 +293,11 @@ class PlaybackAudioHandler extends BaseAudioHandler
     super.queue.add(const []);
     mediaItem.add(null);
     await _player.stop();
+    _emitControlsState();
   }
 
-  /// Limpia la cola y detiene la reproducción. Método público para la UI
-  /// (ej.: gesto de descartar el miniplayer).
   Future<void> clearQueue() => _clearQueue();
 
-  /// Añade una canción al final de la cola SIN cortar la reproducción.
   Future<void> addToQueue(Song song) async {
     final path = song.path;
     if (path == null || path.isEmpty) return;
@@ -250,8 +306,6 @@ class PlaybackAudioHandler extends BaseAudioHandler
       return;
     }
 
-    // Si no hay fuente activa todavía, delegamos a setQueue con
-    // autoPlay=false (encolar no debe arrancar sola la reproducción).
     final source = _queueSource;
     if (source == null) {
       final newSongs = [..._songs, song];
@@ -263,13 +317,12 @@ class PlaybackAudioHandler extends BaseAudioHandler
       return;
     }
 
-    // Añadido incremental: no toca la pista actual.
     _songs = [..._songs, song];
     super.queue.add(_songs.map(_toMediaItem).toList(growable: false));
     await source.add(AudioSource.file(path));
+    _emitControlsState();
   }
 
-  /// Elimina la canción en [index] SIN recargar el resto de la cola.
   Future<void> removeFromQueue(int index) async {
     if (index < 0 || index >= _songs.length) return;
 
@@ -299,6 +352,7 @@ class PlaybackAudioHandler extends BaseAudioHandler
       if (_currentIndex >= 0 && _currentIndex < _songs.length) {
         mediaItem.add(_toMediaItem(_songs[_currentIndex]));
       }
+      _emitControlsState();
       return;
     }
 
@@ -311,6 +365,7 @@ class PlaybackAudioHandler extends BaseAudioHandler
     if (_currentIndex >= 0 && _currentIndex < _songs.length) {
       mediaItem.add(_toMediaItem(_songs[_currentIndex]));
     }
+    _emitControlsState();
   }
 
   Future<void> playSong(Song song) async {
@@ -328,7 +383,6 @@ class PlaybackAudioHandler extends BaseAudioHandler
 
   @override
   Future<void> play() async {
-    // Si no hay fuente cargada, no tiene sentido reproducir.
     if (_queueSource == null) {
       debugPrint('PlaybackAudioHandler: play() sin fuente cargada');
       return;
@@ -346,27 +400,50 @@ class PlaybackAudioHandler extends BaseAudioHandler
   }
 
   @override
-  Future<void> seek(Duration position) => _player.seek(position);
-
-  @override
-  Future<void> skipToNext() async {
-    if (_currentIndex + 1 >= _songs.length) return;
-    if (_queueSource == null) return;
-    await _player.seekToNext();
+  Future<void> seek(Duration position) async {
+    await _player.seek(position);
+    _emitCanGoPrevious();
   }
 
   @override
+  Future<void> skipToNext() async {
+    if (!hasNext || _queueSource == null) return;
+    await _player.seekToNext();
+    // El listener de currentIndexStream actualizará el índice y emitirá.
+    // Por si acaso, forzamos re-evaluación (umbral ya no aplica al
+    // cambiar de canción, y next puede haberse desactivado).
+    _emitControlsState();
+  }
+
+  /// Comportamiento "previous" estilo Spotify/YouTube:
+  ///  - Si ya se reprodujo más del umbral → reinicia la canción actual.
+  ///  - Si no pasó el umbral y hay anterior → va a la canción anterior.
+  ///  - Si no pasó el umbral y no hay anterior → no hace nada
+  ///    (la UI debe tener el botón deshabilitado).
+  @override
   Future<void> skipToPrevious() async {
-    if (_currentIndex - 1 < 0) return;
     if (_queueSource == null) return;
-    await _player.seekToPrevious();
+
+    if (_player.position > _rewindThreshold) {
+      await _player.seek(Duration.zero);
+      _emitCanGoPrevious();
+      return;
+    }
+
+    if (hasPrevious) {
+      await _player.seekToPrevious();
+      // El listener de currentIndexStream actualizará índice y emitirá.
+      _emitControlsState();
+      return;
+    }
+
+    debugPrint('PlaybackAudioHandler: previous no aplica');
   }
 
   @override
   Future<void> skipToQueueItem(int index) async {
     if (index < 0 || index >= _songs.length) return;
 
-    // Si no hay fuente cargada, reconstruimos la cola.
     if (_queueSource == null) {
       await setQueue(_songs, startIndex: index, autoPlay: true);
       return;
@@ -389,5 +466,12 @@ class PlaybackAudioHandler extends BaseAudioHandler
       return;
     }
     await _player.play();
+    _emitControlsState();
+  }
+
+  Future<void> dispose() async {
+    await _canGoPreviousCtrl.close();
+    await _canGoNextCtrl.close();
+    await _player.dispose();
   }
 }
