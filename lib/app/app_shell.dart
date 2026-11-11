@@ -16,7 +16,6 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   int _selectedIndex = 0;
-  int _previousIndex = 0;
 
   final List<Widget> _screens = const [
     HomeScreen(),
@@ -51,24 +50,22 @@ class _AppShellState extends State<AppShell> {
   void _onItemTapped(int index) {
     if (index == _selectedIndex) return;
     setState(() {
-      _previousIndex = _selectedIndex;
       _selectedIndex = index;
     });
   }
-
-  int get _slideDirection => _selectedIndex > _previousIndex ? 1 : -1;
 
   @override
   Widget build(BuildContext context) {
     final isWide = MediaQuery.sizeOf(context).width >= 800;
     final scheme = Theme.of(context).colorScheme;
 
-    final animatedContent = ClipRect(
-      child: _AnimatedTabContent(
-        selectedIndex: _selectedIndex,
-        previousIndex: _previousIndex,
-        slideDirection: _slideDirection,
-        screens: _screens,
+    // IndexedStack mantiene TODAS las pestañas montadas: solo hay un
+    // LibraryScreen vivo a la vez, así su Navigator anidado (y los estáticos
+    // de LibraryScreen) no se reasignan durante transiciones.
+    final content = ClipRect(
+      child: IndexedStack(
+        index: _selectedIndex,
+        children: _screens,
       ),
     );
 
@@ -91,16 +88,14 @@ class _AppShellState extends State<AppShell> {
               thickness: 1,
               color: scheme.outlineVariant,
             ),
-            Expanded(child: animatedContent),
+            Expanded(child: content),
           ],
         ),
       );
     }
 
     // ---------- Móvil ----------
-    // El miniplayer ya no está en bottomNavigationBar: se dibuja en un Stack
-    // ENCIMA del contenido, así que el body ocupa toda la pantalla y no se
-    // reserva ningún espacio para el miniplayer.
+    // El miniplayer se dibuja en un Stack ENCIMA del contenido.
     return Scaffold(
       appBar: AppBar(
         title: AnimatedSwitcher(
@@ -136,10 +131,7 @@ class _AppShellState extends State<AppShell> {
       ),
       body: Stack(
         children: [
-          // Contenido a pantalla completa, por debajo del miniplayer
-          Positioned.fill(child: animatedContent),
-
-          // Miniplayer flotante sobre el contenido
+          Positioned.fill(child: content),
           const Positioned(
             left: 0,
             right: 0,
@@ -150,76 +142,6 @@ class _AppShellState extends State<AppShell> {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ============================================================
-// CONTENIDO ANIMADO ENTRE PESTAÑAS
-// ============================================================
-class _AnimatedTabContent extends StatelessWidget {
-  final int selectedIndex;
-  final int previousIndex;
-  final int slideDirection;
-  final List<Widget> screens;
-
-  const _AnimatedTabContent({
-    required this.selectedIndex,
-    required this.previousIndex,
-    required this.slideDirection,
-    required this.screens,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 320),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      layoutBuilder: (currentChild, previousChildren) {
-        return Stack(
-          fit: StackFit.passthrough,
-          children: [
-            ...previousChildren.map((child) => IgnorePointer(child: child)),
-            if (currentChild != null) currentChild,
-          ],
-        );
-      },
-      transitionBuilder: (child, animation) {
-        final isIncoming = child.key == ValueKey<int>(selectedIndex);
-
-        final curved = CurvedAnimation(
-          parent: animation,
-          curve: Curves.easeOutCubic,
-        );
-
-        final faded = FadeTransition(opacity: curved, child: child);
-
-        final scaled = ScaleTransition(
-          scale: Tween<double>(
-            begin: isIncoming ? 0.98 : 1.0,
-            end: 1.0,
-          ).animate(curved),
-          child: faded,
-        );
-
-        final beginOffset = Offset(
-          isIncoming ? 0.18 * slideDirection : -0.18 * slideDirection,
-          0,
-        );
-
-        return SlideTransition(
-          position: Tween<Offset>(
-            begin: beginOffset,
-            end: Offset.zero,
-          ).animate(curved),
-          child: scaled,
-        );
-      },
-      child: KeyedSubtree(
-        key: ValueKey<int>(selectedIndex),
-        child: screens[selectedIndex],
       ),
     );
   }
@@ -248,7 +170,6 @@ class _DrawerPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Header con degradado
           Container(
             padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
             decoration: BoxDecoration(
@@ -295,7 +216,6 @@ class _DrawerPanel extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          // Items
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -316,7 +236,6 @@ class _DrawerPanel extends StatelessWidget {
               },
             ),
           ),
-          // Miniplayer tipo tarjeta
           const MiniPlayerCard(),
         ],
       ),
@@ -353,7 +272,6 @@ class _StyledDrawer extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Header con degradado
             Container(
               padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
               decoration: BoxDecoration(
@@ -403,7 +321,6 @@ class _StyledDrawer extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 8),
-            // Items
             Expanded(
               child: ListView.builder(
                 padding: const EdgeInsets.symmetric(

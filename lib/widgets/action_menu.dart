@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 class ActionMenuItem {
   final IconData icon;
   final String label;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final bool isDestructive;
 
   /// Si es `false`, la acción se muestra atenuada y no responde a toques.
@@ -35,139 +35,144 @@ class ActionMenu {
 
   // ---------- Bottom sheet ----------
 
-  // lib/widgets/action_menu.dart — solo reemplaza el método show
-
-static Future<bool> show(
-  BuildContext context, {
-  required List<ActionMenuItem> actions,
-  String? title,
-  String? subtitle,
-  Widget? leading,
-  String? coverPath,
-  IconData fallbackIcon = Icons.more_horiz,
-  String cancelLabel = 'Cancelar',
-}) async {
-  final result = await showDialog<bool>(
-    context: context,
-    barrierDismissible: true,
-    builder: (ctx) {
-      final scheme = Theme.of(ctx).colorScheme;
-      return Dialog(
-        backgroundColor: scheme.surfaceContainerLow,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-        ),
-        clipBehavior: Clip.antiAlias,
-        insetPadding: const EdgeInsets.symmetric(
-          horizontal: 24,
-          vertical: 40,
-        ),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 400,
-            maxHeight: 600,
+  static Future<bool> show(
+    BuildContext context, {
+    required List<ActionMenuItem> actions,
+    String? title,
+    String? subtitle,
+    Widget? leading,
+    String? coverPath,
+    IconData fallbackIcon = Icons.more_horiz,
+    String cancelLabel = 'Cancelar',
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        final scheme = Theme.of(ctx).colorScheme;
+        return Dialog(
+          backgroundColor: scheme.surfaceContainerLow,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (title != null ||
-                  subtitle != null ||
-                  leading != null ||
-                  coverPath != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(4, 8, 8, 0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: _MenuHeader(
-                          title: title,
-                          subtitle: subtitle,
-                          leading: leading,
-                          coverPath: coverPath,
-                          fallbackIcon: fallbackIcon,
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close),
-                        iconSize: 20,
-                        visualDensity: VisualDensity.compact,
-                        tooltip: 'Cerrar',
-                        onPressed: () => Navigator.pop(ctx, false),
-                      ),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: 4),
-              Flexible(
-                child: SingleChildScrollView(
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 8),
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainer,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
+          clipBehavior: Clip.antiAlias,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 24,
+            vertical: 40,
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              maxWidth: 400,
+              maxHeight: 600,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (title != null ||
+                    subtitle != null ||
+                    leading != null ||
+                    coverPath != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 8, 8, 0),
+                    child: Row(
                       children: [
-                        for (var i = 0; i < actions.length; i++) ...[
-                          _MenuActionTile(
-                            action: actions[i],
-                            onTap: actions[i].enabled
-                                ? () {
-                                    Navigator.pop(ctx, true);
-                                    actions[i].onTap();
-                                  }
-                                : null,
+                        Expanded(
+                          child: _MenuHeader(
+                            title: title,
+                            subtitle: subtitle,
+                            leading: leading,
+                            coverPath: coverPath,
+                            fallbackIcon: fallbackIcon,
                           ),
-                          if (i != actions.length - 1)
-                            Divider(
-                              height: 1,
-                              indent: 56,
-                              color: scheme.outlineVariant.withValues(
-                                alpha: 0.5,
-                              ),
-                            ),
-                        ],
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close),
+                          iconSize: 20,
+                          visualDensity: VisualDensity.compact,
+                          tooltip: 'Cerrar',
+                          onPressed: () => Navigator.pop(ctx, false),
+                        ),
                       ],
                     ),
                   ),
+                const SizedBox(height: 4),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: scheme.surfaceContainer,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      // Material con clip para que el hover/ripple de las
+                      // opciones se recorte a las esquinas redondeadas.
+                      child: Material(
+                        color: Colors.transparent,
+                        clipBehavior: Clip.antiAlias,
+                        borderRadius: BorderRadius.circular(16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            for (var i = 0; i < actions.length; i++) ...[
+                              _MenuActionTile(
+                                action: actions[i],
+                                onTap: actions[i].enabled
+                                    ? () {
+                                        Navigator.pop(ctx, true);
+                                        actions[i].onTap?.call();
+                                      }
+                                    : null,
+                              ),
+                              if (i != actions.length - 1)
+                                Divider(
+                                  height: 1,
+                                  indent: 56,
+                                  color: scheme.outlineVariant.withValues(
+                                    alpha: 0.5,
+                                  ),
+                                ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                child: Material(
-                  color: scheme.surfaceContainer,
-                  borderRadius: BorderRadius.circular(16),
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: () => Navigator.pop(ctx, false),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      child: Center(
-                        child: Text(
-                          cancelLabel,
-                          style: TextStyle(
-                            color: scheme.primary,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 15,
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                  child: Material(
+                    color: scheme.surfaceContainer,
+                    borderRadius: BorderRadius.circular(16),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () => Navigator.pop(ctx, false),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        child: Center(
+                          child: Text(
+                            cancelLabel,
+                            style: TextStyle(
+                              color: scheme.primary,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 15,
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      );
-    },
-  );
-  return result ?? false;
-}
+        );
+      },
+    );
+    return result ?? false;
+  }
 
   // ---------- Popup anclado ----------
 

@@ -12,18 +12,38 @@ import 'playlist_detail_screen.dart';
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
 
+  /// Navigator anidado ACTUAL de Library. Se actualiza en initState/dispose
+  /// del State. Nunca es una GlobalKey compartida entre instancias, así que
+  /// dos LibraryScreen vivas (p. ej. durante una transición de pestaña) no
+  /// chocan.
+  static NavigatorState? currentNavigator;
+
+  /// Agrupaciones actuales, mantenidas por [_LibraryScreenState].
+  /// Las usa [SongContextMenu] para "Ir al álbum/artista".
+  static List<Playlist> currentAlbums = const [];
+  static List<Playlist> currentArtists = const [];
+  static List<Playlist> currentPodcasts = const [];
+
+  /// Empuja [route] dentro del Navigator anidado de Library.
+  /// Si no está montado (tests, arranque), cae al Navigator raíz.
+  static void pushInLibrary(BuildContext context, Route<void> route) {
+    final nav = currentNavigator;
+    if (nav != null && nav.mounted) {
+      nav.push(route);
+    } else {
+      Navigator.of(context).push(route);
+    }
+  }
+
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
 class _LibraryScreenState extends State<LibraryScreen> {
+  final GlobalKey<NavigatorState> _navKey = GlobalKey<NavigatorState>();
+
   int _selectedFilter = 0;
   bool _slideFromRight = true;
-
-  // Navigator anidado: permite abrir playlists/álbumes/artistas DENTRO del
-  // área de Library, sin tapar el menú lateral del AppShell en escritorio.
-  final GlobalKey<NavigatorState> _libraryNavigatorKey =
-      GlobalKey<NavigatorState>();
 
   // Un ScrollController por pestaña para evitar compartir posiciones
   // entre ListViews simultáneos (AnimatedSwitcher mantiene vivo el saliente).
@@ -64,10 +84,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void initState() {
     super.initState();
     _startWatching();
+    // El Navigator existe tras el primer frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final nav = _navKey.currentState;
+      if (nav != null) LibraryScreen.currentNavigator = nav;
+    });
   }
 
   @override
   void dispose() {
+    // Solo limpiar si seguimos siendo el Navigator "actual".
+    if (LibraryScreen.currentNavigator == _navKey.currentState) {
+      LibraryScreen.currentNavigator = null;
+    }
     _scanSub?.cancel();
     for (final c in _scrollControllers.values) {
       c.dispose();
@@ -84,6 +114,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _albumPlaylists = Playlist.fromAlbums(_songs);
     _artistPlaylists = Playlist.fromArtists(_songs);
     _podcastPlaylists = Playlist.fromPodcasts(_podcasts);
+
+    LibraryScreen.currentAlbums = _albumPlaylists;
+    LibraryScreen.currentArtists = _artistPlaylists;
+    LibraryScreen.currentPodcasts = _podcastPlaylists;
   }
 
   /// Primera carátula disponible entre las canciones de una playlist.
@@ -187,7 +221,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   /// Abre el detalle DENTRO del Navigator anidado de Library.
   /// De esta forma el AppShell (menú lateral en PC) permanece visible.
   void _openPlaylist(BuildContext context, Playlist playlist) {
-    _libraryNavigatorKey.currentState?.push(
+    final nav = _navKey.currentState;
+    if (nav == null) return;
+    nav.push(
       MaterialPageRoute(
         builder: (_) => PlaylistDetailScreen(playlist: playlist),
       ),
@@ -204,16 +240,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
-        final nav = _libraryNavigatorKey.currentState;
+        final nav = _navKey.currentState;
         if (nav != null && nav.canPop()) {
           nav.pop();
         } else {
-          // Deja que el AppShell / sistema maneje el back.
           Navigator.of(context).maybePop();
         }
       },
       child: Navigator(
-        key: _libraryNavigatorKey,
+        key: _navKey,
         onGenerateRoute: (settings) {
           return MaterialPageRoute(
             settings: settings,

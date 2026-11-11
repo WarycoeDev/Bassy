@@ -842,37 +842,7 @@ class _SearchScreenState extends State<SearchScreen> {
         ),
       );
     } else {
-      slivers.addAll(
-        _playlistSection(
-          context,
-          title: 'Artistas',
-          bucket: r.artists,
-          filterIndex: 3,
-          icon: Icons.person,
-          metaLabel: 'canciones',
-        ),
-      );
-      slivers.addAll(
-        _playlistSection(
-          context,
-          title: 'Álbumes',
-          bucket: r.albums,
-          filterIndex: 2,
-          icon: Icons.album,
-          metaLabel: 'pistas',
-        ),
-      );
-      slivers.addAll(
-        _playlistSection(
-          context,
-          title: 'Podcasts',
-          bucket: r.podcasts,
-          filterIndex: 4,
-          icon: Icons.mic,
-          metaLabel: 'episodios',
-        ),
-      );
-
+      // 1) Canciones primero
       final songs = r.songs.ranked;
       if (songs.isNotEmpty) {
         slivers.add(
@@ -900,7 +870,45 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
           ),
         );
+        if (r.artists.length + r.albums.length + r.podcasts.length > 0) {
+          slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 12)));
+        }
       }
+
+      // 2) Artistas (cover redonda)
+      slivers.addAll(
+        _playlistSection(
+          context,
+          title: 'Artistas',
+          bucket: r.artists,
+          filterIndex: 3,
+          icon: Icons.person,
+          metaLabel: 'canciones',
+          roundCover: true,
+        ),
+      );
+      // 3) Álbumes
+      slivers.addAll(
+        _playlistSection(
+          context,
+          title: 'Álbumes',
+          bucket: r.albums,
+          filterIndex: 2,
+          icon: Icons.album,
+          metaLabel: 'pistas',
+        ),
+      );
+      // 4) Podcasts
+      slivers.addAll(
+        _playlistSection(
+          context,
+          title: 'Podcasts',
+          bucket: r.podcasts,
+          filterIndex: 4,
+          icon: Icons.mic,
+          metaLabel: 'episodios',
+        ),
+      );
     }
 
     slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
@@ -918,6 +926,7 @@ class _SearchScreenState extends State<SearchScreen> {
     required int filterIndex,
     required IconData icon,
     required String metaLabel,
+    bool roundCover = false,
   }) {
     final scheme = Theme.of(context).colorScheme;
     final items = bucket.ranked;
@@ -962,6 +971,7 @@ class _SearchScreenState extends State<SearchScreen> {
             entry: items[i],
             icon: icon,
             meta: '${items[i].playlist!.count} $metaLabel',
+            roundCover: roundCover,
           ),
           childCount: count,
           addAutomaticKeepAlives: false,
@@ -984,70 +994,78 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // TILE para playlists (álbum/artista/podcast)
+  // TILE para playlists (álbum/artista/podcast) — más alto
   // ─────────────────────────────────────────────────────────────
   Widget _playlistTile(
     BuildContext context, {
     required _SearchEntry entry,
     required IconData icon,
     required String meta,
+    bool roundCover = false,
   }) {
     final scheme = Theme.of(context).colorScheme;
     final playlist = entry.playlist!;
     final cover = entry.cover; // precalculada en el índice
 
+    const double coverSize = 68;
+    final radius = roundCover
+        ? BorderRadius.circular(coverSize / 2)
+        : BorderRadius.circular(10);
+
     return GestureDetector(
       onTap: () => _openPlaylist(playlist),
+      behavior: HitTestBehavior.opaque,
       child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(8),
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
           color: scheme.surfaceContainer,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
         ),
         child: Row(
           children: [
             Container(
-              width: 52,
-              height: 52,
+              width: coverSize,
+              height: coverSize,
               decoration: BoxDecoration(
                 color: scheme.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: radius,
               ),
               clipBehavior: Clip.antiAlias,
               child: cover != null
                   ? Image.file(
                       File(cover),
                       fit: BoxFit.cover,
-                      cacheWidth: 120, // decodifica pequeño, no la portada full
+                      cacheWidth: 160, // decodifica pequeño, no la portada full
                       filterQuality: FilterQuality.low,
                       gaplessPlayback: true,
                       errorBuilder: (_, __, ___) =>
-                          Icon(icon, size: 24, color: scheme.onSurfaceVariant),
+                          Icon(icon, size: 28, color: scheme.onSurfaceVariant),
                     )
-                  : Icon(icon, size: 24, color: scheme.onSurfaceVariant),
+                  : Icon(icon, size: 28, color: scheme.onSurfaceVariant),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 14),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(
                     playlist.title,
                     style: TextStyle(
                       color: scheme.onSurface,
                       fontWeight: FontWeight.w600,
-                      fontSize: 14,
+                      fontSize: 15,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Text(
                     '${playlist.subtitle} · $meta',
                     style: TextStyle(
                       color: scheme.onSurfaceVariant,
-                      fontSize: 12,
+                      fontSize: 12.5,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -1055,7 +1073,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 ],
               ),
             ),
-            Icon(Icons.chevron_right, color: scheme.onSurfaceVariant, size: 20),
+            Icon(Icons.chevron_right, color: scheme.onSurfaceVariant, size: 22),
           ],
         ),
       ),

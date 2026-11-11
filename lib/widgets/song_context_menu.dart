@@ -2,7 +2,10 @@
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
 
+import '../models/playlist.dart';
 import '../models/song.dart';
+import '../screens/library_screen.dart';
+import '../screens/playlist_detail_screen.dart';
 import '../services/playback_controller.dart';
 import 'action_menu.dart';
 
@@ -195,16 +198,30 @@ class SongContextMenu {
     BuildContext context,
     Song song,
   ) {
+    final album = _findAlbum(song);
+    final artist = _findArtist(song);
+
+    final hasAlbum = song.hasAlbum && album != null;
+    final hasArtist = song.hasArtist && artist != null;
+
     return [
       ActionMenuItem(
         icon: Icons.album_outlined,
         label: 'Ir al álbum',
-        onTap: () => _todo(context, 'Ir al álbum'),
+        enabled: hasAlbum,
+        onTap: () {
+          if (!hasAlbum) return;
+          _openPlaylist(context, album);
+        },
       ),
       ActionMenuItem(
         icon: Icons.person_outline,
         label: 'Ir al artista',
-        onTap: () => _todo(context, 'Ir al artista'),
+        enabled: hasArtist,
+        onTap: () {
+          if (!hasArtist) return;
+          _openPlaylist(context, artist);
+        },
       ),
       ActionMenuItem(
         icon: Icons.info_outline,
@@ -265,6 +282,55 @@ class SongContextMenu {
         onTap: () => _todo(context, 'Detalles del episodio'),
       ),
     ];
+  }
+
+  // ---------- Navegación a álbum / artista ----------
+
+  static void _openPlaylist(BuildContext context, Playlist playlist) {
+  final route = MaterialPageRoute<void>(
+    builder: (_) => PlaylistDetailScreen(playlist: playlist),
+  );
+  // Si el tile vive dentro de Library, usa su Navigator anidado (mantiene
+  // el drawer lateral visible en PC). Si vive en Search (u otra pestaña),
+  // usa el Navigator del propio contexto, que es el anidado de esa pestaña.
+  if (_isInsideLibrary(context)) {
+    LibraryScreen.pushInLibrary(context, route);
+  } else {
+    Navigator.of(context).push(route);
+  }
+}
+
+/// Comprueba si [context] está debajo del Navigator anidado de Library.
+static bool _isInsideLibrary(BuildContext context) {
+  final libNav = LibraryScreen.currentNavigator;
+  if (libNav == null) return false;
+  var found = false;
+  context.visitAncestorElements((element) {
+    if (identical(element, libNav.context as Element)) {
+      found = true;
+      return false;
+    }
+    return true;
+  });
+  return found;
+}
+
+  static Playlist? _findAlbum(Song song) {
+    if (!song.hasAlbum) return null;
+    final target = song.albumOrUnknown;
+    for (final p in LibraryScreen.currentAlbums) {
+      if (p.title == target) return p;
+    }
+    return null;
+  }
+
+  static Playlist? _findArtist(Song song) {
+    if (!song.hasArtist) return null;
+    final target = song.artistOrUnknown;
+    for (final p in LibraryScreen.currentArtists) {
+      if (p.title == target) return p;
+    }
+    return null;
   }
 
   // ---------- Helpers ----------
