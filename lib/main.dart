@@ -17,13 +17,14 @@ class _LifecycleRescanObserver with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
     if (kIsWeb) return;
-    // Solo desktop: en Android/iOS el watcher nativo ya maneja los cambios.
     if (!Platform.isLinux && !Platform.isWindows && !Platform.isMacOS) return;
-    // Ya NO se re-escanea al recuperar foco. El watcher (package:watcher)
-    // está suscrito a todas las carpetas y aplica los cambios en caliente.
-    // ensureInitialScan() es no-op si ya se escaneó al menos una vez,
-    // y solo actúa como red de seguridad si por algún motivo no se hizo.
-    unawaited(MediaScanner.instance.ensureInitialScan());
+    // NO se re-escanea al recuperar foco.
+    // El watcher (package:watcher) ya está suscrito a todas las carpetas
+    // y aplica los cambios en caliente.
+    // El escaneo completo SOLO se dispara:
+    //   1) Manualmente (botón "Escanear todo" → MediaScanner.scan())
+    //   2) Al añadir/quitar directorios configurados
+    //      (onDirectoryAdded / onDirectoryRemoved)
   }
 }
 
@@ -31,8 +32,6 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // just_audio_media_kit SOLO en desktop.
-  // En Android carga libmpv y buffers nativos innecesarios que inflan
-  // el heap Java desde el arranque (causa del OOM sin escanear).
   if (!kIsWeb &&
       (Platform.isLinux || Platform.isWindows || Platform.isMacOS)) {
     JustAudioMediaKit.ensureInitialized(
@@ -72,10 +71,27 @@ class _BassyAppState extends State<BassyApp> {
     } catch (e, st) {
       debugPrint('SettingsService.load failed: $e\n$st');
     }
-    // NO escanear automáticamente al arrancar en Android.
-    // El escaneo inicial + watchers + audio_service al mismo tiempo
-    // saturan el heap Java. Dejamos que la UI lo dispare cuando el
-    // usuario entre a la biblioteca (o cuando PermissionGate lo permita).
+
+    // Carga la lista cacheada del último escaneo para arranque instantáneo.
+    // NO escanea el filesystem: solo lee el JSON persistido por
+    // ScanResultCache. El watcher, al suscribirse, recibirá este snapshot
+    // y la UI pintará la biblioteca de inmediato.
+    try {
+      await MediaScanner.instance.loadCachedResult();
+    } catch (e, st) {
+      debugPrint('loadCachedResult failed: $e\n$st');
+    }
+
+    // Verificación en background: comprueba que cada archivo del caché
+    // siga existiendo. Si borraste canciones con la app cerrada, se
+    // eliminan del listado (y del caché) sin bloquear el arranque.
+    // No lee tags, solo hace `exists()` por archivo → rápido.
+    unawaited(MediaScanner.instance.verifyCachedResult());
+
+    // NO se escanea automáticamente al arrancar.
+    // El escaneo completo SOLO se dispara:
+    //   - Manualmente desde la UI (botón "Escanear todo")
+    //   - Al añadir/quitar directorios configurados
   }
 
   @override

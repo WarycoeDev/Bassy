@@ -8,6 +8,7 @@ import 'package:watcher/watcher.dart';
 import '../models/song.dart';
 import 'metadata_cache.dart';
 import 'metadata_reader.dart';
+import 'scan_result_cache.dart';
 import 'settings_service.dart';
 
 class ScanResult {
@@ -44,8 +45,6 @@ class ScanProgress {
     this.scanning = false,
     this.statusMessage,
   });
-
-  int get totalCount => songs.length + podcasts.length;
 }
 
 class _FsEvent {
@@ -149,12 +148,6 @@ class MediaScanner {
   // ---------------------------------------------------------------------------
 
   /// Devuelve `true` si el archivo parece completamente escrito.
-  ///
-  /// Hace dos `stat` separados por [_stabilityDelay] y compara `size` +
-  /// `mtime`. Si no cambian y `size > 0`, el archivo está estable.
-  ///
-  /// Solo se invoca cuando el archivo es reciente (`mtime < 5s`), así que
-  /// el coste de ~150ms por archivo solo se paga durante una copia activa.
   Future<bool> _isFileStable(File file) async {
     try {
       final s1 = await file.stat();
@@ -168,12 +161,6 @@ class MediaScanner {
   }
 
   /// Decide si el archivo se puede procesar ahora.
-  ///
-  /// - Archivos "viejos" (mtime fuera de [_recentFileWindow]): sí.
-  /// - Archivos recientes: solo si [_isFileStable] confirma que ya no crecen.
-  ///
-  /// Si devuelve `false`, el archivo se ignora en este pase; el watcher lo
-  /// recogerá cuando termine de escribirse (evento MODIFY/ADD posterior).
   Future<bool> _canProcessNow(File file, FileStat stat) async {
     final age = DateTime.now().difference(stat.modified);
     if (age >= _recentFileWindow) return true;
@@ -181,19 +168,173 @@ class MediaScanner {
   }
 
   // ---------------------------------------------------------------------------
-  // Escaneo inicial / rescan
+  // Caché del listado (arranque instantáneo)
   // ---------------------------------------------------------------------------
 
-  Future<void> ensureInitialScan() {
-    if (_initialScanDone && !_forceRescan) return Future.value();
+  /// Carga el último `ScanResult` persistido y lo publica como `_lastResult`.
+  ///
+  /// - Llamar UNA vez al arrancar, ANTES de que la UI se suscriba a
+  ///   `watchStream()`. Así el primer snapshot ya contiene la biblioteca.
+  /// - NO escanea el filesystem. Solo lee el JSON cacheado.
+  /// - Si no hay caché, no hace nada (la UI mostrará el estado vacío).
+  Future<void> loadCachedResult() async {
+    if (_lastResult != null) return;
 
-    final inFlight = _initialScanFuture;
-    if (inFlight != null) return inFlight;
+    final cached = await ScanResultCache.instance.load();
+    if (cached == null) return;
+
+    _liveSongs
+      ..clear()
+      ..addAll(cached.songs);
+    _livePodcasts
+      ..clear()
+      ..addAll(cached.podcasts);
+    _liveErrors
+      ..clear()
+      ..addAll(cached.errors);
+
+    _sortInPlace(_liveSongs);
+    _sortInPlace(_livePodcasts);
+
+    _lastResult = ScanResult(
+      songs: List.unmodifiable(_liveSongs),
+      podcasts: List.unmodifiable(_livePodcasts),
+      errors: List.unmodifiable(_liveErrors),
+    );
+
+    debugPrint(
+      'MediaScanner: caché cargado → '
+      '${_liveSongs.length} canciones, ${_livePodcasts.length} podcasts',
+    );
+  }
+
+  /// Verifica que cada archivo del caché siga existiendo en disco.
+  ///
+  /// - Se ejecuta en background (no bloquea el arranque).
+  /// - Solo hace `File(path).exists()` por entrada; NO lee tags.
+  /// - Si detecta archivos borrados con la app cerrada, los elimina del
+  ///   listado, re-guarda el caché y emite un snapshot actualizado.
+  ///
+  /// Coste: ~1 stat por archivo. Con 10k canciones en SSD es < 1s.
+  /// Usa concurrencia limitada para no saturar el pool de I/O.
+  Future<void> verifyCachedResult() async {
+    if (_lastResult == null) return;
+    if (_liveSongs.isEmpty && _livePodcasts.isEmpty) return;
+    if (_scanning) return; // un escaneo en curso ya lo hará
+
+    // Copias para no mutar mientras iteramos.
+    final songsSnapshot = List<Song>.from(_liveSongs);
+    final podcastsSnapshot = List<Song>.from(_livePodcasts);
+
+    final missing = <String>{};
+
+    // Concurrencia limitada: 16 stat en paralelo.
+    const concurrency = 16;
+    Future<void> checkBatch(List<Song> batch) async {
+      await Future.wait(batch.map((s) async {
+        try {
+          if (!await File(s.path).exists()) {
+            missing.add(s.path);
+          }
+        } catch (_) {
+          // Si stat falla (permiso, path raro), lo tratamos como faltante.
+          missing.add(s.path);
+        }
+      }));
+    }
+
+    final all = [...songsSnapshot, ...podcastsSnapshot];
+    for (var i = 0; i < all.length; i += concurrency) {
+      final end = (i + concurrency < all.length) ? i + concurrency : all.length;
+      await checkBatch(all.sublist(i, end));
+    }
+
+    if (missing.isEmpty) {
+      debugPrint('MediaScanner: verifyCachedResult → todo OK');
+      return;
+    }
+
+    debugPrint(
+      'MediaScanner: verifyCachedResult → ${missing.length} archivo(s) '
+      'faltante(s), limpiando lista y caché',
+    );
+
+    // Si entretanto empezó un escaneo completo, no pisamos su resultado.
+    if (_scanning) return;
+
+    _liveSongs.removeWhere((s) => missing.contains(s.path));
+    _livePodcasts.removeWhere((s) => missing.contains(s.path));
+
+    // Limpiar también del MetadataCache (tags por archivo).
+    try {
+      await MetadataCache.instance.prune({
+        ..._liveSongs.map((s) => s.path),
+        ..._livePodcasts.map((s) => s.path),
+      });
+      await MetadataCache.instance.flush();
+    } catch (e) {
+      debugPrint('MediaScanner: prune tras verify falló: $e');
+    }
+
+    _publishResult(); // re-guarda ScanResultCache
+    _emitSnapshot(
+      statusMessage:
+          'Se quitaron ${missing.length} archivo(s) que ya no existen',
+    );
+
+    // Limpiar el mensaje de estado pasados 3s.
+    Timer(const Duration(seconds: 3), () {
+      if (!_scanning) _emitSnapshot(clearStatus: true);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Escaneo completo (SOLO manual o al modificar directorios)
+  // ---------------------------------------------------------------------------
+
+  /// Escaneo completo manual. Este es el único punto de entrada para
+  /// re-escanear toda la biblioteca desde cero.
+  ///
+  /// NO se llama automáticamente al arrancar la app.
+  Future<ScanResult> rescanNow() => scan();
+
+  Future<ScanResult> scan() async {
+    _cancelRequested = true;
+
+    final pending = _rescanCompleter;
+    if (pending != null) {
+      await pending.future;
+      return _lastResult ?? ScanResult.empty;
+    }
 
     final completer = Completer<void>();
-    final future = completer.future;
-    _initialScanFuture = future;
+    _rescanCompleter = completer;
 
+    try {
+      final inFlight = _initialScanFuture;
+      if (inFlight != null) {
+        try {
+          await inFlight;
+        } catch (_) {}
+      }
+
+      _initialScanDone = false;
+      _forceRescan = true;
+
+      final newFuture = _runForcedScan();
+      _initialScanFuture = newFuture;
+      await newFuture;
+
+      return _lastResult ?? ScanResult.empty;
+    } finally {
+      if (!completer.isCompleted) completer.complete();
+      _rescanCompleter = null;
+      _forceRescan = false;
+    }
+  }
+
+  Future<void> _runForcedScan() async {
+    final completer = Completer<void>();
     _doInitialScan()
         .then((_) {
           if (!completer.isCompleted) completer.complete();
@@ -203,11 +344,12 @@ class MediaScanner {
         })
         .whenComplete(() {
           _initialScanDone = true;
-          _initialScanFuture = null;
           _forceRescan = false;
+          if (identical(_initialScanFuture, completer.future)) {
+            _initialScanFuture = null;
+          }
         });
-
-    return future;
+    return completer.future;
   }
 
   Future<void> _doInitialScan() async {
@@ -288,62 +430,6 @@ class MediaScanner {
     }
   }
 
-  Future<ScanResult> rescanNow() => scan();
-
-  Future<ScanResult> scan() async {
-    _cancelRequested = true;
-
-    final pending = _rescanCompleter;
-    if (pending != null) {
-      await pending.future;
-      return _lastResult ?? ScanResult.empty;
-    }
-
-    final completer = Completer<void>();
-    _rescanCompleter = completer;
-
-    try {
-      final inFlight = _initialScanFuture;
-      if (inFlight != null) {
-        try {
-          await inFlight;
-        } catch (_) {}
-      }
-
-      _initialScanDone = false;
-      _forceRescan = true;
-
-      final newFuture = _runForcedScan();
-      _initialScanFuture = newFuture;
-      await newFuture;
-
-      return _lastResult ?? ScanResult.empty;
-    } finally {
-      if (!completer.isCompleted) completer.complete();
-      _rescanCompleter = null;
-      _forceRescan = false;
-    }
-  }
-
-  Future<void> _runForcedScan() async {
-    final completer = Completer<void>();
-    _doInitialScan()
-        .then((_) {
-          if (!completer.isCompleted) completer.complete();
-        })
-        .catchError((Object e, StackTrace st) {
-          if (!completer.isCompleted) completer.completeError(e, st);
-        })
-        .whenComplete(() {
-          _initialScanDone = true;
-          _forceRescan = false;
-          if (identical(_initialScanFuture, completer.future)) {
-            _initialScanFuture = null;
-          }
-        });
-    return completer.future;
-  }
-
   // ---------------------------------------------------------------------------
   // Stream público
   // ---------------------------------------------------------------------------
@@ -356,9 +442,14 @@ class MediaScanner {
       );
     }
 
-    if (_lastResult != null) {
-      scheduleMicrotask(() {
-        if (_watchController == null || _watchController!.isClosed) return;
+    // Emisión inicial:
+    //  - Si ya hay un resultado (caché cargado o escaneo previo), emitirlo.
+    //  - Si NO hay resultado (arranque limpio), emitimos un snapshot
+    //    vacío indicando que el watcher está activo pero aún no se ha
+    //    escaneado nada. La UI puede mostrar el botón "Escanear todo".
+    scheduleMicrotask(() {
+      if (_watchController == null || _watchController!.isClosed) return;
+      if (_lastResult != null) {
         _watchController!.add(
           ScanProgress(
             songs: _lastResult!.songs,
@@ -369,14 +460,27 @@ class MediaScanner {
             scanning: _scanning,
           ),
         );
-      });
-    }
+      } else {
+        _watchController!.add(
+          const ScanProgress(
+            songs: [],
+            podcasts: [],
+            processedFiles: 0,
+            errors: [],
+            done: false,
+            scanning: false,
+            statusMessage:
+                'Watcher activo — pulsa "Escanear todo" para cargar la biblioteca',
+          ),
+        );
+      }
+    });
 
     return _watchController!.stream;
   }
 
   // ---------------------------------------------------------------------------
-  // Watchers
+  // Watchers (solo observan, NO escanean)
   // ---------------------------------------------------------------------------
 
   Future<void> _startWatcher() async {
@@ -634,6 +738,8 @@ class MediaScanner {
       podcasts: List.unmodifiable(_livePodcasts),
       errors: List.unmodifiable(_liveErrors),
     );
+    // Persistir la lista para arranque instantáneo en la próxima apertura.
+    unawaited(ScanResultCache.instance.save(_lastResult!));
   }
 
   void _emitSnapshot({
@@ -656,7 +762,7 @@ class MediaScanner {
   }
 
   // ---------------------------------------------------------------------------
-  // API pública de carpetas
+  // API pública de carpetas (SÍ escanean, pero solo la carpeta afectada)
   // ---------------------------------------------------------------------------
 
   Future<void> onDirectoryAdded(String dirPath, MediaKind kind) async {
@@ -792,8 +898,6 @@ class MediaScanner {
         if (!_audioExts.contains(ext)) continue;
 
         // Comprobación de estabilidad: solo para archivos recientes.
-        // Si aún se están copiando, se ignora en este pase y el watcher
-        // lo recogerá cuando termine (evento MODIFY/ADD posterior).
         try {
           final stat = await entity.stat();
           if (!await _canProcessNow(entity, stat)) {

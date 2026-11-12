@@ -183,33 +183,29 @@ class _SearchScreenState extends State<SearchScreen> {
   // ===========================================================================
 
   void _bindLibrary() {
-    final last = MediaScanner.instance.lastResult;
-    if (last != null) {
-      _applyLibrary(last.songs, last.podcasts, loading: false);
-    }
-
-    // El scanner puede emitir muchos snapshots seguidos (watcher). Se agrupan
-    // en una ventana corta para no reagrupar álbumes/artistas en cada uno.
-    _sub = MediaScanner.instance.watchStream().listen((p) {
-      _pendingProgress = p;
-      _applyTimer ??= Timer(
-        const Duration(milliseconds: _libraryApplyMs),
-        () {
-          _applyTimer = null;
-          final pp = _pendingProgress;
-          _pendingProgress = null;
-          if (!mounted || pp == null) return;
-          _applyLibrary(
-            pp.songs,
-            pp.podcasts,
-            loading: pp.scanning && pp.songs.isEmpty && pp.podcasts.isEmpty,
-          );
-        },
-      );
-    });
-
-    if (last == null) MediaScanner.instance.ensureInitialScan();
+  final last = MediaScanner.instance.lastResult;
+  if (last != null) {
+    _applyLibrary(last.songs, last.podcasts, loading: false);
   }
+
+  _sub = MediaScanner.instance.watchStream().listen((p) {
+    _pendingProgress = p;
+    _applyTimer ??= Timer(
+      const Duration(milliseconds: _libraryApplyMs),
+      () {
+        _applyTimer = null;
+        final pp = _pendingProgress;
+        _pendingProgress = null;
+        if (!mounted || pp == null) return;
+        _applyLibrary(
+          pp.songs,
+          pp.podcasts,
+          loading: pp.scanning && pp.songs.isEmpty && pp.podcasts.isEmpty,
+        );
+      },
+    );
+  });
+}
 
   void _applyLibrary(
     List<Song> songs,
@@ -338,13 +334,39 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   void _openPlaylist(Playlist playlist) {
-    if (_query.isNotEmpty) _saveQueryToHistory();
-    _navKey.currentState?.push(
-      MaterialPageRoute(
-        builder: (_) => PlaylistDetailScreen(playlist: playlist),
-      ),
-    );
-  }
+  if (_query.isNotEmpty) _saveQueryToHistory();
+  showDialog<void>(
+    context: context,
+    barrierColor: Colors.black.withValues(alpha: 0.45),
+    builder: (dialogContext) {
+      final scheme = Theme.of(dialogContext).colorScheme;
+      return Dialog(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        insetPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 24,
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(
+            maxWidth: 520,
+            maxHeight: 640,
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Material(
+              color: scheme.surface,
+              child: PlaylistDetailScreen(
+                playlist: playlist,
+                showBackButton: false,
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+  );
+}
 
   void _openSong(Song song) {
     if (_query.isNotEmpty) _saveQueryToHistory();

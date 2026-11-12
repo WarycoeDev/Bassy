@@ -25,12 +25,19 @@ class PlaylistDetailScreen extends StatelessWidget {
   /// Callback opcional para el botón "atrás" en modo inline.
   final VoidCallback? onBack;
 
+  /// Si es false, se oculta el AppBar completo (y por tanto su título y
+  /// botón de atrás). Útil cuando la pantalla se muestra dentro de un
+  /// diálogo flotante: el título ya lo pinta la cabecera del cuerpo, así
+  /// evitamos el doble título y el botón atrás innecesario.
+  final bool showBackButton;
+
   const PlaylistDetailScreen({
     super.key,
     required this.playlist,
     this.catalog,
     this.inline = false,
     this.onBack,
+    this.showBackButton = true,
   });
 
   /// Primera carátula disponible entre las canciones de la playlist.
@@ -60,7 +67,7 @@ class PlaylistDetailScreen extends StatelessWidget {
       );
     }
 
-    // ----- Modo pantalla completa (original) -----
+    // ----- Modo pantalla completa / diálogo -----
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -72,23 +79,28 @@ class PlaylistDetailScreen extends StatelessWidget {
       },
       child: Scaffold(
         backgroundColor: scheme.surface,
-        appBar: AppBar(
-          backgroundColor: scheme.surface,
-          elevation: 0,
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            tooltip: 'Atrás',
-            onPressed: () => Navigator.of(context).maybePop(),
-          ),
-          title: Text(
-            playlist.title,
-            style: TextStyle(
-              color: scheme.onSurface,
-              fontWeight: FontWeight.bold,
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
+        // En el flotante (showBackButton == false) no mostramos AppBar:
+        // el título ya está en la cabecera del cuerpo. Así evitamos el
+        // doble título y el botón atrás sobrante.
+        appBar: showBackButton
+            ? AppBar(
+                backgroundColor: scheme.surface,
+                elevation: 0,
+                leading: IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  tooltip: 'Atrás',
+                  onPressed: () => Navigator.of(context).maybePop(),
+                ),
+                title: Text(
+                  playlist.title,
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              )
+            : null,
         body: SafeArea(
           // En modo reordenable escuchamos al store para que el header
           // (contador, duración) también se actualice al reordenar.

@@ -332,7 +332,10 @@ class SongContextMenu {
               borderRadius: BorderRadius.circular(18),
               child: Material(
                 color: scheme.surface,
-                child: PlaylistDetailScreen(playlist: playlist),
+                child: PlaylistDetailScreen(
+                  playlist: playlist,
+                  showBackButton: false,
+                ),
               ),
             ),
           ),
