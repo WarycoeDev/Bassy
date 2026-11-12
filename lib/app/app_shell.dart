@@ -19,14 +19,18 @@ class _AppShellState extends State<AppShell> {
   static const int _homeIndex = 0;
   static const int _libraryIndex = 1;
 
-  /// Lo que tarda en cerrarse el Drawer (~246 ms en Material). Esperamos a que
-  /// termine antes de cambiar de pestaña para no pintar dos cosas pesadas
-  /// a la vez (drawer deslizándose + pestaña nueva apareciendo).
-  static const Duration _drawerCloseDelay = Duration(milliseconds: 240);
-
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   int _selectedIndex = _homeIndex;
+
+  /// Lazy-mount: cada pestaña se construye la primera vez que se visita
+  /// y se mantiene montada después.
+  late final List<bool> _visited = <bool>[
+    true, // Inicio siempre montada
+    false,
+    false,
+    false,
+  ];
 
   final List<Widget> _screens = const [
     HomeScreen(),
@@ -62,16 +66,14 @@ class _AppShellState extends State<AppShell> {
     if (index == _selectedIndex) return;
     setState(() {
       _selectedIndex = index;
+      _visited[index] = true; // marcar como visitada → se monta
     });
   }
 
-  /// Móvil: cierra el drawer y DESPUÉS cambia de pestaña.
+  /// Móvil: cierra el drawer y cambia de pestaña inmediatamente.
   void _onDrawerItemTapped(int index) {
     _scaffoldKey.currentState?.closeDrawer();
-    if (index == _selectedIndex) return;
-    Future.delayed(_drawerCloseDelay, () {
-      if (mounted) _onItemTapped(index);
-    });
+    _onItemTapped(index);
   }
 
   /// Único punto que maneja el botón/gesto de atrás de Android.
@@ -111,11 +113,22 @@ class _AppShellState extends State<AppShell> {
     final isWide = MediaQuery.sizeOf(context).width >= 800;
     final scheme = Theme.of(context).colorScheme;
 
-    // Todas las pestañas siguen montadas (IndexedStack). Solo hacemos un fade
-    // corto y cada pestaña está aislada en su propio RepaintBoundary.
-    final content = _AnimatedIndexedStack(
+    // IndexedStack lazy: las pestañas no visitadas NO se construyen hasta
+    // el primer tap (se sustituyen por un SizedBox vacío). Una vez
+    // visitadas, quedan montadas y conservan su estado.
+    // Todo va envuelto en una transición que se dispara al cambiar de índice.
+    final content = _TabTransition(
       index: _selectedIndex,
-      children: _screens,
+      child: IndexedStack(
+        index: _selectedIndex,
+        sizing: StackFit.expand,
+        children: [
+          for (var i = 0; i < _screens.length; i++)
+            _visited[i]
+                ? RepaintBoundary(child: _screens[i])
+                : const SizedBox.shrink(),
+        ],
+      ),
     );
 
     final Widget scaffold;
@@ -200,48 +213,47 @@ class _AppShellState extends State<AppShell> {
 }
 
 // ============================================================
-// INDEXED STACK ANIMADO (solo fade corto, sin slide ni ClipRect)
+// TRANSICIÓN ENTRE PESTAÑAS (fade + slide sutil)
 // ============================================================
-class _AnimatedIndexedStack extends StatefulWidget {
+class _TabTransition extends StatefulWidget {
   final int index;
-  final List<Widget> children;
-  final Duration duration;
+  final Widget child;
 
-  const _AnimatedIndexedStack({
-    required this.index,
-    required this.children,
-    this.duration = const Duration(milliseconds: 180),
-  });
+  const _TabTransition({required this.index, required this.child});
 
   @override
-  State<_AnimatedIndexedStack> createState() => _AnimatedIndexedStackState();
+  State<_TabTransition> createState() => _TabTransitionState();
 }
 
-class _AnimatedIndexedStackState extends State<_AnimatedIndexedStack>
+class _TabTransitionState extends State<_TabTransition>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: widget.duration,
-    value: 1.0,
+    duration: const Duration(milliseconds: 220),
+    value: 1, // primera carga sin animación
   );
 
-  late final Animation<double> _fade = CurvedAnimation(
+  late final Animation<double> _curve = CurvedAnimation(
     parent: _controller,
-    curve: Curves.easeOut,
+    curve: Curves.easeOutCubic,
   );
 
-  // Cada pestaña en su propio RepaintBoundary: se rasteriza una vez y el fade
-  // solo compone esa capa en vez de repintar todo el árbol en cada frame.
-  late final List<Widget> _wrapped = [
-    for (final c in widget.children) RepaintBoundary(child: c),
-  ];
+  late final Animation<Offset> _offset = Tween<Offset>(
+    begin: const Offset(0, 0.02),
+    end: Offset.zero,
+  ).animate(_curve);
 
   @override
-  void didUpdateWidget(covariant _AnimatedIndexedStack oldWidget) {
+  void didUpdateWidget(covariant _TabTransition oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.index != widget.index) {
-      _controller.forward(from: 0);
+    if (oldWidget.index == widget.index) return;
+
+    // Respeta "reducir animaciones" del sistema.
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.value = 1;
+      return;
     }
+    _controller.forward(from: 0);
   }
 
   @override
@@ -253,46 +265,10 @@ class _AnimatedIndexedStackState extends State<_AnimatedIndexedStack>
   @override
   Widget build(BuildContext context) {
     return FadeTransition(
-      opacity: _fade,
-      child: IndexedStack(
-        index: widget.index,
-        children: _wrapped,
-      ),
-    );
-  }
-}
-
-// ============================================================
-// ENTRADA ESCALONADA (UN solo controller para todo el panel)
-// ============================================================
-class _Entrance extends StatelessWidget {
-  final Animation<double> animation;
-  final double begin;
-  final double end;
-  final Offset offset;
-  final Widget child;
-
-  const _Entrance({
-    required this.animation,
-    required this.begin,
-    required this.end,
-    required this.child,
-    this.offset = const Offset(-0.15, 0),
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    // drive() no crea objetos que haya que hacer dispose.
-    final t = animation.drive(
-      CurveTween(
-        curve: Interval(begin, end.clamp(0.0, 1.0), curve: Curves.easeOutCubic),
-      ),
-    );
-    return FadeTransition(
-      opacity: t,
+      opacity: _curve,
       child: SlideTransition(
-        position: t.drive(Tween(begin: offset, end: Offset.zero)),
-        child: child,
+        position: _offset,
+        child: widget.child,
       ),
     );
   }
@@ -365,7 +341,7 @@ class _DrawerHeader extends StatelessWidget {
 // ============================================================
 // PANEL LATERAL (tablet / PC)
 // ============================================================
-class _DrawerPanel extends StatefulWidget {
+class _DrawerPanel extends StatelessWidget {
   final int selectedIndex;
   final ValueChanged<int> onItemTapped;
   final List<_NavDestination> destinations;
@@ -379,47 +355,19 @@ class _DrawerPanel extends StatefulWidget {
   });
 
   @override
-  State<_DrawerPanel> createState() => _DrawerPanelState();
-}
-
-class _DrawerPanelState extends State<_DrawerPanel>
-    with SingleTickerProviderStateMixin {
-  // Un único controller: reemplaza 4 controllers + 4 Future.delayed + el
-  // TweenAnimationBuilder con Opacity/elasticOut del header.
-  late final AnimationController _entrance = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 500),
-  )..forward();
-
-  @override
-  void dispose() {
-    _entrance.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final scheme = widget.scheme;
-
     return Material(
       color: scheme.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Entrance(
-            animation: _entrance,
-            begin: 0.0,
-            end: 0.6,
-            offset: const Offset(0, 0.05),
-            child: _DrawerHeader(scheme: scheme),
-          ),
+          _DrawerHeader(scheme: scheme),
           const SizedBox(height: 8),
           Expanded(
-            child: _AnimatedNavList(
-              entrance: _entrance,
-              selectedIndex: widget.selectedIndex,
-              onItemTapped: widget.onItemTapped,
-              destinations: widget.destinations,
+            child: _NavList(
+              selectedIndex: selectedIndex,
+              onItemTapped: onItemTapped,
+              destinations: destinations,
               scheme: scheme,
             ),
           ),
@@ -431,10 +379,9 @@ class _DrawerPanelState extends State<_DrawerPanel>
 }
 
 // ============================================================
-// LISTA DE NAVEGACIÓN CON INDICADOR DESLIZANTE (sin layout por frame)
+// LISTA DE NAVEGACIÓN
 // ============================================================
-class _AnimatedNavList extends StatelessWidget {
-  final Animation<double> entrance;
+class _NavList extends StatelessWidget {
   final int selectedIndex;
   final ValueChanged<int> onItemTapped;
   final List<_NavDestination> destinations;
@@ -442,8 +389,7 @@ class _AnimatedNavList extends StatelessWidget {
 
   static const double _itemExtent = 56;
 
-  const _AnimatedNavList({
-    required this.entrance,
+  const _NavList({
     required this.selectedIndex,
     required this.onItemTapped,
     required this.destinations,
@@ -458,25 +404,18 @@ class _AnimatedNavList extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Stack(
         children: [
-          // Pill: AnimatedSlide = solo Transform (no relayout del Stack, que
-          // sí ocurría con AnimatedPositioned). El offset es en múltiplos de
-          // su propia altura, por eso basta con el índice.
+          // Indicador en la posición del índice seleccionado.
           Positioned(
-            top: 0,
+            top: selectedIndex * _itemExtent,
             left: 0,
             right: 0,
             height: _itemExtent,
             child: IgnorePointer(
-              child: AnimatedSlide(
-                offset: Offset(0, selectedIndex.toDouble()),
-                duration: const Duration(milliseconds: 280),
-                curve: Curves.easeOutCubic,
-                child: RepaintBoundary(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(14),
-                    ),
+              child: RepaintBoundary(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(14),
                   ),
                 ),
               ),
@@ -486,22 +425,16 @@ class _AnimatedNavList extends StatelessWidget {
             children: List.generate(count, (i) {
               final d = destinations[i];
               final selected = i == selectedIndex;
-              final start = 0.1 + i * 0.1;
               return SizedBox(
                 height: _itemExtent,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: _Entrance(
-                    animation: entrance,
-                    begin: start,
-                    end: start + 0.5,
-                    child: _HoverableDrawerItem(
-                      icon: selected ? d.selectedIcon : d.icon,
-                      label: d.label,
-                      selected: selected,
-                      scheme: scheme,
-                      onTap: () => onItemTapped(i),
-                    ),
+                  child: _HoverableDrawerItem(
+                    icon: selected ? d.selectedIcon : d.icon,
+                    label: d.label,
+                    selected: selected,
+                    scheme: scheme,
+                    onTap: () => onItemTapped(i),
                   ),
                 ),
               );
@@ -514,7 +447,7 @@ class _AnimatedNavList extends StatelessWidget {
 }
 
 // ============================================================
-// ITEM CON HOVER (PC) — solo animaciones que no provocan layout
+// ITEM CON HOVER (PC)
 // ============================================================
 class _HoverableDrawerItem extends StatefulWidget {
   final IconData icon;
@@ -554,10 +487,7 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
       child: GestureDetector(
         onTap: widget.onTap,
         behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          // Solo cambia el color de fondo (repaint, sin layout).
-          duration: const Duration(milliseconds: 150),
-          curve: Curves.easeOut,
+        child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14),
           decoration: BoxDecoration(
             color: (!selected && _hovering)
@@ -567,16 +497,9 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
           ),
           child: Row(
             children: [
-              AnimatedScale(
-                scale: (_hovering && !selected) ? 1.12 : 1.0,
-                duration: const Duration(milliseconds: 150),
-                curve: Curves.easeOut,
-                child: Icon(widget.icon, size: 22, color: color),
-              ),
+              Icon(widget.icon, size: 22, color: color),
               const SizedBox(width: 14),
               Expanded(
-                // Antes: AnimatedDefaultTextStyle cambiando fontWeight, lo que
-                // re-mide el texto en cada frame. Ahora es un Text normal.
                 child: Text(
                   widget.label,
                   style: Theme.of(context).textTheme.bodyLarge!.copyWith(
@@ -586,15 +509,12 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
                       ),
                 ),
               ),
-              AnimatedOpacity(
-                duration: const Duration(milliseconds: 150),
-                opacity: selected ? 1.0 : 0.0,
-                child: Icon(
+              if (selected)
+                Icon(
                   Icons.chevron_right_rounded,
                   size: 20,
                   color: scheme.onSurface,
                 ),
-              ),
             ],
           ),
         ),
@@ -604,9 +524,7 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
 }
 
 // ============================================================
-// DRAWER ESTILIZADO (móvil) — SIN animaciones internas
-// El propio Drawer ya se desliza; animar además el contenido mientras se
-// abre es lo que más se notaba trabado.
+// DRAWER ESTILIZADO (móvil)
 // ============================================================
 class _StyledDrawer extends StatelessWidget {
   final int selectedIndex;
