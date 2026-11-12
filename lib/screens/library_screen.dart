@@ -439,10 +439,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // Progreso de escaneo
   // -------------------------------------------------------------------------
 
-  Widget _buildScanProgress(BuildContext context) {
+    Widget _buildScanProgress(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    if (!_scanning && _scanErrors.isEmpty) return const SizedBox.shrink();
+    // Mostrar también si hay un statusMessage informativo (verify al
+    // arranque) aunque no haya un escaneo activo ni errores.
+    final hasStatus = _scanStatus != null && _scanStatus!.isNotEmpty;
+    if (!_scanning && _scanErrors.isEmpty && !hasStatus) {
+      return const SizedBox.shrink();
+    }
 
     final progressText = _scanStatus ??
         'Escaneando… ${_songs.length + _podcasts.length} encontradas · '
@@ -453,17 +458,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (_scanning) ...[
+          if (_scanning || hasStatus) ...[
             Row(
               children: [
-                SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: scheme.primary,
-                  ),
-                ),
+                if (_scanning)
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: scheme.primary,
+                    ),
+                  )
+                else
+                  Icon(Icons.sync, size: 14, color: scheme.primary),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -477,20 +485,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 6),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                minHeight: 3,
-                backgroundColor: scheme.surfaceContainerHigh,
-                color: scheme.primary,
+            if (_scanning) ...[
+              const SizedBox(height: 6),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  minHeight: 3,
+                  backgroundColor: scheme.surfaceContainerHigh,
+                  color: scheme.primary,
+                ),
               ),
-            ),
+            ],
           ],
           if (_scanErrors.isNotEmpty) ...[
-            if (_scanning) const SizedBox(height: 8),
+            if (_scanning || hasStatus) const SizedBox(height: 8),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               decoration: BoxDecoration(
                 color: scheme.errorContainer,
                 borderRadius: BorderRadius.circular(8),

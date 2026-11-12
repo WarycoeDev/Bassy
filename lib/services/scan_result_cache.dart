@@ -31,6 +31,21 @@ class ScanResultCache {
 
   File? _file;
 
+  // ---------------------------------------------------------------------------
+  // Serialización de escrituras
+  //
+  // `save()` se llama desde varios sitios (watcher, verify, escaneo) con
+  // `unawaited`. Sin serializar, dos escrituras concurrentes al mismo
+  // `.tmp` producen JSON entrelazado/corrupto (visto en Linux).
+  //
+  // Estrategia: si ya hay un save en vuelo, marcamos `_saveQueued` y
+  // salimos. Cuando el save actual termina, si hubo cola, vuelve a
+  // guardar el estado más reciente (no hace falta guardar cada
+  // intermedio: siempre queremos el último).
+  // ---------------------------------------------------------------------------
+  bool _saving = false;
+  bool _saveQueued = false;
+
   Future<File> _resolveFile() async {
     if (_file != null) return _file!;
 
@@ -54,6 +69,7 @@ class ScanResultCache {
 
     await dir.create(recursive: true);
     _file = File(p.join(dir.path, _fileName));
+    debugPrint('ScanResultCache: archivo → ${_file!.path}');
     return _file!;
   }
 
@@ -63,27 +79,89 @@ class ScanResultCache {
   Future<ScanResult?> load() async {
     try {
       final f = await _resolveFile();
-      if (!await f.exists()) return null;
+      if (!await f.exists()) {
+        debugPrint('ScanResultCache: no existe ${f.path}');
+        return null;
+      }
       final raw = await f.readAsString();
-      if (raw.trim().isEmpty) return null;
-      final map = jsonDecode(raw) as Map<String, dynamic>;
-      return _fromJson(map);
-    } catch (e) {
-      debugPrint('ScanResultCache: load error $e');
+      if (raw.trim().isEmpty) {
+        debugPrint('ScanResultCache: archivo vacío ${f.path}');
+        return null;
+      }
+
+      Map<String, dynamic> map;
+      try {
+        map = jsonDecode(raw) as Map<String, dynamic>;
+      } on FormatException catch (e) {
+        // JSON corrupto (p. ej. por escrituras concurrentes previas al
+        // fix). Lo borramos para que el próximo save() parta limpio y
+        // no volvamos a fallar en cada arranque.
+        debugPrint(
+          'ScanResultCache: JSON corrupto en ${f.path} ($e). '
+          'Borrando archivo y continuando sin caché.',
+        );
+        try {
+          await f.delete();
+        } catch (_) {}
+        return null;
+      }
+
+      final result = _fromJson(map);
+      debugPrint(
+        'ScanResultCache: cargado ${result.songs.length} songs + '
+        '${result.podcasts.length} podcasts desde ${f.path}',
+      );
+      return result;
+    } catch (e, st) {
+      debugPrint('ScanResultCache: load error $e\n$st');
       return null;
     }
   }
 
   Future<void> save(ScanResult result) async {
+    // Si ya hay una escritura en vuelo, no la duplicamos: marcamos
+    // cola y salimos. Al terminar la actual, se re-guarda el estado
+    // más reciente (que es lo que queremos; los intermedios no
+    // aportan nada).
+    if (_saving) {
+      _saveQueued = true;
+      return;
+    }
+
+    _saving = true;
+    try {
+      do {
+        _saveQueued = false;
+        await _writeAtomic(result);
+      } while (_saveQueued);
+    } finally {
+      _saving = false;
+    }
+  }
+
+  Future<void> _writeAtomic(ScanResult result) async {
     try {
       final f = await _resolveFile();
       final json = _toJson(result);
+
       // Escritura atómica: escribe a .tmp y renombra.
+      // `writeAsString` trunca por defecto (FileMode.write), pero lo
+      // dejamos explícito para que no queden restos si el archivo
+      // existía de una escritura anterior más grande.
       final tmp = File('${f.path}.tmp');
-      await tmp.writeAsString(jsonEncode(json), flush: true);
+      await tmp.writeAsString(
+        jsonEncode(json),
+        mode: FileMode.write,
+        flush: true,
+      );
       await tmp.rename(f.path);
-    } catch (e) {
-      debugPrint('ScanResultCache: save error $e');
+
+      debugPrint(
+        'ScanResultCache: guardado ${result.songs.length} songs + '
+        '${result.podcasts.length} podcasts en ${f.path}',
+      );
+    } catch (e, st) {
+      debugPrint('ScanResultCache: save error $e\n$st');
     }
   }
 

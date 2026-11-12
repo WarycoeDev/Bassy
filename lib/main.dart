@@ -74,8 +74,9 @@ class _BassyAppState extends State<BassyApp> {
 
     // Carga la lista cacheada del último escaneo para arranque instantáneo.
     // NO escanea el filesystem: solo lee el JSON persistido por
-    // ScanResultCache. El watcher, al suscribirse, recibirá este snapshot
-    // y la UI pintará la biblioteca de inmediato.
+    // ScanResultCache. Si la UI se suscribe a watchStream() antes de que
+    // esto termine, `loadCachedResult()` emite un snapshot al final
+    // (ver `_loadCachedResultImpl`), así que la biblioteca aparece igual.
     try {
       await MediaScanner.instance.loadCachedResult();
     } catch (e, st) {
@@ -83,9 +84,9 @@ class _BassyAppState extends State<BassyApp> {
     }
 
     // Verificación en background: comprueba que cada archivo del caché
-    // siga existiendo. Si borraste canciones con la app cerrada, se
-    // eliminan del listado (y del caché) sin bloquear el arranque.
-    // No lee tags, solo hace `exists()` por archivo → rápido.
+    // siga existiendo. `verifyCachedResult()` espera internamente a que
+    // `loadCachedResult()` haya terminado, así que no hay carrera aunque
+    // se lance con `unawaited`. No lee tags, solo `exists()` por archivo.
     unawaited(MediaScanner.instance.verifyCachedResult());
 
     // NO se escanea automáticamente al arrancar.
@@ -133,7 +134,7 @@ class _BassyAppState extends State<BassyApp> {
     );
 
     return MaterialApp(
-      debugShowCheckedModeBanner: true,
+      debugShowCheckedModeBanner: false,
       title: 'Bassy',
       theme: ThemeData(
         useMaterial3: true,

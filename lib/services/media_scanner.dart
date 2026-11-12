@@ -97,6 +97,11 @@ class MediaScanner {
   Completer<void>? _rescanCompleter;
   bool _forceRescan = false;
 
+  /// Future idempotente de carga del caché. Permite que
+  /// `verifyCachedResult()` espere sin carreras en desktop, donde el
+  /// primer build de la UI puede llegar antes que la lectura del JSON.
+  Future<void>? _cacheLoadFuture;
+
   final List<Song> _liveSongs = [];
   final List<Song> _livePodcasts = [];
   final List<String> _liveErrors = [];
@@ -173,15 +178,24 @@ class MediaScanner {
 
   /// Carga el último `ScanResult` persistido y lo publica como `_lastResult`.
   ///
-  /// - Llamar UNA vez al arrancar, ANTES de que la UI se suscriba a
-  ///   `watchStream()`. Así el primer snapshot ya contiene la biblioteca.
+  /// - Idempotente: múltiples llamadas devuelven la misma future.
+  /// - Llamar UNA vez al arrancar. Si la UI ya se suscribió a
+  ///   `watchStream()` antes de que esto termine, se emite un snapshot
+  ///   al final para que pinte la biblioteca igualmente.
   /// - NO escanea el filesystem. Solo lee el JSON cacheado.
   /// - Si no hay caché, no hace nada (la UI mostrará el estado vacío).
-  Future<void> loadCachedResult() async {
+  Future<void> loadCachedResult() {
+    return _cacheLoadFuture ??= _loadCachedResultImpl();
+  }
+
+  Future<void> _loadCachedResultImpl() async {
     if (_lastResult != null) return;
 
     final cached = await ScanResultCache.instance.load();
-    if (cached == null) return;
+    if (cached == null) {
+      debugPrint('MediaScanner: no hay caché persistido');
+      return;
+    }
 
     _liveSongs
       ..clear()
@@ -206,84 +220,249 @@ class MediaScanner {
       'MediaScanner: caché cargado → '
       '${_liveSongs.length} canciones, ${_livePodcasts.length} podcasts',
     );
+
+    // Si la UI ya está suscrita a watchStream(), emitimos un snapshot
+    // ahora. Sin esto, en desktop (donde el I/O es más lento que el
+    // primer build) la UI se quedaba con el snapshot vacío inicial.
+    _emitSnapshot();
   }
 
-  /// Verifica que cada archivo del caché siga existiendo en disco.
+  // ---------------------------------------------------------------------------
+  // Reconciliación al arranque (app cerrada → cambios en disco)
+  // ---------------------------------------------------------------------------
+
+  /// Reconciliación bidireccional entre el caché persistido y el disco.
   ///
-  /// - Se ejecuta en background (no bloquea el arranque).
-  /// - Solo hace `File(path).exists()` por entrada; NO lee tags.
-  /// - Si detecta archivos borrados con la app cerrada, los elimina del
-  ///   listado, re-guarda el caché y emite un snapshot actualizado.
+  /// Se ejecuta en background al arrancar (después de `loadCachedResult`).
+  /// Detecta, usando solo listado + `stat` (sin leer tags salvo para
+  /// nuevos/modificados):
+  ///   - Archivos del caché que ya no existen  → se eliminan.
+  ///   - Archivos nuevos en las carpetas       → se añaden (lee tags).
+  ///   - Archivos con `size`/`mtime` distintos → se reconstruyen (lee tags).
   ///
-  /// Coste: ~1 stat por archivo. Con 10k canciones en SSD es < 1s.
-  /// Usa concurrencia limitada para no saturar el pool de I/O.
+  /// No bloquea el arranque: la UI ya tiene el caché pintado y verá los
+  /// cambios llegar por el stream conforme se procesan.
+  ///
+  /// Es cancelable: si el usuario lanza un `scan()` completo mientras
+  /// corre, `_cancelRequested` se pone a true y este método aborta sin
+  /// pisar el resultado del escaneo.
   Future<void> verifyCachedResult() async {
+    // Espera a que termine la carga del caché (idempotente).
+    final loadFuture = _cacheLoadFuture;
+    if (loadFuture != null) await loadFuture;
+
     if (_lastResult == null) return;
-    if (_liveSongs.isEmpty && _livePodcasts.isEmpty) return;
     if (_scanning) return; // un escaneo en curso ya lo hará
 
-    // Copias para no mutar mientras iteramos.
-    final songsSnapshot = List<Song>.from(_liveSongs);
-    final podcastsSnapshot = List<Song>.from(_livePodcasts);
+    // Reset defensivo: si un scan previo dejó la bandera en true, este
+    // método abortaría al primer check. Lo hacemos aquí (no antes)
+    // porque ya hemos comprobado que no hay un escaneo activo.
+    _cancelRequested = false;
 
-    final missing = <String>{};
+    final settings = await SettingsService.instance.load();
+    final musicDirs = settings.musicDirs;
+    final podcastDirs = settings.podcastDirs;
 
-    // Concurrencia limitada: 16 stat en paralelo.
-    const concurrency = 16;
-    Future<void> checkBatch(List<Song> batch) async {
-      await Future.wait(batch.map((s) async {
-        try {
-          if (!await File(s.path).exists()) {
-            missing.add(s.path);
+    if (musicDirs.isEmpty && podcastDirs.isEmpty) return;
+
+    // Snapshot del caché para comparar. No mutamos _liveSongs hasta el final.
+    final cachedSongs = List<Song>.from(_liveSongs);
+    final cachedPodcasts = List<Song>.from(_livePodcasts);
+
+    // Map path -> (kind, size, mtimeMs) del caché.
+    final cachedByPath = <String, _CachedEntry>{};
+    for (final s in cachedSongs) {
+      cachedByPath[s.path] = _CachedEntry(
+        kind: MediaKind.music,
+        sizeBytes: s.sizeBytes,
+        mtimeMs: s.modified.millisecondsSinceEpoch,
+        song: s,
+      );
+    }
+    for (final s in cachedPodcasts) {
+      cachedByPath[s.path] = _CachedEntry(
+        kind: MediaKind.podcast,
+        sizeBytes: s.sizeBytes,
+        mtimeMs: s.modified.millisecondsSinceEpoch,
+        song: s,
+      );
+    }
+
+    // 1) Listar el disco (solo nombres + stat). Sin leer tags.
+    final onDisk = <String, _DiskEntry>{};
+    Future<void> walk(String dirPath, MediaKind kind) async {
+      final dir = Directory(dirPath);
+      if (!await dir.exists()) return;
+      try {
+        await for (final entity in dir.list(
+          recursive: true,
+          followLinks: false,
+        )) {
+          if (_cancelRequested) return;
+          if (entity is! File) continue;
+          final ext =
+              p.extension(entity.path).replaceFirst('.', '').toLowerCase();
+          if (!_audioExts.contains(ext)) continue;
+          try {
+            final stat = await entity.stat();
+            // Ignoramos archivos que aún se están copiando: si son
+            // recientes, exigimos estabilidad (doble stat).
+            if (!await _canProcessNow(entity, stat)) continue;
+            onDisk[entity.path] = _DiskEntry(
+              kind: kind,
+              sizeBytes: stat.size,
+              mtimeMs: stat.modified.millisecondsSinceEpoch,
+            );
+          } catch (_) {
+            // stat falló: lo ignoramos en esta pasada.
           }
-        } catch (_) {
-          // Si stat falla (permiso, path raro), lo tratamos como faltante.
-          missing.add(s.path);
         }
-      }));
+      } catch (e) {
+        debugPrint('verify: error listando $dirPath: $e');
+      }
     }
 
-    final all = [...songsSnapshot, ...podcastsSnapshot];
-    for (var i = 0; i < all.length; i += concurrency) {
-      final end = (i + concurrency < all.length) ? i + concurrency : all.length;
-      await checkBatch(all.sublist(i, end));
+    for (final d in musicDirs) {
+      if (_cancelRequested) return;
+      await walk(d, MediaKind.music);
+    }
+    for (final d in podcastDirs) {
+      if (_cancelRequested) return;
+      await walk(d, MediaKind.podcast);
     }
 
-    if (missing.isEmpty) {
+    if (_cancelRequested) return;
+
+    // 2) Diff.
+    final missing = <String>{}; // en caché, no en disco
+    final changed = <String, MediaKind>{}; // en ambos, distinto size/mtime
+    final added = <String, MediaKind>{}; // en disco, no en caché
+
+    for (final entry in cachedByPath.entries) {
+      final disk = onDisk[entry.key];
+      if (disk == null) {
+        missing.add(entry.key);
+      } else if (disk.sizeBytes != entry.value.sizeBytes ||
+          disk.mtimeMs != entry.value.mtimeMs) {
+        changed[entry.key] = disk.kind;
+      }
+    }
+    for (final entry in onDisk.entries) {
+      if (!cachedByPath.containsKey(entry.key)) {
+        added[entry.key] = entry.value.kind;
+      }
+    }
+
+    final totalChanges = missing.length + changed.length + added.length;
+    if (totalChanges == 0) {
       debugPrint('MediaScanner: verifyCachedResult → todo OK');
       return;
     }
 
     debugPrint(
-      'MediaScanner: verifyCachedResult → ${missing.length} archivo(s) '
-      'faltante(s), limpiando lista y caché',
+      'MediaScanner: verifyCachedResult → '
+      '${missing.length} faltante(s), ${added.length} nuevo(s), '
+      '${changed.length} modificado(s)',
     );
 
-    // Si entretanto empezó un escaneo completo, no pisamos su resultado.
+    // 3) Si entretanto empezó un escaneo completo, no pisamos su resultado.
     if (_scanning) return;
 
-    _liveSongs.removeWhere((s) => missing.contains(s.path));
-    _livePodcasts.removeWhere((s) => missing.contains(s.path));
+    // 4) Aplicar: eliminar faltantes.
+    if (missing.isNotEmpty) {
+      _liveSongs.removeWhere((s) => missing.contains(s.path));
+      _livePodcasts.removeWhere((s) => missing.contains(s.path));
+    }
 
-    // Limpiar también del MetadataCache (tags por archivo).
+    // 5) Procesar nuevos + modificados. Puede leer tags; cedemos el
+    //    event loop periódicamente y respetamos cancelación.
+    final toProcess = <String, MediaKind>{...added, ...changed};
+    final cache = MetadataCache.instance;
+    Directory? coversDir;
     try {
-      await MetadataCache.instance.prune({
+      coversDir = await cache.coversDir();
+    } catch (e) {
+      debugPrint('verify: no se pudo preparar coversDir: $e');
+    }
+
+    if (coversDir != null && toProcess.isNotEmpty) {
+      var i = 0;
+      for (final entry in toProcess.entries) {
+        if (_cancelRequested) return;
+        if (_scanning) return;
+
+        final path = entry.key;
+        final kind = entry.value;
+        final file = File(path);
+        try {
+          final stat = await file.stat();
+          final exists = await file.exists();
+          if (!exists || stat.type != FileSystemEntityType.file) {
+            // Desapareció o dejó de ser archivo mientras procesábamos:
+            // tratarlo como faltante.
+            _liveSongs.removeWhere((s) => s.path == path);
+            _livePodcasts.removeWhere((s) => s.path == path);
+            continue;
+          }
+          final ext =
+              p.extension(path).replaceFirst('.', '').toLowerCase();
+          final song = await _buildSong(
+            entity: file,
+            ext: ext,
+            kind: kind,
+            cache: cache,
+            coversDir: coversDir,
+          );
+          if (song == null) continue;
+
+          // Si era "modificado", quitar la versión vieja antes de insertar.
+          if (changed.containsKey(path)) {
+            _liveSongs.removeWhere((s) => s.path == path);
+            _livePodcasts.removeWhere((s) => s.path == path);
+          }
+          final list = kind == MediaKind.music ? _liveSongs : _livePodcasts;
+          _insertSorted(list, song);
+        } catch (e) {
+          debugPrint('verify: error con $path: $e');
+        }
+
+        i++;
+        if (i % _progressEvery == 0) {
+          _emitSnapshot(
+            statusMessage:
+                'Actualizando biblioteca… $i/${toProcess.length}',
+          );
+          await Future<void>.delayed(Duration.zero);
+        }
+      }
+    }
+
+    if (_cancelRequested || _scanning) return;
+
+    // 6) Limpiar MetadataCache de faltantes y publicar.
+    try {
+      await cache.prune({
         ..._liveSongs.map((s) => s.path),
         ..._livePodcasts.map((s) => s.path),
       });
-      await MetadataCache.instance.flush();
+      await cache.flush();
     } catch (e) {
-      debugPrint('MediaScanner: prune tras verify falló: $e');
+      debugPrint('verify: prune final falló: $e');
     }
 
-    _publishResult(); // re-guarda ScanResultCache
+    _sortInPlace(_liveSongs);
+    _sortInPlace(_livePodcasts);
+    _publishResult();
+
+    final parts = <String>[];
+    if (missing.isNotEmpty) parts.add('${missing.length} quitados');
+    if (added.isNotEmpty) parts.add('${added.length} añadidos');
+    if (changed.isNotEmpty) parts.add('${changed.length} actualizados');
     _emitSnapshot(
-      statusMessage:
-          'Se quitaron ${missing.length} archivo(s) que ya no existen',
+      statusMessage: 'Biblioteca actualizada: ${parts.join(' · ')}',
     );
 
-    // Limpiar el mensaje de estado pasados 3s.
-    Timer(const Duration(seconds: 3), () {
+    Timer(const Duration(seconds: 4), () {
       if (!_scanning) _emitSnapshot(clearStatus: true);
     });
   }
@@ -444,9 +623,9 @@ class MediaScanner {
 
     // Emisión inicial:
     //  - Si ya hay un resultado (caché cargado o escaneo previo), emitirlo.
-    //  - Si NO hay resultado (arranque limpio), emitimos un snapshot
-    //    vacío indicando que el watcher está activo pero aún no se ha
-    //    escaneado nada. La UI puede mostrar el botón "Escanear todo".
+    //  - Si NO hay resultado, emitimos un snapshot vacío. Si el caché
+    //    termina de cargar después, `_loadCachedResultImpl` llamará a
+    //    `_emitSnapshot()` y la UI recibirá la biblioteca igualmente.
     scheduleMicrotask(() {
       if (_watchController == null || _watchController!.isClosed) return;
       if (_lastResult != null) {
@@ -469,8 +648,7 @@ class MediaScanner {
             errors: [],
             done: false,
             scanning: false,
-            statusMessage:
-                'Watcher activo — pulsa "Escanear todo" para cargar la biblioteca',
+            statusMessage: 'Cargando biblioteca…',
           ),
         );
       }
@@ -1013,4 +1191,34 @@ class MediaScanner {
     s = s.replaceFirst(RegExp(r'^\d{1,3}[\s\-\.]+'), '');
     return s.isEmpty ? raw : s;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers de reconciliación (privados al archivo)
+// ---------------------------------------------------------------------------
+
+class _CachedEntry {
+  final MediaKind kind;
+  final int sizeBytes;
+  final int mtimeMs;
+  final Song song;
+
+  const _CachedEntry({
+    required this.kind,
+    required this.sizeBytes,
+    required this.mtimeMs,
+    required this.song,
+  });
+}
+
+class _DiskEntry {
+  final MediaKind kind;
+  final int sizeBytes;
+  final int mtimeMs;
+
+  const _DiskEntry({
+    required this.kind,
+    required this.sizeBytes,
+    required this.mtimeMs,
+  });
 }
