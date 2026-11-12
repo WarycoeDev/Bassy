@@ -57,13 +57,13 @@ class ActionMenu {
           ),
           clipBehavior: Clip.antiAlias,
           insetPadding: const EdgeInsets.symmetric(
-            horizontal: 24,
-            vertical: 40,
+            horizontal: 16,
+            vertical: 24,
           ),
           child: ConstrainedBox(
             constraints: const BoxConstraints(
-              maxWidth: 400,
-              maxHeight: 600,
+              maxWidth: 520,
+              maxHeight: 640,
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -202,6 +202,7 @@ class ActionMenu {
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
       ),
+      constraints: const BoxConstraints(minWidth: 260, maxWidth: 520),
       items: [
         PopupMenuItem<void>(
           enabled: false,

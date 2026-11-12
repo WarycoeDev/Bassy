@@ -1,5 +1,6 @@
 // lib/screens/app_shell.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../screens/home_screen.dart';
 import '../screens/library_screen.dart';
@@ -15,7 +16,12 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> {
-  int _selectedIndex = 0;
+  static const int _homeIndex = 0;
+  static const int _libraryIndex = 1;
+
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  int _selectedIndex = _homeIndex;
 
   final List<Widget> _screens = const [
     HomeScreen(),
@@ -54,6 +60,38 @@ class _AppShellState extends State<AppShell> {
     });
   }
 
+  /// Único punto que maneja el botón/gesto de atrás de Android.
+  /// Orden de prioridad:
+  ///  1. Drawer abierto → cerrarlo.
+  ///  2. Biblioteca: playlist/álbum/artista inline abierto → cerrarlo.
+  ///  3. Biblioteca: ruta empujada en su Navigator anidado → popearla.
+  ///  4. Pestaña distinta de Inicio → volver a Inicio.
+  ///  5. Si no, salir de la app.
+  void _handleBack() {
+    final scaffold = _scaffoldKey.currentState;
+    if (scaffold != null && scaffold.isDrawerOpen) {
+      scaffold.closeDrawer();
+      return;
+    }
+
+    if (_selectedIndex == _libraryIndex) {
+      if (LibraryScreen.handleBack?.call() ?? false) return;
+
+      final nav = LibraryScreen.currentNavigator;
+      if (nav != null && nav.mounted && nav.canPop()) {
+        nav.pop();
+        return;
+      }
+    }
+
+    if (_selectedIndex != _homeIndex) {
+      setState(() => _selectedIndex = _homeIndex);
+      return;
+    }
+
+    SystemNavigator.pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isWide = MediaQuery.sizeOf(context).width >= 800;
@@ -69,9 +107,12 @@ class _AppShellState extends State<AppShell> {
       ),
     );
 
+    final Widget scaffold;
+
     if (isWide) {
       // ---------- Tablet / PC ----------
-      return Scaffold(
+      scaffold = Scaffold(
+        key: _scaffoldKey,
         body: Row(
           children: [
             SizedBox(
@@ -92,57 +133,67 @@ class _AppShellState extends State<AppShell> {
           ],
         ),
       );
-    }
-
-    // ---------- Móvil ----------
-    // El miniplayer se dibuja en un Stack ENCIMA del contenido.
-    return Scaffold(
-      appBar: AppBar(
-        title: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 250),
-          switchInCurve: Curves.easeOutCubic,
-          switchOutCurve: Curves.easeInCubic,
-          transitionBuilder: (child, animation) {
-            return FadeTransition(
-              opacity: animation,
-              child: SlideTransition(
-                position: Tween<Offset>(
-                  begin: const Offset(0, 0.2),
-                  end: Offset.zero,
-                ).animate(animation),
-                child: child,
-              ),
-            );
-          },
-          child: Text(
-            _destinations[_selectedIndex].label,
-            key: ValueKey<int>(_selectedIndex),
-          ),
-        ),
-      ),
-      drawer: _StyledDrawer(
-        selectedIndex: _selectedIndex,
-        onItemTapped: (i) {
-          _onItemTapped(i);
-          Navigator.pop(context);
-        },
-        destinations: _destinations,
-        scheme: scheme,
-      ),
-      body: Stack(
-        children: [
-          Positioned.fill(child: content),
-          const Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: SafeArea(
-              top: false,
-              child: MiniPlayerBar(),
+    } else {
+      // ---------- Móvil ----------
+      // El miniplayer se dibuja en un Stack ENCIMA del contenido.
+      scaffold = Scaffold(
+        key: _scaffoldKey,
+        appBar: AppBar(
+          title: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            transitionBuilder: (child, animation) {
+              return FadeTransition(
+                opacity: animation,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.2),
+                    end: Offset.zero,
+                  ).animate(animation),
+                  child: child,
+                ),
+              );
+            },
+            child: Text(
+              _destinations[_selectedIndex].label,
+              key: ValueKey<int>(_selectedIndex),
             ),
           ),
-        ],
-      ),
+        ),
+        drawer: _StyledDrawer(
+          selectedIndex: _selectedIndex,
+          onItemTapped: (i) {
+            _onItemTapped(i);
+            Navigator.pop(context);
+          },
+          destinations: _destinations,
+          scheme: scheme,
+        ),
+        body: Stack(
+          children: [
+            Positioned.fill(child: content),
+            const Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                top: false,
+                child: MiniPlayerBar(),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _handleBack();
+      },
+      child: scaffold,
     );
   }
 }

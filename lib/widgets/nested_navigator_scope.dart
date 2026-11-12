@@ -9,16 +9,26 @@ import 'package:flutter/material.dart';
 /// Esto permite que CUALQUIER ruta empujada dentro de la pestaña
 /// (playlists, álbumes, artistas, podcasts, detalles…) se cierre con el
 /// back de Android, sin importar desde qué pestaña se haya abierto.
+///
+/// Si el padre (p. ej. AppShell) ya centraliza el atrás con su propio
+/// PopScope, pasa [handleBackButton] = false para que este widget solo
+/// aporte el Navigator anidado y no compita con el del padre.
 class NestedNavigatorScope extends StatefulWidget {
   final GlobalKey<NavigatorState> navigatorKey;
   final Widget child;
   final VoidCallback? onExitRoot;
+
+  /// Si es true (por defecto, comportamiento original) este widget gestiona
+  /// el botón/gesto de atrás con su propio [PopScope]. Si es false, solo
+  /// construye el [Navigator] anidado.
+  final bool handleBackButton;
 
   const NestedNavigatorScope({
     super.key,
     required this.navigatorKey,
     required this.child,
     this.onExitRoot,
+    this.handleBackButton = true,
   });
 
   @override
@@ -43,6 +53,17 @@ class _NestedNavigatorScopeState extends State<NestedNavigatorScope> {
 
   @override
   Widget build(BuildContext context) {
+    // Modo "solo Navigator": el padre gestiona el atrás.
+    if (!widget.handleBackButton) {
+      return Navigator(
+        key: widget.navigatorKey,
+        onGenerateRoute: (settings) => MaterialPageRoute(
+          settings: settings,
+          builder: (_) => widget.child,
+        ),
+      );
+    }
+
     final innerCanPop =
         widget.navigatorKey.currentState?.canPop() ?? (_depth > 1);
 

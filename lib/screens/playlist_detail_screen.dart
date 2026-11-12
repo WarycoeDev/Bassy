@@ -188,54 +188,84 @@ class PlaylistDetailScreen extends StatelessWidget {
     ColorScheme scheme,
     Playlist live,
   ) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    // Cabecera: carátula pegada a la izquierda + textos.
+    final header = Row(
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(8, 4, 16, 12),
-          child: Row(
+        _buildCover(context, live),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (onBack != null)
-                IconButton(
-                  icon: const Icon(Icons.arrow_back),
-                  tooltip: 'Atrás',
-                  onPressed: onBack,
+              Text(
+                live.title,
+                style: TextStyle(
+                  color: scheme.onSurface,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
                 ),
-              _buildCover(context, live),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      live.title,
-                      style: TextStyle(
-                        color: scheme.onSurface,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      '${live.count} elementos · ${live.totalDurationLabel}',
-                      style: TextStyle(
-                        color: scheme.onSurfaceVariant,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: live.songs.isEmpty ? null : () {},
-                      icon: const Icon(Icons.play_arrow, size: 20),
-                      label: const Text('Reproducir todo'),
-                    ),
-                  ],
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${live.count} elementos · ${live.totalDurationLabel}',
+                style: TextStyle(
+                  color: scheme.onSurfaceVariant,
+                  fontSize: 12,
                 ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: live.songs.isEmpty ? null : () {},
+                icon: const Icon(Icons.play_arrow, size: 20),
+                label: const Text('Reproducir todo'),
               ),
             ],
           ),
+        ),
+      ],
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Stack: la cabecera ocupa el layout normal; el botón atrás
+        // flota ENCIMA de la esquina superior izquierda de la carátula
+        // con fondo circular semitransparente + sombra para que se vea.
+        // Se coloca pegado al borde izquierdo de la carátula (left: 6)
+        // pero sin salirse de ella.
+        Stack(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: header,
+            ),
+            if (onBack != null)
+              Positioned(
+                top: 10,
+                left: 6,
+                child: Material(
+                  color: Colors.black.withValues(alpha: 0.45),
+                  shape: const CircleBorder(),
+                  elevation: 4,
+                  shadowColor: Colors.black54,
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: onBack,
+                    customBorder: const CircleBorder(),
+                    child: const Padding(
+                      padding: EdgeInsets.all(6),
+                      child: Icon(
+                        Icons.arrow_back,
+                        size: 20,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
         Divider(height: 1, color: scheme.outlineVariant),
         Expanded(

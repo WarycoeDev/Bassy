@@ -169,11 +169,11 @@ class _InputDialogState extends State<_InputDialog> {
       ),
       clipBehavior: Clip.antiAlias,
       insetPadding: const EdgeInsets.symmetric(
-        horizontal: 24,
-        vertical: 40,
+        horizontal: 16,
+        vertical: 24,
       ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 440),
+        constraints: const BoxConstraints(maxWidth: 520),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
           child: Column(

@@ -18,13 +18,15 @@ class LibraryScreen extends StatefulWidget {
   /// Navigator anidado ACTUAL de Library.
   static NavigatorState? currentNavigator;
 
+  /// Lo registra el State activo. Devuelve true si consumió el "atrás"
+  /// (cerró una playlist/álbum/artista/podcast inline). Lo consulta AppShell.
+  static bool Function()? handleBack;
+
   static List<Playlist> currentAlbums = const [];
   static List<Playlist> currentArtists = const [];
   static List<Playlist> currentPodcasts = const [];
 
-  /// Se invoca cuando el usuario pulsa atrás estando ya en la raíz de
-  /// Library (no hay rutas internas que popear). El padre (AppShell) decide
-  /// qué hacer: volver a Inicio, salir de la app, etc.
+  /// Se mantiene por compatibilidad. El atrás ahora lo gestiona AppShell.
   final VoidCallback? onExitRoot;
 
   static void pushInLibrary(BuildContext context, Route<void> route) {
@@ -99,6 +101,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void initState() {
     super.initState();
+    LibraryScreen.handleBack = _handleBack;
     // Carga inicial de favoritos (idempotente).
     FavoritesStore.instance.load();
     _startWatching();
@@ -111,6 +114,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   void dispose() {
+    if (LibraryScreen.handleBack == _handleBack) {
+      LibraryScreen.handleBack = null;
+    }
     if (LibraryScreen.currentNavigator == _navKey.currentState) {
       LibraryScreen.currentNavigator = null;
     }
@@ -120,6 +126,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     _scrollControllers.clear();
     super.dispose();
+  }
+
+  // -------------------------------------------------------------------------
+  // Atrás
+  // -------------------------------------------------------------------------
+
+  /// Devuelve true si consumió el "atrás" (cerró un detalle inline).
+  bool _handleBack() {
+    if (_inlinePlaylist != null) {
+      _closeInlinePlaylist();
+      return true;
+    }
+    return false;
   }
 
   // -------------------------------------------------------------------------
@@ -259,6 +278,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return NestedNavigatorScope(
       navigatorKey: _navKey,
       onExitRoot: widget.onExitRoot,
+      // AppShell centraliza el atrás; el scope solo aporta el Navigator.
+      handleBackButton: false,
       child: _buildLibraryHome(context),
     );
   }
@@ -266,69 +287,62 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildLibraryHome(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    return PopScope(
-      canPop: _inlinePlaylist == null,
-      onPopInvokedWithResult: (didPop, result) {
-        if (didPop) return;
-        if (_inlinePlaylist != null) {
-          _closeInlinePlaylist();
-        }
-      },
-      child: Scaffold(
-        backgroundColor: scheme.surface,
-        body: SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 16),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                // Escuchamos al store para reflejar el contador de favoritos
-                // en el header sin reconstruir toda la pantalla.
-                child: AnimatedBuilder(
-                  animation: FavoritesStore.instance,
-                  builder: (context, _) => _buildHeader(context),
-                ),
+    // El botón atrás lo gestiona AppShell (ver LibraryScreen.handleBack),
+    // por eso aquí ya no hay PopScope.
+    return Scaffold(
+      backgroundColor: scheme.surface,
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              // Escuchamos al store para reflejar el contador de favoritos
+              // en el header sin reconstruir toda la pantalla.
+              child: AnimatedBuilder(
+                animation: FavoritesStore.instance,
+                builder: (context, _) => _buildHeader(context),
               ),
-              const SizedBox(height: 12),
-              _buildScanProgress(context),
-              const SizedBox(height: 12),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: _buildFilterChips(context),
-              ),
-              const SizedBox(height: 16),
-              Expanded(
-                child: ClipRect(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 220),
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeInCubic,
-                    transitionBuilder: (child, animation) {
-                      final begin = Offset(_slideFromRight ? 0.15 : -0.15, 0);
-                      final offset = Tween<Offset>(
-                        begin: begin,
-                        end: Offset.zero,
-                      ).animate(animation);
-                      return FadeTransition(
-                        opacity: animation,
-                        child: SlideTransition(position: offset, child: child),
-                      );
-                    },
-                    child: KeyedSubtree(
-                      // La clave incluye el filtro Y si hay inline abierto,
-                      // para que AnimatedSwitcher anime también el cambio
-                      // entre listado y detalle inline.
-                      key: ValueKey<String>(
-                        '$_selectedFilter:${_inlinePlaylist?.id ?? ''}',
-                      ),
-                      child: _buildScrollableContent(context),
+            ),
+            const SizedBox(height: 12),
+            _buildScanProgress(context),
+            const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildFilterChips(context),
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: ClipRect(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  transitionBuilder: (child, animation) {
+                    final begin = Offset(_slideFromRight ? 0.15 : -0.15, 0);
+                    final offset = Tween<Offset>(
+                      begin: begin,
+                      end: Offset.zero,
+                    ).animate(animation);
+                    return FadeTransition(
+                      opacity: animation,
+                      child: SlideTransition(position: offset, child: child),
+                    );
+                  },
+                  child: KeyedSubtree(
+                    // La clave incluye el filtro Y si hay inline abierto,
+                    // para que AnimatedSwitcher anime también el cambio
+                    // entre listado y detalle inline.
+                    key: ValueKey<String>(
+                      '$_selectedFilter:${_inlinePlaylist?.id ?? ''}',
                     ),
+                    child: _buildScrollableContent(context),
                   ),
                 ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

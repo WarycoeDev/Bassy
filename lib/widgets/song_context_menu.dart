@@ -305,16 +305,6 @@ class SongContextMenu {
 
   // ---------- Navegación a álbum / artista ----------
 
-  /// Abre la playlist en el Navigator correcto:
-  ///
-  ///  - Si este [context] resuelve al Navigator anidado de Library,
-  ///    empuja allí (mantiene el drawer lateral visible en PC).
-  ///  - En cualquier otro caso (Search, otra pestaña, raíz), empuja en
-  ///    el Navigator que corresponda a este [context], que es el anidado
-  ///    de esa pestaña. El back lo gestionará el [NestedNavigatorScope]
-  ///    de esa pestaña (o el de [PlaylistDetailScreen] como respaldo).
-    // ---------- Navegación a álbum / artista ----------
-
   /// Abre la playlist (álbum/artista) como una ventana flotante centrada
   /// sobre el contexto actual, en lugar de empujar una ruta completa.
   /// El layout interno de [PlaylistDetailScreen] no se modifica: solo se
@@ -325,25 +315,18 @@ class SongContextMenu {
       barrierColor: Colors.black.withValues(alpha: 0.45),
       builder: (dialogContext) {
         final scheme = Theme.of(dialogContext).colorScheme;
-        final media = MediaQuery.of(dialogContext);
-        // Tamaño acotado: hasta 480px de ancho y 80% de alto.
-        final maxWidth = 480.0;
-        final width = media.size.width < maxWidth + 48
-            ? media.size.width * 0.92
-            : maxWidth;
-        final maxHeight = media.size.height * 0.8;
 
         return Dialog(
           backgroundColor: Colors.transparent,
           elevation: 0,
           insetPadding: const EdgeInsets.symmetric(
-            horizontal: 24,
+            horizontal: 16,
             vertical: 24,
           ),
           child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: width,
-              maxHeight: maxHeight,
+            constraints: const BoxConstraints(
+              maxWidth: 520,
+              maxHeight: 640,
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(18),
