@@ -19,6 +19,11 @@ class _AppShellState extends State<AppShell> {
   static const int _homeIndex = 0;
   static const int _libraryIndex = 1;
 
+  /// Lo que tarda en cerrarse el Drawer (~246 ms en Material). Esperamos a que
+  /// termine antes de cambiar de pestaña para no pintar dos cosas pesadas
+  /// a la vez (drawer deslizándose + pestaña nueva apareciendo).
+  static const Duration _drawerCloseDelay = Duration(milliseconds: 240);
+
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   int _selectedIndex = _homeIndex;
@@ -60,6 +65,15 @@ class _AppShellState extends State<AppShell> {
     });
   }
 
+  /// Móvil: cierra el drawer y DESPUÉS cambia de pestaña.
+  void _onDrawerItemTapped(int index) {
+    _scaffoldKey.currentState?.closeDrawer();
+    if (index == _selectedIndex) return;
+    Future.delayed(_drawerCloseDelay, () {
+      if (mounted) _onItemTapped(index);
+    });
+  }
+
   /// Único punto que maneja el botón/gesto de atrás de Android.
   /// Orden de prioridad:
   ///  1. Drawer abierto → cerrarlo.
@@ -97,14 +111,11 @@ class _AppShellState extends State<AppShell> {
     final isWide = MediaQuery.sizeOf(context).width >= 800;
     final scheme = Theme.of(context).colorScheme;
 
-    // _AnimatedIndexedStack mantiene TODAS las pestañas montadas (solo hay un
-    // LibraryScreen vivo a la vez, así su Navigator anidado y sus estáticos
-    // no se reasignan durante transiciones), y añade fade + slide al cambiar.
-    final content = ClipRect(
-      child: _AnimatedIndexedStack(
-        index: _selectedIndex,
-        children: _screens,
-      ),
+    // Todas las pestañas siguen montadas (IndexedStack). Solo hacemos un fade
+    // corto y cada pestaña está aislada en su propio RepaintBoundary.
+    final content = _AnimatedIndexedStack(
+      index: _selectedIndex,
+      children: _screens,
     );
 
     final Widget scaffold;
@@ -135,12 +146,9 @@ class _AppShellState extends State<AppShell> {
       );
     } else {
       // ---------- Móvil ----------
-      // El miniplayer se dibuja en un Stack ENCIMA del contenido.
       scaffold = Scaffold(
         key: _scaffoldKey,
-        // Zona de gesto desde el borde izquierdo (por defecto ~20 px).
         drawerEdgeDragWidth: 40,
-        // AppBar simple: solo ☰ (abre drawer) + título de la pestaña.
         appBar: AppBar(
           backgroundColor: scheme.surface,
           surfaceTintColor: Colors.transparent,
@@ -157,10 +165,7 @@ class _AppShellState extends State<AppShell> {
         ),
         drawer: _StyledDrawer(
           selectedIndex: _selectedIndex,
-          onItemTapped: (i) {
-            _onItemTapped(i);
-            Navigator.pop(context);
-          },
+          onItemTapped: _onDrawerItemTapped,
           destinations: _destinations,
           scheme: scheme,
         ),
@@ -173,7 +178,9 @@ class _AppShellState extends State<AppShell> {
               bottom: 0,
               child: SafeArea(
                 top: false,
-                child: MiniPlayerBar(),
+                // Aislado: sus actualizaciones (progreso, etc.) no repintan
+                // el resto y viceversa.
+                child: RepaintBoundary(child: MiniPlayerBar()),
               ),
             ),
           ],
@@ -193,7 +200,7 @@ class _AppShellState extends State<AppShell> {
 }
 
 // ============================================================
-// INDEXED STACK ANIMADO (fade + slide al cambiar de pestaña)
+// INDEXED STACK ANIMADO (solo fade corto, sin slide ni ClipRect)
 // ============================================================
 class _AnimatedIndexedStack extends StatefulWidget {
   final int index;
@@ -203,7 +210,7 @@ class _AnimatedIndexedStack extends StatefulWidget {
   const _AnimatedIndexedStack({
     required this.index,
     required this.children,
-    this.duration = const Duration(milliseconds: 280),
+    this.duration = const Duration(milliseconds: 180),
   });
 
   @override
@@ -220,15 +227,14 @@ class _AnimatedIndexedStackState extends State<_AnimatedIndexedStack>
 
   late final Animation<double> _fade = CurvedAnimation(
     parent: _controller,
-    curve: Curves.easeOutCubic,
+    curve: Curves.easeOut,
   );
 
-  late final Animation<Offset> _slide = Tween<Offset>(
-    begin: const Offset(0, 0.02),
-    end: Offset.zero,
-  ).animate(
-    CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
-  );
+  // Cada pestaña en su propio RepaintBoundary: se rasteriza una vez y el fade
+  // solo compone esa capa en vez de repintar todo el árbol en cada frame.
+  late final List<Widget> _wrapped = [
+    for (final c in widget.children) RepaintBoundary(child: c),
+  ];
 
   @override
   void didUpdateWidget(covariant _AnimatedIndexedStack oldWidget) {
@@ -248,105 +254,118 @@ class _AnimatedIndexedStackState extends State<_AnimatedIndexedStack>
   Widget build(BuildContext context) {
     return FadeTransition(
       opacity: _fade,
-      child: SlideTransition(
-        position: _slide,
-        child: IndexedStack(
-          index: widget.index,
-          children: widget.children,
-        ),
+      child: IndexedStack(
+        index: widget.index,
+        children: _wrapped,
       ),
     );
   }
 }
 
 // ============================================================
-// ITEM ESCALONADO (para animar el drawer / panel)
+// ENTRADA ESCALONADA (UN solo controller para todo el panel)
 // ============================================================
-class _StaggeredDrawerItem extends StatefulWidget {
+class _Entrance extends StatelessWidget {
+  final Animation<double> animation;
+  final double begin;
+  final double end;
+  final Offset offset;
   final Widget child;
-  final int index;
 
-  const _StaggeredDrawerItem({required this.child, required this.index});
-
-  @override
-  State<_StaggeredDrawerItem> createState() => _StaggeredDrawerItemState();
-}
-
-class _StaggeredDrawerItemState extends State<_StaggeredDrawerItem>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 350),
-  );
-
-  late final Animation<double> _fade = CurvedAnimation(
-    parent: _controller,
-    curve: Curves.easeOut,
-  );
-
-  late final Animation<Offset> _slide = Tween<Offset>(
-    begin: const Offset(-0.2, 0),
-    end: Offset.zero,
-  ).animate(
-    CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
-  );
-
-  @override
-  void initState() {
-    super.initState();
-    Future.delayed(Duration(milliseconds: 60 * widget.index), () {
-      if (mounted) _controller.forward();
-    });
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+  const _Entrance({
+    required this.animation,
+    required this.begin,
+    required this.end,
+    required this.child,
+    this.offset = const Offset(-0.15, 0),
+  });
 
   @override
   Widget build(BuildContext context) {
+    // drive() no crea objetos que haya que hacer dispose.
+    final t = animation.drive(
+      CurveTween(
+        curve: Interval(begin, end.clamp(0.0, 1.0), curve: Curves.easeOutCubic),
+      ),
+    );
     return FadeTransition(
-      opacity: _fade,
+      opacity: t,
       child: SlideTransition(
-        position: _slide,
-        child: widget.child,
+        position: t.drive(Tween(begin: offset, end: Offset.zero)),
+        child: child,
       ),
     );
   }
 }
 
 // ============================================================
-// HEADER ANIMADO (fade + slide al montarse)
+// HEADER ESTÁTICO (compartido móvil / PC)
 // ============================================================
-class _AnimatedDrawerHeader extends StatelessWidget {
-  final Widget child;
+class _DrawerHeader extends StatelessWidget {
+  final ColorScheme scheme;
 
-  const _AnimatedDrawerHeader({required this.child});
+  const _DrawerHeader({required this.scheme});
 
   @override
   Widget build(BuildContext context) {
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0, end: 1),
-      duration: const Duration(milliseconds: 400),
-      curve: Curves.easeOutCubic,
-      builder: (_, value, child) => Opacity(
-        opacity: value,
-        child: Transform.translate(
-          offset: Offset(0, (1 - value) * 12),
-          child: child,
+    return RepaintBoundary(
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              scheme.surfaceContainerHigh,
+              scheme.surfaceContainer,
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerLowest,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Icon(
+                Icons.music_note_rounded,
+                color: scheme.onSurface,
+                size: 30,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Bassy Music',
+              style: TextStyle(
+                color: scheme.onSurface,
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                letterSpacing: -0.3,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Bienvenido de nuevo',
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 13,
+              ),
+            ),
+          ],
         ),
       ),
-      child: child,
     );
   }
 }
 
 // ============================================================
-// PANEL LATERAL ESTILO DRAWER (tablet / PC) — MEJORADO
+// PANEL LATERAL (tablet / PC)
 // ============================================================
-class _DrawerPanel extends StatelessWidget {
+class _DrawerPanel extends StatefulWidget {
   final int selectedIndex;
   final ValueChanged<int> onItemTapped;
   final List<_NavDestination> destinations;
@@ -360,89 +379,51 @@ class _DrawerPanel extends StatelessWidget {
   });
 
   @override
+  State<_DrawerPanel> createState() => _DrawerPanelState();
+}
+
+class _DrawerPanelState extends State<_DrawerPanel>
+    with SingleTickerProviderStateMixin {
+  // Un único controller: reemplaza 4 controllers + 4 Future.delayed + el
+  // TweenAnimationBuilder con Opacity/elasticOut del header.
+  late final AnimationController _entrance = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 500),
+  )..forward();
+
+  @override
+  void dispose() {
+    _entrance.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final scheme = widget.scheme;
+
     return Material(
       color: scheme.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _AnimatedDrawerHeader(
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    scheme.surfaceContainerHigh,
-                    scheme.surfaceContainer,
-                  ],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  TweenAnimationBuilder<double>(
-                    tween: Tween(begin: 0, end: 1),
-                    duration: const Duration(milliseconds: 600),
-                    curve: Curves.elasticOut,
-                    builder: (_, v, child) => Transform.scale(
-                      scale: 0.6 + v * 0.4,
-                      child: Opacity(opacity: v.clamp(0.0, 1.0), child: child),
-                    ),
-                    child: Container(
-                      width: 52,
-                      height: 52,
-                      decoration: BoxDecoration(
-                        color: scheme.surfaceContainerLowest,
-                        borderRadius: BorderRadius.circular(16),
-                        boxShadow: [
-                          BoxShadow(
-                            color: scheme.shadow.withValues(alpha: 0.08),
-                            blurRadius: 12,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: Icon(
-                        Icons.music_note_rounded,
-                        color: scheme.onSurface,
-                        size: 30,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Mi App',
-                    style: TextStyle(
-                      color: scheme.onSurface,
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: -0.3,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Bienvenido de nuevo',
-                    style: TextStyle(
-                      color: scheme.onSurfaceVariant,
-                      fontSize: 13,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          _Entrance(
+            animation: _entrance,
+            begin: 0.0,
+            end: 0.6,
+            offset: const Offset(0, 0.05),
+            child: _DrawerHeader(scheme: scheme),
           ),
           const SizedBox(height: 8),
           Expanded(
             child: _AnimatedNavList(
-              selectedIndex: selectedIndex,
-              onItemTapped: onItemTapped,
-              destinations: destinations,
+              entrance: _entrance,
+              selectedIndex: widget.selectedIndex,
+              onItemTapped: widget.onItemTapped,
+              destinations: widget.destinations,
               scheme: scheme,
             ),
           ),
-          const MiniPlayerCard(),
+          const RepaintBoundary(child: MiniPlayerCard()),
         ],
       ),
     );
@@ -450,18 +431,19 @@ class _DrawerPanel extends StatelessWidget {
 }
 
 // ============================================================
-// LISTA DE NAVEGACIÓN CON INDICADOR ANIMADO DESLIZANTE
+// LISTA DE NAVEGACIÓN CON INDICADOR DESLIZANTE (sin layout por frame)
 // ============================================================
 class _AnimatedNavList extends StatelessWidget {
+  final Animation<double> entrance;
   final int selectedIndex;
   final ValueChanged<int> onItemTapped;
   final List<_NavDestination> destinations;
   final ColorScheme scheme;
 
-  // Altura fija por item para calcular la posición del indicador.
   static const double _itemExtent = 56;
 
   const _AnimatedNavList({
+    required this.entrance,
     required this.selectedIndex,
     required this.onItemTapped,
     required this.destinations,
@@ -476,41 +458,43 @@ class _AnimatedNavList extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Stack(
         children: [
-          // Indicador deslizante de fondo (pill)
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 320),
-            curve: Curves.easeOutCubic,
-            top: selectedIndex * _itemExtent,
+          // Pill: AnimatedSlide = solo Transform (no relayout del Stack, que
+          // sí ocurría con AnimatedPositioned). El offset es en múltiplos de
+          // su propia altura, por eso basta con el índice.
+          Positioned(
+            top: 0,
             left: 0,
             right: 0,
             height: _itemExtent,
             child: IgnorePointer(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(14),
-                  boxShadow: [
-                    BoxShadow(
-                      color: scheme.shadow.withValues(alpha: 0.05),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
+              child: AnimatedSlide(
+                offset: Offset(0, selectedIndex.toDouble()),
+                duration: const Duration(milliseconds: 280),
+                curve: Curves.easeOutCubic,
+                child: RepaintBoundary(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(14),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
           ),
-          // Lista de items
           Column(
             children: List.generate(count, (i) {
               final d = destinations[i];
               final selected = i == selectedIndex;
+              final start = 0.1 + i * 0.1;
               return SizedBox(
                 height: _itemExtent,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: _StaggeredDrawerItem(
-                    index: i,
+                  child: _Entrance(
+                    animation: entrance,
+                    begin: start,
+                    end: start + 0.5,
                     child: _HoverableDrawerItem(
                       icon: selected ? d.selectedIcon : d.icon,
                       label: d.label,
@@ -530,7 +514,7 @@ class _AnimatedNavList extends StatelessWidget {
 }
 
 // ============================================================
-// ITEM CON HOVER + MICRO-ANIMACIONES (PC)
+// ITEM CON HOVER (PC) — solo animaciones que no provocan layout
 // ============================================================
 class _HoverableDrawerItem extends StatefulWidget {
   final IconData icon;
@@ -559,9 +543,9 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
     final scheme = widget.scheme;
     final selected = widget.selected;
 
-    final color = selected
+    final color = (selected || _hovering)
         ? scheme.onSurface
-        : (_hovering ? scheme.onSurface : scheme.onSurfaceVariant);
+        : scheme.onSurfaceVariant;
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -571,11 +555,11 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
         onTap: widget.onTap,
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
+          // Solo cambia el color de fondo (repaint, sin layout).
+          duration: const Duration(milliseconds: 150),
           curve: Curves.easeOut,
           padding: const EdgeInsets.symmetric(horizontal: 14),
           decoration: BoxDecoration(
-            // Sutil tinte al hacer hover (solo si no está seleccionado)
             color: (!selected && _hovering)
                 ? scheme.surfaceContainer.withValues(alpha: 0.5)
                 : Colors.transparent,
@@ -583,38 +567,32 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
           ),
           child: Row(
             children: [
-              // Icono animado: escala al hover
               AnimatedScale(
-                scale: (_hovering && !selected) ? 1.15 : 1.0,
-                duration: const Duration(milliseconds: 180),
-                curve: Curves.easeOutBack,
+                scale: (_hovering && !selected) ? 1.12 : 1.0,
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOut,
                 child: Icon(widget.icon, size: 22, color: color),
               ),
               const SizedBox(width: 14),
               Expanded(
-                child: AnimatedDefaultTextStyle(
-                  duration: const Duration(milliseconds: 180),
+                // Antes: AnimatedDefaultTextStyle cambiando fontWeight, lo que
+                // re-mide el texto en cada frame. Ahora es un Text normal.
+                child: Text(
+                  widget.label,
                   style: Theme.of(context).textTheme.bodyLarge!.copyWith(
                         color: color,
                         fontWeight:
                             selected ? FontWeight.w600 : FontWeight.w500,
                       ),
-                  child: Text(widget.label),
                 ),
               ),
-              // Chevron animado: aparece/desaparece con scale+fade
               AnimatedOpacity(
-                duration: const Duration(milliseconds: 180),
+                duration: const Duration(milliseconds: 150),
                 opacity: selected ? 1.0 : 0.0,
-                child: AnimatedSlide(
-                  duration: const Duration(milliseconds: 220),
-                  curve: Curves.easeOutCubic,
-                  offset: selected ? Offset.zero : const Offset(-0.3, 0),
-                  child: Icon(
-                    Icons.chevron_right_rounded,
-                    size: 20,
-                    color: scheme.onSurface,
-                  ),
+                child: Icon(
+                  Icons.chevron_right_rounded,
+                  size: 20,
+                  color: scheme.onSurface,
                 ),
               ),
             ],
@@ -626,7 +604,9 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
 }
 
 // ============================================================
-// DRAWER ESTILIZADO (móvil)
+// DRAWER ESTILIZADO (móvil) — SIN animaciones internas
+// El propio Drawer ya se desliza; animar además el contenido mientras se
+// abre es lo que más se notaba trabado.
 // ============================================================
 class _StyledDrawer extends StatelessWidget {
   final int selectedIndex;
@@ -650,88 +630,38 @@ class _StyledDrawer extends StatelessWidget {
           bottomRight: Radius.circular(24),
         ),
       ),
-      child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _AnimatedDrawerHeader(
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      scheme.surfaceContainerHigh,
-                      scheme.surfaceContainer,
-                    ],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
+      child: RepaintBoundary(
+        child: SafeArea(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _DrawerHeader(scheme: scheme),
+              const SizedBox(height: 8),
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
                   ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      width: 52,
-                      height: 52,
-                      decoration: BoxDecoration(
-                        color: scheme.surfaceContainerLowest,
-                        borderRadius: BorderRadius.circular(16),
+                    for (var i = 0; i < destinations.length; i++)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: _DrawerItem(
+                          icon: i == selectedIndex
+                              ? destinations[i].selectedIcon
+                              : destinations[i].icon,
+                          label: destinations[i].label,
+                          selected: i == selectedIndex,
+                          scheme: scheme,
+                          onTap: () => onItemTapped(i),
+                        ),
                       ),
-                      child: Icon(
-                        Icons.music_note_rounded,
-                        color: scheme.onSurface,
-                        size: 30,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      'Mi App',
-                      style: TextStyle(
-                        color: scheme.onSurface,
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Bienvenido de nuevo',
-                      style: TextStyle(
-                        color: scheme.onSurfaceVariant,
-                        fontSize: 13,
-                      ),
-                    ),
                   ],
                 ),
               ),
-            ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: ListView.builder(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                itemCount: destinations.length,
-                itemBuilder: (context, i) {
-                  final d = destinations[i];
-                  final selected = i == selectedIndex;
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: _StaggeredDrawerItem(
-                      index: i,
-                      child: _DrawerItem(
-                        icon: selected ? d.selectedIcon : d.icon,
-                        label: d.label,
-                        selected: selected,
-                        scheme: scheme,
-                        onTap: () => onItemTapped(i),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -776,9 +706,10 @@ class _DrawerItem extends StatelessWidget {
                 child: Text(
                   label,
                   style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                    color: color,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                  ),
+                        color: color,
+                        fontWeight:
+                            selected ? FontWeight.w600 : FontWeight.w500,
+                      ),
                 ),
               ),
               if (selected)
