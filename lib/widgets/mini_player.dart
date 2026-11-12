@@ -20,6 +20,11 @@ String _fmt(Duration d) {
 /// Umbral para decidir si "previous" reinicia la canción o salta a la anterior.
 const Duration _kRestartThreshold = Duration(seconds: 3);
 
+/// Prefijos de Hero. Se usan para que `MiniPlayerCard` y `MiniPlayerBar`
+/// no compartan tag si conviven en el mismo árbol (tablet/PC).
+const String _kCardHeroPrefix = 'card-';
+const String _kBarHeroPrefix = 'bar-';
+
 // ============================================================
 // MINIPLAYER TIPO TARJETA (panel lateral tablet/PC)
 // ============================================================
@@ -309,7 +314,13 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
                     child: InkWell(
                       onTap: () {
                         final s = controller.currentSong;
-                        if (s != null) openPlayerFor(context, s);
+                        if (s != null) {
+                          openPlayerFor(
+                            context,
+                            s,
+                            heroTagPrefix: _kCardHeroPrefix,
+                          );
+                        }
                       },
                       borderRadius: BorderRadius.circular(24),
                       child: Stack(
@@ -323,10 +334,15 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
                                     16, 16, 44, 12),
                                 child: Row(
                                   children: [
-                                    _MiniCover(
+                                    Hero(
+                                      tag:
+                                          '$_kCardHeroPrefix${song.path}',
+                                      child: _MiniCover(
                                         song: song,
                                         scheme: scheme,
-                                        size: 56),
+                                        size: 56,
+                                      ),
+                                    ),
                                     const SizedBox(width: 14),
                                     Expanded(
                                       child: Column(
@@ -898,7 +914,13 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                         child: InkWell(
                           onTap: () {
                             final s = controller.currentSong;
-                            if (s != null) openPlayerFor(context, s);
+                            if (s != null) {
+                              openPlayerFor(
+                                context,
+                                s,
+                                heroTagPrefix: _kBarHeroPrefix,
+                              );
+                            }
                           },
                           borderRadius: BorderRadius.circular(20),
                           child: Column(
@@ -924,10 +946,14 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                                     10, 10, 6, 10),
                                 child: Row(
                                   children: [
-                                    _MiniCover(
-                                      song: song,
-                                      scheme: scheme,
-                                      size: 46,
+                                    Hero(
+                                      tag:
+                                          '$_kBarHeroPrefix${song.path}',
+                                      child: _MiniCover(
+                                        song: song,
+                                        scheme: scheme,
+                                        size: 46,
+                                      ),
                                     ),
                                     const SizedBox(width: 12),
                                     Expanded(
@@ -1159,7 +1185,8 @@ class _MiniCover extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(size * 0.23),
+        // Radius fijo para que el vuelo del Hero no "salte" al aterrizar.
+        borderRadius: BorderRadius.circular(24),
         border: Border.all(
           color: scheme.outlineVariant.withValues(alpha: 0.3),
         ),

@@ -17,7 +17,11 @@ String _fmt(Duration d) {
 /// Player de MÚSICA: carátula grande, título/artista, barra de progreso
 /// con seek, y controles (shuffle / prev / play-pause / next / repeat).
 class MusicPlayerScreen extends StatefulWidget {
-  const MusicPlayerScreen({super.key});
+  /// Prefijo del `Hero` que viene del miniplayer que abrió esta pantalla.
+  /// Si es `null`, no se anima el cover.
+  final String? heroTagPrefix;
+
+  const MusicPlayerScreen({super.key, this.heroTagPrefix});
 
   @override
   State<MusicPlayerScreen> createState() => _MusicPlayerScreenState();
@@ -75,12 +79,21 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                       final coverSize = (constraints.maxWidth * 0.72)
                           .clamp(180.0, 360.0);
 
+                      final cover = _Cover(song: song, size: coverSize);
+                      final heroPrefix = widget.heroTagPrefix;
+                      final heroCover = heroPrefix == null
+                          ? cover
+                          : Hero(
+                              tag: '$heroPrefix${song.path}',
+                              child: cover,
+                            );
+
                       return SingleChildScrollView(
                         padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
                         child: Column(
                           children: [
                             const SizedBox(height: 8),
-                            _Cover(song: song, size: coverSize),
+                            heroCover,
                             const SizedBox(height: 32),
                             Text(
                               song.title,
@@ -162,7 +175,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                               children: [
-                                // SHUFFLE (reactivo al handler)
+                                // SHUFFLE
                                 StreamBuilder<bool>(
                                   stream: _controller.shuffle,
                                   initialData: _controller.shuffleEnabled,
@@ -214,7 +227,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                       ? _controller.next
                                       : null,
                                 ),
-                                // REPEAT (reactivo al handler)
+                                // REPEAT
                                 StreamBuilder<PlayerRepeatMode>(
                                   stream: _controller.repeat,
                                   initialData: _controller.repeatModeNow,
@@ -281,7 +294,8 @@ class _Cover extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(28),
+        // Radius fijo (24) para que el vuelo del Hero no salte al aterrizar.
+        borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
             color: scheme.shadow.withValues(alpha: 0.25),

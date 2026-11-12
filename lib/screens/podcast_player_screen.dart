@@ -13,10 +13,12 @@ String _fmt(Duration d) {
   return '$m:$s';
 }
 
-/// Player de PODCAST: prioriza metadatos, velocidad de reproducción,
-/// skip ±15s/30s y barra de progreso; la carátula va más pequeña y horizontal.
+/// Player de PODCAST: metadatos, velocidad, skip ±15s/30s y progreso.
 class PodcastPlayerScreen extends StatefulWidget {
-  const PodcastPlayerScreen({super.key});
+  /// Prefijo del `Hero` que viene del miniplayer que abrió esta pantalla.
+  final String? heroTagPrefix;
+
+  const PodcastPlayerScreen({super.key, this.heroTagPrefix});
 
   @override
   State<PodcastPlayerScreen> createState() => _PodcastPlayerScreenState();
@@ -32,9 +34,7 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
   @override
   void initState() {
     super.initState();
-    // Sincroniza la velocidad con la que ya tenga el handler
-    // (p. ej. si el usuario la cambió en una sesión anterior).
-    final current = _controller.handler.playerSpeed;
+    final current = _controller.speedNow;
     if (current > 0) _speed = current;
   }
 
@@ -73,9 +73,8 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
               final maxMs = duration.inMilliseconds
                   .toDouble()
                   .clamp(1.0, double.infinity);
-              final valueMs = position.inMilliseconds
-                  .toDouble()
-                  .clamp(0.0, maxMs);
+              final valueMs =
+                  position.inMilliseconds.toDouble().clamp(0.0, maxMs);
               final remaining = duration - position;
 
               return StreamBuilder<bool>(
@@ -84,16 +83,26 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                 builder: (context, playingSnap) {
                   final isPlaying = playingSnap.data ?? false;
 
+                  final cover =
+                      _PodcastCover(song: song, scheme: scheme);
+                  final heroPrefix = widget.heroTagPrefix;
+                  final heroCover = heroPrefix == null
+                      ? cover
+                      : Hero(
+                          tag: '$heroPrefix${song.path}',
+                          child: cover,
+                        );
+
                   return SingleChildScrollView(
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Cabecera horizontal: cover pequeño + meta
+                        // Cabecera horizontal: cover + meta
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _PodcastCover(song: song, scheme: scheme),
+                            heroCover,
                             const SizedBox(width: 16),
                             Expanded(
                               child: Column(
@@ -363,7 +372,8 @@ class _PodcastCover extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(18),
+        // Radius fijo (24) para que el vuelo del Hero no salte al aterrizar.
+        borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
             color: scheme.shadow.withValues(alpha: 0.2),
