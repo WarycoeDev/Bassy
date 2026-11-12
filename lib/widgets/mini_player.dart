@@ -5,6 +5,7 @@ import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
+import '../screens/player_router.dart';
 import '../services/playback_controller.dart';
 
 // ============================================================
@@ -124,8 +125,6 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
   }
 
   // ---------- Entrada: aparece desde abajo ----------
-  // _dragOffset ya está en (0, 400) y _dragOpacity en 0 desde el build,
-  // así que el primer frame pinta el card abajo e invisible (sin parpadeo).
   Future<void> _playEntrance() async {
     if (!mounted) return;
     await _settle(
@@ -136,7 +135,7 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
     );
   }
 
-  // ---------- Cierre por gesto: completa el recorrido con inercia ----------
+  // ---------- Cierre por gesto ----------
   Future<void> _finishCloseWithInertia() async {
     if (_animatingOut) return;
     setState(() => _animatingOut = true);
@@ -246,7 +245,6 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
           _controller.reset();
           _offsetAnim = null;
           _opacityAnim = null;
-          // Sincrónico: el primer frame ya pinta el card abajo e invisible.
           _dragOffset = const Offset(0, _offscreenY);
           _dragOpacity = 0.0;
           _settleOffset = Offset.zero;
@@ -254,7 +252,6 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
           _pendingEntrance = true;
         }
 
-        // Disparar la animación en post-frame (tras el primer paint fuera de pantalla).
         if (_pendingEntrance) {
           _pendingEntrance = false;
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -282,7 +279,6 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
                 final canGoPrevious =
                     controller.hasPrevious || position > _kRestartThreshold;
                 final canGoNext = controller.hasNext;
-                final canPlayPause = true;
 
                 final card = Container(
                   margin: const EdgeInsets.all(12),
@@ -308,165 +304,178 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
                     ],
                   ),
                   clipBehavior: Clip.antiAlias,
-                  child: Stack(
-                    children: [
-                      Column(
-                        mainAxisSize: MainAxisSize.min,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: () {
+                        final s = controller.currentSong;
+                        if (s != null) openPlayerFor(context, s);
+                      },
+                      borderRadius: BorderRadius.circular(24),
+                      child: Stack(
                         children: [
-                          // Cabecera
-                          Padding(
-                            padding:
-                                const EdgeInsets.fromLTRB(16, 16, 44, 12),
-                            child: Row(
-                              children: [
-                                _MiniCover(
-                                    song: song, scheme: scheme, size: 56),
-                                const SizedBox(width: 14),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        song.title,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: scheme.onSurface,
-                                          fontWeight: FontWeight.w700,
-                                          fontSize: 15,
-                                          letterSpacing: -0.2,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 3),
-                                      Text(
-                                        song.subtitle,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: scheme.onSurfaceVariant,
-                                          fontSize: 12.5,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          // Progreso
-                          Padding(
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 16),
-                            child: Column(
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(3),
-                                  child: TweenAnimationBuilder<double>(
-                                    tween: Tween(begin: 0, end: progress),
-                                    duration:
-                                        const Duration(milliseconds: 300),
-                                    curve: Curves.easeOut,
-                                    builder: (_, value, __) =>
-                                        LinearProgressIndicator(
-                                      value: value,
-                                      minHeight: 4,
-                                      backgroundColor:
-                                          scheme.surfaceContainerHighest,
-                                      valueColor: AlwaysStoppedAnimation(
-                                        scheme.primary,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
+                          Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Cabecera
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                    16, 16, 44, 12),
+                                child: Row(
                                   children: [
-                                    Text(
-                                      _fmt(position),
-                                      style: TextStyle(
-                                        color: scheme.onSurfaceVariant,
-                                        fontSize: 10.5,
-                                        fontFeatures: const [
-                                          FontFeature.tabularFigures()
-                                        ],
-                                      ),
-                                    ),
-                                    Text(
-                                      _fmt(duration),
-                                      style: TextStyle(
-                                        color: scheme.onSurfaceVariant,
-                                        fontSize: 10.5,
-                                        fontFeatures: const [
-                                          FontFeature.tabularFigures()
+                                    _MiniCover(
+                                        song: song,
+                                        scheme: scheme,
+                                        size: 56),
+                                    const SizedBox(width: 14),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            song.title,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: scheme.onSurface,
+                                              fontWeight: FontWeight.w700,
+                                              fontSize: 15,
+                                              letterSpacing: -0.2,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 3),
+                                          Text(
+                                            song.subtitle,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: scheme.onSurfaceVariant,
+                                              fontSize: 12.5,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
                                         ],
                                       ),
                                     ),
                                   ],
                                 ),
-                              ],
-                            ),
-                          ),
-                          // Controles
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                              children: [
-                                _ControlIconButton(
-                                  icon: Icons.skip_previous_rounded,
-                                  iconSize: 30,
-                                  enabled: canGoPrevious,
-                                  scheme: scheme,
-                                  onPressed: controller.previous,
-                                  tooltip: 'Anterior',
+                              ),
+                              // Progreso
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 16),
+                                child: Column(
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(3),
+                                      child: TweenAnimationBuilder<double>(
+                                        tween: Tween(begin: 0, end: progress),
+                                        duration:
+                                            const Duration(milliseconds: 300),
+                                        curve: Curves.easeOut,
+                                        builder: (_, value, __) =>
+                                            LinearProgressIndicator(
+                                          value: value,
+                                          minHeight: 4,
+                                          backgroundColor:
+                                              scheme.surfaceContainerHighest,
+                                          valueColor: AlwaysStoppedAnimation(
+                                            scheme.primary,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          _fmt(position),
+                                          style: TextStyle(
+                                            color: scheme.onSurfaceVariant,
+                                            fontSize: 10.5,
+                                            fontFeatures: const [
+                                              FontFeature.tabularFigures()
+                                            ],
+                                          ),
+                                        ),
+                                        Text(
+                                          _fmt(duration),
+                                          style: TextStyle(
+                                            color: scheme.onSurfaceVariant,
+                                            fontSize: 10.5,
+                                            fontFeatures: const [
+                                              FontFeature.tabularFigures()
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
-                                _PlayButton(
-                                  isPlaying: isPlaying,
-                                  onPressed: canPlayPause
-                                      ? (isPlaying
+                              ),
+                              // Controles
+                              Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(8, 8, 8, 12),
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceEvenly,
+                                  children: [
+                                    _ControlIconButton(
+                                      icon: Icons.skip_previous_rounded,
+                                      iconSize: 30,
+                                      enabled: canGoPrevious,
+                                      scheme: scheme,
+                                      onPressed: controller.previous,
+                                      tooltip: 'Anterior',
+                                    ),
+                                    _PlayButton(
+                                      isPlaying: isPlaying,
+                                      onPressed: isPlaying
                                           ? controller.pause
-                                          : controller.play)
-                                      : null,
-                                  scheme: scheme,
-                                  size: 56,
+                                          : controller.play,
+                                      scheme: scheme,
+                                      size: 56,
+                                    ),
+                                    _ControlIconButton(
+                                      icon: Icons.skip_next_rounded,
+                                      iconSize: 30,
+                                      enabled: canGoNext,
+                                      scheme: scheme,
+                                      onPressed: controller.next,
+                                      tooltip: 'Siguiente',
+                                    ),
+                                  ],
                                 ),
-                                _ControlIconButton(
-                                  icon: Icons.skip_next_rounded,
-                                  iconSize: 30,
-                                  enabled: canGoNext,
-                                  scheme: scheme,
-                                  onPressed: controller.next,
-                                  tooltip: 'Siguiente',
-                                ),
-                              ],
+                              ),
+                            ],
+                          ),
+                          // Botón X
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: IconButton(
+                              icon: const Icon(Icons.close_rounded),
+                              iconSize: 18,
+                              color: scheme.onSurfaceVariant,
+                              tooltip: 'Cerrar',
+                              visualDensity: VisualDensity.compact,
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(
+                                minWidth: 32,
+                                minHeight: 32,
+                              ),
+                              onPressed:
+                                  _animatingOut ? null : _closeViaButton,
                             ),
                           ),
                         ],
                       ),
-                      // Botón X
-                      Positioned(
-                        top: 4,
-                        right: 4,
-                        child: IconButton(
-                          icon: const Icon(Icons.close_rounded),
-                          iconSize: 18,
-                          color: scheme.onSurfaceVariant,
-                          tooltip: 'Cerrar',
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(
-                            minWidth: 32,
-                            minHeight: 32,
-                          ),
-                          onPressed: _animatingOut ? null : _closeViaButton,
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 );
 
@@ -884,100 +893,110 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                         ],
                       ),
                       clipBehavior: Clip.antiAlias,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          TweenAnimationBuilder<double>(
-                            tween: Tween(begin: 0, end: progress),
-                            duration: const Duration(milliseconds: 300),
-                            curve: Curves.easeOut,
-                            builder: (_, value, __) =>
-                                LinearProgressIndicator(
-                              value: value,
-                              minHeight: 2.5,
-                              backgroundColor:
-                                  scheme.surfaceContainerHighest,
-                              valueColor: AlwaysStoppedAnimation(
-                                scheme.primary,
-                              ),
-                            ),
-                          ),
-                          Padding(
-                            padding:
-                                const EdgeInsets.fromLTRB(10, 10, 6, 10),
-                            child: Row(
-                              children: [
-                                _MiniCover(
-                                  song: song,
-                                  scheme: scheme,
-                                  size: 46,
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        song.title,
-                                        maxLines: 1,
-                                        overflow:
-                                            TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: scheme.onSurface,
-                                          fontWeight:
-                                              FontWeight.w600,
-                                          fontSize: 14,
-                                          letterSpacing: -0.1,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        song.subtitle,
-                                        maxLines: 1,
-                                        overflow:
-                                            TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: scheme
-                                              .onSurfaceVariant,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                    ],
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: () {
+                            final s = controller.currentSong;
+                            if (s != null) openPlayerFor(context, s);
+                          },
+                          borderRadius: BorderRadius.circular(20),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              TweenAnimationBuilder<double>(
+                                tween: Tween(begin: 0, end: progress),
+                                duration: const Duration(milliseconds: 300),
+                                curve: Curves.easeOut,
+                                builder: (_, value, __) =>
+                                    LinearProgressIndicator(
+                                  value: value,
+                                  minHeight: 2.5,
+                                  backgroundColor:
+                                      scheme.surfaceContainerHighest,
+                                  valueColor: AlwaysStoppedAnimation(
+                                    scheme.primary,
                                   ),
                                 ),
-                                const SizedBox(width: 4),
-                                _ControlIconButton(
-                                  icon: Icons.skip_previous_rounded,
-                                  iconSize: 24,
-                                  enabled: canGoPrevious,
-                                  scheme: scheme,
-                                  onPressed: controller.previous,
-                                  tooltip: 'Anterior',
-                                  compact: true,
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                    10, 10, 6, 10),
+                                child: Row(
+                                  children: [
+                                    _MiniCover(
+                                      song: song,
+                                      scheme: scheme,
+                                      size: 46,
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            song.title,
+                                            maxLines: 1,
+                                            overflow:
+                                                TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: scheme.onSurface,
+                                              fontWeight:
+                                                  FontWeight.w600,
+                                              fontSize: 14,
+                                              letterSpacing: -0.1,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            song.subtitle,
+                                            maxLines: 1,
+                                            overflow:
+                                                TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: scheme
+                                                  .onSurfaceVariant,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    _ControlIconButton(
+                                      icon: Icons.skip_previous_rounded,
+                                      iconSize: 24,
+                                      enabled: canGoPrevious,
+                                      scheme: scheme,
+                                      onPressed: controller.previous,
+                                      tooltip: 'Anterior',
+                                      compact: true,
+                                    ),
+                                    _PlayButton(
+                                      isPlaying: isPlaying,
+                                      onPressed: isPlaying
+                                          ? controller.pause
+                                          : controller.play,
+                                      scheme: scheme,
+                                      size: 40,
+                                    ),
+                                    _ControlIconButton(
+                                      icon: Icons.skip_next_rounded,
+                                      iconSize: 24,
+                                      enabled: canGoNext,
+                                      scheme: scheme,
+                                      onPressed: controller.next,
+                                      tooltip: 'Siguiente',
+                                      compact: true,
+                                    ),
+                                  ],
                                 ),
-                                _PlayButton(
-                                  isPlaying: isPlaying,
-                                  onPressed: isPlaying
-                                      ? controller.pause
-                                      : controller.play,
-                                  scheme: scheme,
-                                  size: 40,
-                                ),
-                                _ControlIconButton(
-                                  icon: Icons.skip_next_rounded,
-                                  iconSize: 24,
-                                  enabled: canGoNext,
-                                  scheme: scheme,
-                                  onPressed: controller.next,
-                                  tooltip: 'Siguiente',
-                                  compact: true,
-                                ),
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
-                        ],
+                        ),
                       ),
                     ),
                   ),

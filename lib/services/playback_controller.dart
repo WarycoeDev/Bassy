@@ -5,7 +5,7 @@ import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/song.dart';
-import 'playback_service.dart';
+import 'playback_audio_handler.dart';
 
 /// Umbral a partir del cual "previous" reinicia la canción en vez de
 /// saltar a la anterior. Debe coincidir con el usado en el miniplayer.
@@ -89,6 +89,14 @@ class PlaybackController {
   Future<void> playFromQueue(int index) => handler.playFromQueue(index);
   Future<void> addToQueue(Song song) => handler.addToQueue(song);
 
+  /// Velocidad de reproducción (1.0 = normal). Usado por el player de podcast.
+  Future<void> setSpeed(double speed) => handler.setSpeed(speed);
+
+  /// Shuffle / repeat reales (setter propio de la UI).
+  Future<void> setShuffle(bool enabled) => handler.setShuffle(enabled);
+  Future<void> setRepeatMode(PlayerRepeatMode mode) =>
+      handler.setRepeatModeForUI(mode);
+
   /// Vacía la cola y detiene la reproducción (usado por el swipe del
   /// miniplayer para descartar lo que está sonando).
   Future<void> clearQueue() => handler.clearQueue();
@@ -100,6 +108,10 @@ class PlaybackController {
   Stream<Duration> get position => handler.positionStream;
   Stream<Duration?> get duration => handler.durationStream;
   Stream<bool> get isPlaying => handler.playingStream;
+
+  /// Shuffle / repeat (reactivos).
+  Stream<bool> get shuffle => handler.shuffleStream;
+  Stream<PlayerRepeatMode> get repeat => handler.repeatStream;
 
   /// `true` cuando "previous" debe estar habilitado:
   /// hay canción anterior **o** ya se superó el umbral de rewind.
@@ -164,4 +176,11 @@ class PlaybackController {
   bool get hasNext => _handler?.hasNext ?? false;
   bool get hasPrevious => _handler?.hasPrevious ?? false;
   Duration get positionNow => _handler?.position ?? Duration.zero;
+
+  /// Velocidad actual del reproductor (1.0 = normal).
+  double get speedNow => _handler?.playerSpeed ?? 1.0;
+
+  bool get shuffleEnabled => _handler?.shuffleEnabled ?? false;
+  PlayerRepeatMode get repeatModeNow =>
+      _handler?.repeatMode ?? PlayerRepeatMode.off;
 }
