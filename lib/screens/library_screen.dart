@@ -742,7 +742,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // Favoritos — pestaña propia: lista de canciones reordenable
   // -------------------------------------------------------------------------
 
-  Widget _buildFavoritesList(BuildContext context) {
+    Widget _buildFavoritesList(BuildContext context) {
     final controller = _controllerFor(_fFavorites);
 
     if (_loadingLibrary) {
@@ -755,63 +755,130 @@ class _LibraryScreenState extends State<LibraryScreen> {
         final playlist = _favoritesPlaylist();
         final scheme = Theme.of(context).colorScheme;
 
-        if (playlist.songs.isEmpty) {
-          return ListView(
-            controller: controller,
-            padding: const EdgeInsets.all(16),
-            children: [
-              _buildEmptyState(
-                context,
-                icon: Icons.favorite_border,
-                title: 'Aún no tienes favoritos',
-                subtitle:
-                    'Usa el menú de una canción para añadirla a favoritos.',
-                showRescan: false,
-              ),
-            ],
-          );
-        }
-
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Cabecera (igual que PlaylistDetailScreen)
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text(
-                '${playlist.count} canciones · ${playlist.totalDurationLabel}',
-                style: TextStyle(
-                  color: scheme.onSurfaceVariant,
-                  fontSize: 12.5,
-                ),
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              child: Row(
+                children: [
+                  _buildFavoritesCover(context, playlist),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          playlist.subtitle,
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 13,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '${playlist.count} elementos · '
+                          '${playlist.totalDurationLabel}',
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          onPressed: playlist.songs.isEmpty ? null : () {},
+                          icon: const Icon(Icons.play_arrow, size: 20),
+                          label: const Text('Reproducir todo'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ),
+            Divider(height: 1, color: scheme.outlineVariant),
             Expanded(
-              child: ReorderableListView.builder(
-                scrollController: controller,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                itemCount: playlist.songs.length,
-                onReorder: FavoritesStore.instance.reorder,
-                proxyDecorator: (child, index, animation) {
-                  return Material(
-                    elevation: 6,
-                    color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(12),
-                    child: child,
-                  );
-                },
-                itemBuilder: (context, index) {
-                  final song = playlist.songs[index];
-                  return RepaintBoundary(
-                    key: ValueKey<String>(song.path),
-                    child: SongTile(song: song),
-                  );
-                },
-              ),
+              child: playlist.songs.isEmpty
+                  ? ListView(
+                      controller: controller,
+                      padding: const EdgeInsets.all(16),
+                      children: [
+                        _buildEmptyState(
+                          context,
+                          icon: Icons.favorite_border,
+                          title: 'Aún no tienes favoritos',
+                          subtitle:
+                              'Usa el menú de una canción para añadirla a favoritos.',
+                          showRescan: false,
+                        ),
+                      ],
+                    )
+                  : ReorderableListView.builder(
+                      scrollController: controller,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      itemCount: playlist.songs.length,
+                      onReorder: FavoritesStore.instance.reorder,
+                      proxyDecorator: (child, index, animation) {
+                        return Material(
+                          elevation: 6,
+                          color: scheme.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(12),
+                          child: child,
+                        );
+                      },
+                      itemBuilder: (context, index) {
+                        final song = playlist.songs[index];
+                        return RepaintBoundary(
+                          key: ValueKey<String>(song.path),
+                          child: SongTile(song: song),
+                        );
+                      },
+                    ),
             ),
           ],
         );
       },
+    );
+  }
+
+  /// Carátula 96x96 de la cabecera de Favoritos (mismo estilo que
+  /// PlaylistDetailScreen): primera carátula disponible o icono de corazón.
+  Widget _buildFavoritesCover(BuildContext context, Playlist playlist) {
+    final scheme = Theme.of(context).colorScheme;
+    final coverPath = _playlistCover(playlist);
+
+    Widget fallback() => Container(
+          width: 96,
+          height: 96,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [scheme.surfaceContainerHigh, scheme.surfaceContainer],
+            ),
+            border: Border.all(color: scheme.outlineVariant),
+          ),
+          child: Icon(Icons.favorite, size: 44, color: scheme.onSurfaceVariant),
+        );
+
+    if (coverPath == null) return fallback();
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: Image.file(
+        File(coverPath),
+        width: 96,
+        height: 96,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => fallback(),
+      ),
     );
   }
 
