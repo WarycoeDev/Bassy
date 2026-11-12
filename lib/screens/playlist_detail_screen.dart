@@ -17,10 +17,20 @@ class PlaylistDetailScreen extends StatelessWidget {
   /// orden guardado en vivo. Para álbumes/artistas/podcasts es null.
   final List<Song>? catalog;
 
+  /// Si es true, se renderiza solo el cuerpo (cabecera + lista) sin
+  /// Scaffold/AppBar/PopScope, para poder embeberlo en otra pantalla
+  /// (p. ej. dentro de una pestaña de LibraryScreen).
+  final bool inline;
+
+  /// Callback opcional para el botón "atrás" en modo inline.
+  final VoidCallback? onBack;
+
   const PlaylistDetailScreen({
     super.key,
     required this.playlist,
     this.catalog,
+    this.inline = false,
+    this.onBack,
   });
 
   /// Primera carátula disponible entre las canciones de la playlist.
@@ -36,6 +46,21 @@ class PlaylistDetailScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
+    // ----- Modo embebido (inline) -----
+    if (inline) {
+      return SafeArea(
+        top: false,
+        child: playlist.canReorder
+            ? AnimatedBuilder(
+                animation: FavoritesStore.instance,
+                builder: (context, _) =>
+                    _buildInlineBody(context, scheme, _livePlaylist()),
+              )
+            : _buildInlineBody(context, scheme, playlist),
+      );
+    }
+
+    // ----- Modo pantalla completa (original) -----
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -87,6 +112,10 @@ class PlaylistDetailScreen extends StatelessWidget {
     return FavoritesStore.instance.buildPlaylist(cat);
   }
 
+  // ============================================================
+  // CUERPO — MODO PANTALLA COMPLETA
+  // ============================================================
+
   Widget _buildBody(
     BuildContext context,
     ColorScheme scheme,
@@ -106,10 +135,11 @@ class PlaylistDetailScreen extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      live.subtitle,
+                      live.title,
                       style: TextStyle(
-                        color: scheme.onSurfaceVariant,
-                        fontSize: 13,
+                        color: scheme.onSurface,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 18,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -148,6 +178,83 @@ class PlaylistDetailScreen extends StatelessWidget {
       ],
     );
   }
+
+  // ============================================================
+  // CUERPO — MODO INLINE (embebido en una pestaña)
+  // ============================================================
+
+  Widget _buildInlineBody(
+    BuildContext context,
+    ColorScheme scheme,
+    Playlist live,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 4, 16, 12),
+          child: Row(
+            children: [
+              if (onBack != null)
+                IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  tooltip: 'Atrás',
+                  onPressed: onBack,
+                ),
+              _buildCover(context, live),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      live.title,
+                      style: TextStyle(
+                        color: scheme.onSurface,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 18,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '${live.count} elementos · ${live.totalDurationLabel}',
+                      style: TextStyle(
+                        color: scheme.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed: live.songs.isEmpty ? null : () {},
+                      icon: const Icon(Icons.play_arrow, size: 20),
+                      label: const Text('Reproducir todo'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        Divider(height: 1, color: scheme.outlineVariant),
+        Expanded(
+          child: live.songs.isEmpty
+              ? Center(
+                  child: Text(
+                    'Sin elementos',
+                    style: TextStyle(color: scheme.onSurfaceVariant),
+                  ),
+                )
+              : _buildSongList(context, scheme, live),
+        ),
+      ],
+    );
+  }
+
+  // ============================================================
+  // LISTA DE CANCIONES (compartida por ambos modos)
+  // ============================================================
 
   Widget _buildSongList(
     BuildContext context,
@@ -190,6 +297,10 @@ class PlaylistDetailScreen extends StatelessWidget {
       },
     );
   }
+
+  // ============================================================
+  // CARÁTULA
+  // ============================================================
 
   Widget _buildCover(BuildContext context, Playlist live) {
     final coverPath = _firstCover(live);

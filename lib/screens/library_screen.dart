@@ -44,9 +44,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // -------------------------------------------------------------------------
   // Índices de las pestañas (filtros). Usar SIEMPRE estas constantes.
   // -------------------------------------------------------------------------
-    // -------------------------------------------------------------------------
-  // Índices de las pestañas (filtros). Usar SIEMPRE estas constantes.
-  // -------------------------------------------------------------------------
   static const int _fAll = 0;
   static const int _fSongs = 1;
   static const int _fFavorites = 2;
@@ -72,6 +69,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   int _selectedFilter = _fAll;
   bool _slideFromRight = true;
+
+  /// Playlist (álbum/artista/podcast/...) abierta inline dentro de la
+  /// pestaña actual. Si es null, se muestra el listado normal del filtro.
+  Playlist? _inlinePlaylist;
 
   final Map<int, ScrollController> _scrollControllers = {};
 
@@ -227,7 +228,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void _changeFilter(int index) {
     if (index == _selectedFilter) return;
     _slideFromRight = index > _selectedFilter;
-    setState(() => _selectedFilter = index);
+    setState(() {
+      _selectedFilter = index;
+      _inlinePlaylist = null;
+    });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final c = _scrollControllers[index];
@@ -235,14 +239,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
   }
 
+  /// Abre una playlist/álbum/artista/podcast inline en la pestaña actual,
+  /// en lugar de empujar una ruta completa.
   void _openPlaylist(BuildContext context, Playlist playlist) {
-    final nav = _navKey.currentState;
-    if (nav == null) return;
-    nav.push(
-      MaterialPageRoute(
-        builder: (_) => PlaylistDetailScreen(playlist: playlist),
-      ),
-    );
+    setState(() => _inlinePlaylist = playlist);
+  }
+
+  void _closeInlinePlaylist() {
+    if (_inlinePlaylist == null) return;
+    setState(() => _inlinePlaylist = null);
   }
 
   // -------------------------------------------------------------------------
@@ -261,61 +266,87 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildLibraryHome(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    return Scaffold(
-      backgroundColor: scheme.surface,
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 16),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              // Escuchamos al store para reflejar el contador de favoritos
-              // en el header sin reconstruir toda la pantalla.
-              child: AnimatedBuilder(
-                animation: FavoritesStore.instance,
-                builder: (context, _) => _buildHeader(context),
+    return PopScope(
+      canPop: _inlinePlaylist == null,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (_inlinePlaylist != null) {
+          _closeInlinePlaylist();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: scheme.surface,
+        body: SafeArea(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                // Escuchamos al store para reflejar el contador de favoritos
+                // en el header sin reconstruir toda la pantalla.
+                child: AnimatedBuilder(
+                  animation: FavoritesStore.instance,
+                  builder: (context, _) => _buildHeader(context),
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            _buildScanProgress(context),
-            const SizedBox(height: 12),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: _buildFilterChips(context),
-            ),
-            const SizedBox(height: 16),
-            Expanded(
-              child: ClipRect(
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 220),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  transitionBuilder: (child, animation) {
-                    final begin = Offset(_slideFromRight ? 0.15 : -0.15, 0);
-                    final offset = Tween<Offset>(
-                      begin: begin,
-                      end: Offset.zero,
-                    ).animate(animation);
-                    return FadeTransition(
-                      opacity: animation,
-                      child: SlideTransition(position: offset, child: child),
-                    );
-                  },
-                  child: KeyedSubtree(
-                    key: ValueKey<int>(_selectedFilter),
-                    child: _buildScrollableContent(context),
+              const SizedBox(height: 12),
+              _buildScanProgress(context),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: _buildFilterChips(context),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: ClipRect(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    transitionBuilder: (child, animation) {
+                      final begin = Offset(_slideFromRight ? 0.15 : -0.15, 0);
+                      final offset = Tween<Offset>(
+                        begin: begin,
+                        end: Offset.zero,
+                      ).animate(animation);
+                      return FadeTransition(
+                        opacity: animation,
+                        child: SlideTransition(position: offset, child: child),
+                      );
+                    },
+                    child: KeyedSubtree(
+                      // La clave incluye el filtro Y si hay inline abierto,
+                      // para que AnimatedSwitcher anime también el cambio
+                      // entre listado y detalle inline.
+                      key: ValueKey<String>(
+                        '$_selectedFilter:${_inlinePlaylist?.id ?? ''}',
+                      ),
+                      child: _buildScrollableContent(context),
+                    ),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _buildScrollableContent(BuildContext context) {
+    final inline = _inlinePlaylist;
+    if (inline != null) {
+      return PlaylistDetailScreen(
+        playlist: inline,
+        // Solo pasamos catálogo cuando la playlist es reordenable
+        // (favoritos). Para álbumes/artistas/podcasts es null.
+        catalog: inline.canReorder ? _songs : null,
+        inline: true,
+        onBack: _closeInlinePlaylist,
+      );
+    }
+
     switch (_selectedFilter) {
       case _fAll:
         return _buildAllTab(context);
@@ -742,7 +773,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // Favoritos — pestaña propia: lista de canciones reordenable
   // -------------------------------------------------------------------------
 
-    Widget _buildFavoritesList(BuildContext context) {
+  Widget _buildFavoritesList(BuildContext context) {
     final controller = _controllerFor(_fFavorites);
 
     if (_loadingLibrary) {
@@ -770,10 +801,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          playlist.subtitle,
+                          playlist.title,
                           style: TextStyle(
-                            color: scheme.onSurfaceVariant,
-                            fontSize: 13,
+                            color: scheme.onSurface,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
                           ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -985,7 +1017,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   // -------------------------------------------------------------------------
-  // Álbumes / artistas / podcasts (sin cambios)
+  // Álbumes / artistas / podcasts
   // -------------------------------------------------------------------------
 
   Widget _buildAlbums(BuildContext context) {
@@ -1054,22 +1086,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
+                  // Título: nombre del álbum. Se eliminó el subtítulo
+                  // que mostraba creador + conteo.
                   Text(
                     album.title,
                     style: TextStyle(
                       color: scheme.onSurface,
                       fontWeight: FontWeight.w600,
                       fontSize: 13,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '${album.subtitle} · ${album.count}',
-                    style: TextStyle(
-                      color: scheme.onSurfaceVariant,
-                      fontSize: 12,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -1112,7 +1136,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               rounded: 10,
             ),
             title: album.title,
-            subtitle: album.subtitle,
+            // Se eliminó subtitle (nombre del creador).
             meta: '${album.count} pistas · ${album.totalDurationLabel}',
             trailing: Icon(
               Icons.chevron_right,
@@ -1167,21 +1191,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
+                  // Título: nombre del artista. Se eliminó el subtítulo
+                  // que mostraba el conteo de canciones.
                   Text(
                     artist.title,
                     style: TextStyle(
                       color: scheme.onSurface,
                       fontWeight: FontWeight.w600,
                       fontSize: 13,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    '${artist.count} canciones',
-                    style: TextStyle(
-                      color: scheme.onSurfaceVariant,
-                      fontSize: 11,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -1229,7 +1246,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
             ),
             title: artist.title,
-            subtitle: artist.subtitle,
+            // Se eliminó subtitle.
             trailing: Icon(
               Icons.chevron_right,
               color: scheme.onSurfaceVariant,
@@ -1293,21 +1310,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
+                        // Título: nombre del podcast. Se eliminó el
+                        // subtítulo de episodios/duración.
                         Text(
                           pod.title,
                           style: TextStyle(
                             color: scheme.onSurface,
                             fontWeight: FontWeight.w600,
                             fontSize: 14,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${pod.count} episodios · ${pod.totalDurationLabel}',
-                          style: TextStyle(
-                            color: scheme.onSurfaceVariant,
-                            fontSize: 12,
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -1385,21 +1395,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
+                        // Título: nombre del podcast. Se eliminó el
+                        // subtítulo de episodios/duración.
                         Text(
                           pod.title,
                           style: TextStyle(
                             color: scheme.onSurface,
                             fontWeight: FontWeight.w600,
                             fontSize: 14,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${pod.count} episodios · ${pod.totalDurationLabel}',
-                          style: TextStyle(
-                            color: scheme.onSurfaceVariant,
-                            fontSize: 12,
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),

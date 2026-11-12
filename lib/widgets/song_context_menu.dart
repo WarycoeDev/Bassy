@@ -313,19 +313,49 @@ class SongContextMenu {
   ///    el Navigator que corresponda a este [context], que es el anidado
   ///    de esa pestaña. El back lo gestionará el [NestedNavigatorScope]
   ///    de esa pestaña (o el de [PlaylistDetailScreen] como respaldo).
+    // ---------- Navegación a álbum / artista ----------
+
+  /// Abre la playlist (álbum/artista) como una ventana flotante centrada
+  /// sobre el contexto actual, en lugar de empujar una ruta completa.
+  /// El layout interno de [PlaylistDetailScreen] no se modifica: solo se
+  /// envuelve en un [Dialog] con tamaño acotado y esquinas redondeadas.
   static void _openPlaylist(BuildContext context, Playlist playlist) {
-    final route = MaterialPageRoute<void>(
-      builder: (_) => PlaylistDetailScreen(playlist: playlist),
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (dialogContext) {
+        final scheme = Theme.of(dialogContext).colorScheme;
+        final media = MediaQuery.of(dialogContext);
+        // Tamaño acotado: hasta 480px de ancho y 80% de alto.
+        final maxWidth = 480.0;
+        final width = media.size.width < maxWidth + 48
+            ? media.size.width * 0.92
+            : maxWidth;
+        final maxHeight = media.size.height * 0.8;
+
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 24,
+            vertical: 24,
+          ),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: width,
+              maxHeight: maxHeight,
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: Material(
+                color: scheme.surface,
+                child: PlaylistDetailScreen(playlist: playlist),
+              ),
+            ),
+          ),
+        );
+      },
     );
-
-    final nav = Navigator.of(context);
-    final libNav = LibraryScreen.currentNavigator;
-
-    if (libNav != null && libNav.mounted && identical(nav, libNav)) {
-      libNav.push(route);
-    } else {
-      nav.push(route);
-    }
   }
 
   static Playlist? _findAlbum(Song song) {
