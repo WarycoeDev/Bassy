@@ -37,8 +37,10 @@ class PlaybackController {
       config: const AudioServiceConfig(
         androidNotificationChannelId: 'com.example.bassy.audio',
         androidNotificationChannelName: 'Reproducción',
-        androidNotificationOngoing: true,
-        androidStopForegroundOnPause: true,
+        // false/false: el servicio sigue en foreground al pausar, así la
+        // notificación y los controles de bloqueo no se desfasan.
+        androidNotificationOngoing: false,
+        androidStopForegroundOnPause: false,
         androidNotificationIcon: 'mipmap/ic_launcher',
       ),
     );
@@ -101,10 +103,7 @@ class PlaybackController {
 
   /// `true` cuando "previous" debe estar habilitado:
   /// hay canción anterior **o** ya se superó el umbral de rewind.
-  /// Emite cada vez que cambia la posición o la cola.
   Stream<bool> get canGoPrevious async* {
-    // Combine manual de positionStream + estado de cola.
-    // Usamos un StreamController puente para no depender de rxdart.
     final controller = StreamController<bool>();
     StreamSubscription<Duration>? posSub;
     StreamSubscription<MediaItem?>? itemSub;
