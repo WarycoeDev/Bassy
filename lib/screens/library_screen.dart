@@ -41,9 +41,36 @@ class LibraryScreen extends StatefulWidget {
 }
 
 class _LibraryScreenState extends State<LibraryScreen> {
+  // -------------------------------------------------------------------------
+  // Índices de las pestañas (filtros). Usar SIEMPRE estas constantes.
+  // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+  // Índices de las pestañas (filtros). Usar SIEMPRE estas constantes.
+  // -------------------------------------------------------------------------
+  static const int _fAll = 0;
+  static const int _fSongs = 1;
+  static const int _fFavorites = 2;
+  static const int _fPlaylists = 3;
+  static const int _fAlbums = 4;
+  static const int _fArtists = 5;
+  static const int _fPodcasts = 6;
+  static const int _fDownloads = 7;
+
+  /// Etiquetas, en el mismo orden que los índices de arriba.
+  static const List<String> _filters = [
+    'Todo', // _fAll
+    'Canciones', // _fSongs
+    'Favoritos', // _fFavorites
+    'Playlists', // _fPlaylists
+    'Álbumes', // _fAlbums
+    'Artistas', // _fArtists
+    'Podcasts', // _fPodcasts
+    'Descargas', // _fDownloads
+  ];
+
   final GlobalKey<NavigatorState> _navKey = GlobalKey<NavigatorState>();
 
-  int _selectedFilter = 0;
+  int _selectedFilter = _fAll;
   bool _slideFromRight = true;
 
   final Map<int, ScrollController> _scrollControllers = {};
@@ -65,16 +92,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<Playlist> _podcastPlaylists = const [];
 
   StreamSubscription<ScanProgress>? _scanSub;
-
-  final List<String> _filters = const [
-    'Todo',
-    'Canciones',
-    'Playlists',
-    'Álbumes',
-    'Artistas',
-    'Podcasts',
-    'Descargas',
-  ];
 
   static const double _songTileExtent = 78;
 
@@ -109,24 +126,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // -------------------------------------------------------------------------
 
   /// Playlist de favoritos resuelta contra el catálogo actual.
+  /// Solo se usa en la pestaña Favoritos.
   Playlist _favoritesPlaylist() =>
       FavoritesStore.instance.buildPlaylist(_songs);
-
-  /// Abre favoritos como una playlist más. Le pasamos el catálogo para
-  /// que `PlaylistDetailScreen` pueda reconstruir la playlist desde el
-  /// store en cada rebuild (reordenamiento en vivo).
-  void _openFavorites(BuildContext context) {
-    final nav = _navKey.currentState;
-    if (nav == null) return;
-    nav.push(
-      MaterialPageRoute(
-        builder: (_) => PlaylistDetailScreen(
-          playlist: _favoritesPlaylist(),
-          catalog: _songs,
-        ),
-      ),
-    );
-  }
 
   // -------------------------------------------------------------------------
   // Agrupaciones / carátulas
@@ -314,69 +316,78 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildScrollableContent(BuildContext context) {
-    if (_selectedFilter == 0) {
-      return ListView(
-        controller: _controllerFor(0),
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        children: [
-          const SizedBox(height: 8),
-          _buildSectionTitle(context, 'Canciones',
-              onSeeAll: () => _changeFilter(1)),
-          const SizedBox(height: 12),
-          _buildSongs(context, limit: 5),
-          const SizedBox(height: 24),
-
-          _buildSectionTitle(context, 'Playlists',
-              onSeeAll: () => _changeFilter(2)),
-          const SizedBox(height: 12),
-          _buildPlaylists(context),
-          const SizedBox(height: 24),
-          _buildSectionTitle(context, 'Álbumes',
-              onSeeAll: () => _changeFilter(3)),
-          const SizedBox(height: 12),
-          _buildAlbums(context),
-          const SizedBox(height: 24),
-          _buildSectionTitle(context, 'Artistas',
-              onSeeAll: () => _changeFilter(4)),
-          const SizedBox(height: 12),
-          _buildArtists(context),
-          const SizedBox(height: 24),
-          _buildSectionTitle(context, 'Podcasts',
-              onSeeAll: () => _changeFilter(5)),
-          const SizedBox(height: 12),
-          _buildPodcasts(context, limit: 5),
-          const SizedBox(height: 24),
-        ],
-      );
+    switch (_selectedFilter) {
+      case _fAll:
+        return _buildAllTab(context);
+      case _fSongs:
+        return _buildSongsList(context);
+      case _fPlaylists:
+        return _buildPlaylistsTab(context);
+      case _fAlbums:
+        return _wrapInList(_fAlbums, _buildAlbumsDetailed(context));
+      case _fArtists:
+        return _wrapInList(_fArtists, _buildArtistsDetailed(context));
+      case _fPodcasts:
+        return _buildPodcastsList(context);
+      case _fFavorites:
+        return _buildFavoritesList(context);
+      case _fDownloads:
+        return _buildDownloadsTab(context);
+      default:
+        return const SizedBox.shrink();
     }
+  }
 
-    if (_selectedFilter == 1) return _buildSongsList(context);
-    if (_selectedFilter == 5) return _buildPodcastsList(context);
-
+  /// Envuelve un widget en un ListView con el controller de su pestaña.
+  Widget _wrapInList(int filterIndex, Widget child) {
     return ListView(
-      controller: _controllerFor(_selectedFilter),
+      controller: _controllerFor(filterIndex),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       children: [
         const SizedBox(height: 8),
-        ..._buildFilteredContent(context),
+        child,
         const SizedBox(height: 24),
       ],
     );
   }
 
-  List<Widget> _buildFilteredContent(BuildContext context) {
-    switch (_selectedFilter) {
-      case 2:
-        return [_buildPlaylistsDetailed(context)];
-      case 3:
-        return [_buildAlbumsDetailed(context)];
-      case 4:
-        return [_buildArtistsDetailed(context)];
-      case 6:
-        return [_buildDownloads(context)];
-      default:
-        return [];
-    }
+  Widget _buildAllTab(BuildContext context) {
+    return ListView(
+      controller: _controllerFor(_fAll),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      children: [
+        const SizedBox(height: 8),
+        _buildSectionTitle(context, 'Canciones',
+            onSeeAll: () => _changeFilter(_fSongs)),
+        const SizedBox(height: 12),
+        _buildSongs(context, limit: 5),
+        const SizedBox(height: 24),
+
+        _buildSectionTitle(context, 'Playlists',
+            onSeeAll: () => _changeFilter(_fPlaylists)),
+        const SizedBox(height: 12),
+        _buildPlaylists(context),
+        const SizedBox(height: 24),
+
+        _buildSectionTitle(context, 'Álbumes',
+            onSeeAll: () => _changeFilter(_fAlbums)),
+        const SizedBox(height: 12),
+        _buildAlbums(context),
+        const SizedBox(height: 24),
+
+        _buildSectionTitle(context, 'Artistas',
+            onSeeAll: () => _changeFilter(_fArtists)),
+        const SizedBox(height: 12),
+        _buildArtists(context),
+        const SizedBox(height: 24),
+
+        _buildSectionTitle(context, 'Podcasts',
+            onSeeAll: () => _changeFilter(_fPodcasts)),
+        const SizedBox(height: 12),
+        _buildPodcasts(context, limit: 5),
+        const SizedBox(height: 24),
+      ],
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -500,7 +511,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
         Row(
           children: [
-            
             _buildIconButton(
               context,
               Icons.refresh,
@@ -691,7 +701,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildSongsList(BuildContext context) {
-    final controller = _controllerFor(1);
+    final controller = _controllerFor(_fSongs);
 
     if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
@@ -729,65 +739,77 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   // -------------------------------------------------------------------------
-  // Favoritos — misma caja que Canciones, con tiles reales
+  // Favoritos — pestaña propia: lista de canciones reordenable
   // -------------------------------------------------------------------------
 
-  Widget _buildFavorites(BuildContext context, {int? limit}) {
-    if (_loadingLibrary) return const SizedBox.shrink();
+  Widget _buildFavoritesList(BuildContext context) {
+    final controller = _controllerFor(_fFavorites);
 
-    // Escuchamos al store para reflejar altas/bajas en vivo.
+    if (_loadingLibrary) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
     return AnimatedBuilder(
       animation: FavoritesStore.instance,
       builder: (context, _) {
         final playlist = _favoritesPlaylist();
+        final scheme = Theme.of(context).colorScheme;
+
         if (playlist.songs.isEmpty) {
-          return _buildEmptyState(
-            context,
-            icon: Icons.favorite_border,
-            title: 'Aún no tienes favoritos',
-            subtitle:
-                'Usa el menú de una canción para añadirla a favoritos.',
+          return ListView(
+            controller: controller,
+            padding: const EdgeInsets.all(16),
+            children: [
+              _buildEmptyState(
+                context,
+                icon: Icons.favorite_border,
+                title: 'Aún no tienes favoritos',
+                subtitle:
+                    'Usa el menú de una canción para añadirla a favoritos.',
+                showRescan: false,
+              ),
+            ],
           );
         }
 
-        final songs = limit == null
-            ? playlist.songs
-            : playlist.songs.take(limit).toList();
-        final extent = _songTileExtent;
-        final scheme = Theme.of(context).colorScheme;
-        const visibleRows = 4.5;
-        final boxHeight = extent * visibleRows + 8;
-
-        return Container(
-          height: boxHeight,
-          decoration: BoxDecoration(
-            color: scheme.surfaceContainerLow,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: scheme.outlineVariant.withValues(alpha: 0.6),
-            ),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: ListView.separated(
-            primary: false,
-            physics: const ClampingScrollPhysics(),
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-            itemCount: songs.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 2),
-            itemBuilder: (context, index) {
-              final song = songs[index];
-              return SizedBox(
-                height: extent,
-                child: RepaintBoundary(
-                  key: ValueKey<String>(song.path),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: SongTile(song: song),
-                  ),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                '${playlist.count} canciones · ${playlist.totalDurationLabel}',
+                style: TextStyle(
+                  color: scheme.onSurfaceVariant,
+                  fontSize: 12.5,
                 ),
-              );
-            },
-          ),
+              ),
+            ),
+            Expanded(
+              child: ReorderableListView.builder(
+                scrollController: controller,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                itemCount: playlist.songs.length,
+                onReorder: FavoritesStore.instance.reorder,
+                proxyDecorator: (child, index, animation) {
+                  return Material(
+                    elevation: 6,
+                    color: scheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(12),
+                    child: child,
+                  );
+                },
+                itemBuilder: (context, index) {
+                  final song = playlist.songs[index];
+                  return RepaintBoundary(
+                    key: ValueKey<String>(song.path),
+                    child: SongTile(song: song),
+                  );
+                },
+              ),
+            ),
+          ],
         );
       },
     );
@@ -798,9 +820,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     required IconData icon,
     required String title,
     required String subtitle,
+    bool showRescan = true,
   }) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
         color: scheme.surfaceContainer,
@@ -825,120 +849,73 @@ class _LibraryScreenState extends State<LibraryScreen> {
             style:
                 TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
           ),
-          const SizedBox(height: 12),
-          TextButton.icon(
-            onPressed: _scanning ? null : _manualRescan,
-            icon: const Icon(Icons.refresh, size: 18),
-            label: const Text('Escanear de nuevo'),
-          ),
+          if (showRescan) ...[
+            const SizedBox(height: 12),
+            TextButton.icon(
+              onPressed: _scanning ? null : _manualRescan,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('Escanear de nuevo'),
+            ),
+          ],
         ],
       ),
     );
   }
 
   // -------------------------------------------------------------------------
-  // Playlists — incluye Favoritos como primera tarjeta
+  // Playlists — SIN favoritos (ahora tienen su propia pestaña).
+  // Cuando exista PlaylistsStore, aquí se listarán las playlists del usuario.
   // -------------------------------------------------------------------------
 
   Widget _buildPlaylists(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();
 
-    return AnimatedBuilder(
-      animation: FavoritesStore.instance,
-      builder: (context, _) {
-        final favorites = _favoritesPlaylist();
-        final scheme = Theme.of(context).colorScheme;
-
-        // Solo mostramos Favoritos aquí por ahora.
-        // Cuando exista PlaylistsStore, se añadirán las demás.
-        return GestureDetector(
-          onTap: () => _openFavorites(context),
-          child: Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainer,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Row(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: SizedBox(
-                    width: 64,
-                    height: 64,
-                    child: _buildCoverImageOrIcon(
-                      context,
-                      coverPath: _playlistCover(favorites),
-                      fallbackIcon: Icons.favorite,
-                      iconSize: 30,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Favoritos',
-                        style: TextStyle(
-                          color: scheme.onSurface,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14.5,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        '${favorites.count} canciones',
-                        style: TextStyle(
-                          color: scheme.onSurfaceVariant,
-                          fontSize: 12.5,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      if (favorites.songs.isNotEmpty) ...[
-                        const SizedBox(height: 5),
-                        Row(
-                          children: [
-                            Icon(
-                              Icons.schedule,
-                              size: 12,
-                              color: scheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              favorites.totalDurationLabel,
-                              style: TextStyle(
-                                color: scheme.onSurfaceVariant,
-                                fontSize: 11.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Icon(
-                  Icons.chevron_right,
-                  color: scheme.onSurfaceVariant,
-                  size: 24,
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+    return _buildEmptyState(
+      context,
+      icon: Icons.queue_music_outlined,
+      title: 'Aún no hay playlists',
+      subtitle: 'Las playlists que crees aparecerán aquí.',
+      showRescan: false,
     );
   }
 
-  Widget _buildPlaylistsDetailed(BuildContext context) =>
-      _buildPlaylists(context);
+  Widget _buildPlaylistsTab(BuildContext context) {
+    return ListView(
+      controller: _controllerFor(_fPlaylists),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      children: [
+        const SizedBox(height: 8),
+        _buildPlaylists(context),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Descargas — pestaña propia, independiente de favoritos
+  // -------------------------------------------------------------------------
+
+  Widget _buildDownloadsTab(BuildContext context) {
+    return ListView(
+      controller: _controllerFor(_fDownloads),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      children: [
+        const SizedBox(height: 8),
+        _buildDownloads(context),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget _buildDownloads(BuildContext context) {
+    return _buildEmptyState(
+      context,
+      icon: Icons.download_outlined,
+      title: 'Sin descargas',
+      subtitle: 'Aún no hay descargas registradas.',
+      showRescan: false,
+    );
+  }
 
   // -------------------------------------------------------------------------
   // Álbumes / artistas / podcasts (sin cambios)
@@ -1280,7 +1257,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildPodcastsList(BuildContext context) {
-    final controller = _controllerFor(5);
+    final controller = _controllerFor(_fPodcasts);
 
     if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
@@ -1369,15 +1346,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
         );
       },
-    );
-  }
-
-  Widget _buildDownloads(BuildContext context) {
-    return _buildEmptyState(
-      context,
-      icon: Icons.download_outlined,
-      title: 'Sin descargas',
-      subtitle: 'Aún no hay descargas registradas.',
     );
   }
 
