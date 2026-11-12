@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'song.dart';
 
 /// Categoría agrupadora: álbum, artista o podcast.
-enum PlaylistKind { album, artist, podcast }
+enum PlaylistKind { album, artist, podcast, favorites }
 
 @immutable
 class Playlist {
@@ -28,6 +28,11 @@ class Playlist {
 
   Duration get totalDuration =>
       songs.fold(Duration.zero, (acc, s) => acc + s.duration);
+
+  bool get isFavorites => kind == PlaylistKind.favorites;
+
+/// Solo los favoritos permiten reordenar manualmente.
+bool get canReorder => kind == PlaylistKind.favorites;
 
   String get totalDurationLabel {
     final total = totalDuration.inSeconds;

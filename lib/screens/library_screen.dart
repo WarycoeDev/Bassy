@@ -1,3 +1,4 @@
+// lib/screens/library_screen.dart
 import 'dart:async';
 import 'dart:io';
 
@@ -5,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../models/playlist.dart';
 import '../models/song.dart';
+import '../services/favorites_store.dart';
 import '../services/media_scanner.dart';
 import '../widgets/nested_navigator_scope.dart';
 import '../widgets/song_tile.dart';
@@ -79,6 +81,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void initState() {
     super.initState();
+    // Carga inicial de favoritos (idempotente).
+    FavoritesStore.instance.load();
     _startWatching();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -98,6 +102,30 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     _scrollControllers.clear();
     super.dispose();
+  }
+
+  // -------------------------------------------------------------------------
+  // Favoritos
+  // -------------------------------------------------------------------------
+
+  /// Playlist de favoritos resuelta contra el catálogo actual.
+  Playlist _favoritesPlaylist() =>
+      FavoritesStore.instance.buildPlaylist(_songs);
+
+  /// Abre favoritos como una playlist más. Le pasamos el catálogo para
+  /// que `PlaylistDetailScreen` pueda reconstruir la playlist desde el
+  /// store en cada rebuild (reordenamiento en vivo).
+  void _openFavorites(BuildContext context) {
+    final nav = _navKey.currentState;
+    if (nav == null) return;
+    nav.push(
+      MaterialPageRoute(
+        builder: (_) => PlaylistDetailScreen(
+          playlist: _favoritesPlaylist(),
+          catalog: _songs,
+        ),
+      ),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -240,7 +268,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
             const SizedBox(height: 16),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: _buildHeader(context),
+              // Escuchamos al store para reflejar el contador de favoritos
+              // en el header sin reconstruir toda la pantalla.
+              child: AnimatedBuilder(
+                animation: FavoritesStore.instance,
+                builder: (context, _) => _buildHeader(context),
+              ),
             ),
             const SizedBox(height: 12),
             _buildScanProgress(context),
@@ -292,6 +325,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           const SizedBox(height: 12),
           _buildSongs(context, limit: 5),
           const SizedBox(height: 24),
+
           _buildSectionTitle(context, 'Playlists',
               onSeeAll: () => _changeFilter(2)),
           const SizedBox(height: 12),
@@ -346,7 +380,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   // -------------------------------------------------------------------------
-  // Progreso de escaneo — MEJORADO con contador en vivo
+  // Progreso de escaneo
   // -------------------------------------------------------------------------
 
   Widget _buildScanProgress(BuildContext context) {
@@ -354,9 +388,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     if (!_scanning && _scanErrors.isEmpty) return const SizedBox.shrink();
 
-    // Texto de progreso: preferimos el statusMessage del scanner, que ya
-    // incluye contadores ("Escaneando… 24 archivos · 12 música").
-    // Fallback por si acaso: contador basado en canciones ya cargadas.
     final progressText = _scanStatus ??
         'Escaneando… ${_songs.length + _podcasts.length} encontradas · '
             '$_processedFiles archivos';
@@ -434,13 +465,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _buildHeader(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final total = _songs.length + _podcasts.length;
+    final favCount = FavoritesStore.instance.count;
 
-    // Subtítulo dinámico con contador en vivo durante el escaneo.
     final subtitle = _scanning
         ? (_scanStatus ?? 'Escaneando… $_processedFiles archivos')
         : (total == 0
             ? 'Música local en tu dispositivo'
-            : '$total elementos');
+            : '$total elementos · $favCount favoritos');
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -469,10 +500,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
         Row(
           children: [
-            _buildIconButton(context, Icons.search),
-            const SizedBox(width: 12),
-            _buildIconButton(context, Icons.sort),
-            const SizedBox(width: 12),
+            
             _buildIconButton(
               context,
               Icons.refresh,
@@ -700,6 +728,71 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Favoritos — misma caja que Canciones, con tiles reales
+  // -------------------------------------------------------------------------
+
+  Widget _buildFavorites(BuildContext context, {int? limit}) {
+    if (_loadingLibrary) return const SizedBox.shrink();
+
+    // Escuchamos al store para reflejar altas/bajas en vivo.
+    return AnimatedBuilder(
+      animation: FavoritesStore.instance,
+      builder: (context, _) {
+        final playlist = _favoritesPlaylist();
+        if (playlist.songs.isEmpty) {
+          return _buildEmptyState(
+            context,
+            icon: Icons.favorite_border,
+            title: 'Aún no tienes favoritos',
+            subtitle:
+                'Usa el menú de una canción para añadirla a favoritos.',
+          );
+        }
+
+        final songs = limit == null
+            ? playlist.songs
+            : playlist.songs.take(limit).toList();
+        final extent = _songTileExtent;
+        final scheme = Theme.of(context).colorScheme;
+        const visibleRows = 4.5;
+        final boxHeight = extent * visibleRows + 8;
+
+        return Container(
+          height: boxHeight,
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.6),
+            ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: ListView.separated(
+            primary: false,
+            physics: const ClampingScrollPhysics(),
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            itemCount: songs.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 2),
+            itemBuilder: (context, index) {
+              final song = songs[index];
+              return SizedBox(
+                height: extent,
+                child: RepaintBoundary(
+                  key: ValueKey<String>(song.path),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: SongTile(song: song),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildEmptyState(
     BuildContext context, {
     required IconData icon,
@@ -743,17 +836,113 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Playlists — incluye Favoritos como primera tarjeta
+  // -------------------------------------------------------------------------
+
   Widget _buildPlaylists(BuildContext context) {
-    return _buildEmptyState(
-      context,
-      icon: Icons.queue_music,
-      title: 'Sin playlists',
-      subtitle: 'Las playlists personalizadas llegarán pronto.',
+    if (_loadingLibrary) return const SizedBox.shrink();
+
+    return AnimatedBuilder(
+      animation: FavoritesStore.instance,
+      builder: (context, _) {
+        final favorites = _favoritesPlaylist();
+        final scheme = Theme.of(context).colorScheme;
+
+        // Solo mostramos Favoritos aquí por ahora.
+        // Cuando exista PlaylistsStore, se añadirán las demás.
+        return GestureDetector(
+          onTap: () => _openFavorites(context),
+          child: Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainer,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: SizedBox(
+                    width: 64,
+                    height: 64,
+                    child: _buildCoverImageOrIcon(
+                      context,
+                      coverPath: _playlistCover(favorites),
+                      fallbackIcon: Icons.favorite,
+                      iconSize: 30,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Favoritos',
+                        style: TextStyle(
+                          color: scheme.onSurface,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14.5,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '${favorites.count} canciones',
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 12.5,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (favorites.songs.isNotEmpty) ...[
+                        const SizedBox(height: 5),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.schedule,
+                              size: 12,
+                              color: scheme.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              favorites.totalDurationLabel,
+                              style: TextStyle(
+                                color: scheme.onSurfaceVariant,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  Icons.chevron_right,
+                  color: scheme.onSurfaceVariant,
+                  size: 24,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
   Widget _buildPlaylistsDetailed(BuildContext context) =>
       _buildPlaylists(context);
+
+  // -------------------------------------------------------------------------
+  // Álbumes / artistas / podcasts (sin cambios)
+  // -------------------------------------------------------------------------
 
   Widget _buildAlbums(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();

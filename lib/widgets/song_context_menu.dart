@@ -7,8 +7,10 @@ import '../models/playlist.dart';
 import '../models/song.dart';
 import '../screens/library_screen.dart';
 import '../screens/playlist_detail_screen.dart';
+import '../services/favorites_store.dart';
 import '../services/playback_controller.dart';
 import 'action_menu.dart';
+import 'input_menu.dart';
 
 /// Centraliza los dos menús que puede abrir un tile:
 ///
@@ -105,6 +107,9 @@ class SongContextMenu {
     }
 
     // Canciones: acciones completas (cola + organización + navegación).
+    final favorites = FavoritesStore.instance;
+    final isFav = favorites.contains(song);
+
     return [
       ActionMenuItem(
         icon: Icons.play_arrow,
@@ -115,12 +120,23 @@ class SongContextMenu {
       ActionMenuItem(
         icon: Icons.playlist_add,
         label: 'Añadir a playlist',
-        onTap: () => _todo(context, 'Añadir a playlist'),
+        onTap: () => _addToPlaylist(context, song),
       ),
       ActionMenuItem(
-        icon: Icons.favorite_border,
-        label: 'Añadir a favoritos',
-        onTap: () => _todo(context, 'Añadir a favoritos'),
+        icon: isFav ? Icons.favorite : Icons.favorite_border,
+        label: isFav ? 'Quitar de favoritos' : 'Añadir a favoritos',
+        onTap: () async {
+          await favorites.toggle(song);
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                isFav ? 'Quitado de favoritos' : 'Añadido a favoritos',
+              ),
+              duration: const Duration(seconds: 1),
+            ),
+          );
+        },
       ),
       ..._musicActions(context, song),
     ];
@@ -213,6 +229,32 @@ class SongContextMenu {
         onTap: () => _todo(context, 'Detalles'),
       ),
     ];
+  }
+
+  // ---------- Añadir a playlist (placeholder con InputMenu) ----------
+
+  static Future<void> _addToPlaylist(
+    BuildContext context,
+    Song song,
+  ) async {
+    // TODO: conectar PlaylistsStore cuando exista.
+    final result = await InputMenu.show(
+      context,
+      title: 'Añadir a playlist',
+      subtitle: song.title,
+      hintText: 'Nombre de la playlist',
+      confirmLabel: 'Añadir',
+      suggestions: const ['Favoritos', 'Escuchar luego', 'En el coche'],
+    );
+    if (result == null || !result.confirmed) return;
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'TODO: añadir a "${result.text}" (playlist store pendiente)',
+        ),
+      ),
+    );
   }
 
   // ---------- Acciones específicas de podcast ----------
