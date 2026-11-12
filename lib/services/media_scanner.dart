@@ -1141,7 +1141,14 @@ class MediaScanner {
       final raw = await MetadataReader.instance.read(entity);
       final base = p.basenameWithoutExtension(entity.path);
 
-      title = (raw?.title.isNotEmpty ?? false) ? raw!.title : base;
+      // Si hay título en los tags, se respeta tal cual (es la fuente de
+      // verdad). Solo limpiamos el prefijo de track cuando caemos al
+      // nombre de archivo, para no mutilar títulos como "7 weeks 3 days".
+      final tagTitle = raw?.title.trim() ?? '';
+      final resolvedTitle =
+          tagTitle.isNotEmpty ? tagTitle : _cleanTrackPrefix(base);
+
+      title = resolvedTitle;
       artist = raw?.artist ?? '';
       album = raw?.album ?? '';
       duration = raw?.duration ?? Duration.zero;
@@ -1174,7 +1181,7 @@ class MediaScanner {
     return Song(
       path: entity.path,
       fileName: p.basename(entity.path),
-      title: _cleanTitle(title),
+      title: title,
       artist: artist,
       album: album,
       extension: ext,
@@ -1186,10 +1193,27 @@ class MediaScanner {
     );
   }
 
-  String _cleanTitle(String raw) {
-    var s = raw.replaceAll('_', ' ').trim();
-    s = s.replaceFirst(RegExp(r'^\d{1,3}[\s\-\.]+'), '');
-    return s.isEmpty ? raw : s;
+  /// Limpia un prefijo de número de pista SOLO cuando es un prefijo real:
+  /// `01 - `, `1- `, `02. `, `3 – `, `04_ `.
+  ///
+  /// NO elimina números que forman parte del título real:
+  ///   - `7 weeks 3 days` → intacto
+  ///   - `2hot`           → intacto
+  ///   - `2001 A Space…`  → intacto
+  ///
+  /// Solo se aplica al nombre de archivo (fallback), nunca a títulos
+  /// que vienen de tags.
+  String _cleanTrackPrefix(String raw) {
+    var s = raw.trim();
+    // Normaliza separadores tipo underscore a espacio.
+    s = s.replaceAll('_', ' ').trim();
+    // "01 - Título", "1- Título", "02 – Título", "03 — Título"
+    s = s.replaceFirst(RegExp(r'^\d{1,3}\s*[-–—]\s*'), '');
+    // "01. Título", "2. Título"
+    s = s.replaceFirst(RegExp(r'^\d{1,3}\.\s+'), '');
+    // "01  Título" (doble espacio: prefijo claro de track)
+    s = s.replaceFirst(RegExp(r'^\d{1,3}\s{2,}'), '');
+    return s.trim().isEmpty ? raw : s;
   }
 }
 

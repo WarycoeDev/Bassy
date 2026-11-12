@@ -22,8 +22,198 @@ const Duration _kRestartThreshold = Duration(seconds: 3);
 // ============================================================
 // MINIPLAYER TIPO TARJETA (panel lateral tablet/PC)
 // ============================================================
-class MiniPlayerCard extends StatelessWidget {
+class MiniPlayerCard extends StatefulWidget {
   const MiniPlayerCard({super.key});
+
+  @override
+  State<MiniPlayerCard> createState() => _MiniPlayerCardState();
+}
+
+class _MiniPlayerCardState extends State<MiniPlayerCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  Animation<Offset>? _offsetAnim;
+  Animation<double>? _opacityAnim;
+
+  Offset _dragOffset = Offset.zero;
+  double _dragOpacity = 1.0;
+  Offset _settleOffset = Offset.zero;
+  double _settleOpacity = 1.0;
+
+  bool _animatingOut = false;
+  bool _pendingEntrance = false;
+
+  String? _lastItemId;
+
+  static const double _dragThreshold = 120;
+  static const double _velocityThreshold = 350;
+  static const double _offscreenY = 400;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    )..addListener(_onTick);
+    _pendingEntrance = true;
+  }
+
+  void _onTick() {
+    final o = _offsetAnim;
+    final op = _opacityAnim;
+    if (o == null || op == null || !mounted) return;
+    setState(() {
+      _settleOffset = o.value;
+      _settleOpacity = op.value;
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller
+      ..removeListener(_onTick)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _resetVisualState({bool triggerEntrance = true}) {
+    _controller.reset();
+    _offsetAnim = null;
+    _opacityAnim = null;
+    _dragOffset = Offset.zero;
+    _dragOpacity = 1.0;
+    _settleOffset = Offset.zero;
+    _settleOpacity = 1.0;
+    _animatingOut = false;
+    _pendingEntrance = triggerEntrance;
+  }
+
+  Offset get _effectiveOffset => _dragOffset + _settleOffset;
+  double get _effectiveOpacity =>
+      (_dragOpacity * _settleOpacity).clamp(0.0, 1.0);
+
+  Future<void> _settle({
+    required Offset targetOffset,
+    required double targetOpacity,
+    required int durationMs,
+    Curve curve = Curves.easeOutCubic,
+  }) async {
+    if (!mounted) return;
+
+    final startOffset = _effectiveOffset;
+    final startOpacity = _effectiveOpacity;
+
+    _offsetAnim = Tween<Offset>(begin: startOffset, end: targetOffset)
+        .chain(CurveTween(curve: curve))
+        .animate(_controller);
+    _opacityAnim = Tween<double>(begin: startOpacity, end: targetOpacity)
+        .chain(CurveTween(curve: curve))
+        .animate(_controller);
+
+    _dragOffset = Offset.zero;
+    _dragOpacity = 1.0;
+
+    _controller.duration = Duration(milliseconds: durationMs);
+    _controller.reset();
+    try {
+      await _controller.forward().orCancel;
+    } on TickerCanceled {
+      return;
+    }
+  }
+
+  // ---------- Entrada: aparece desde abajo ----------
+  // _dragOffset ya está en (0, 400) y _dragOpacity en 0 desde el build,
+  // así que el primer frame pinta el card abajo e invisible (sin parpadeo).
+  Future<void> _playEntrance() async {
+    if (!mounted) return;
+    await _settle(
+      targetOffset: Offset.zero,
+      targetOpacity: 1.0,
+      durationMs: 320,
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  // ---------- Cierre por gesto: completa el recorrido con inercia ----------
+  Future<void> _finishCloseWithInertia() async {
+    if (_animatingOut) return;
+    setState(() => _animatingOut = true);
+
+    final remaining =
+        (_offscreenY - _effectiveOffset.dy).clamp(0.0, _offscreenY);
+    final fraction = remaining / _offscreenY;
+    final durationMs = (260 * fraction).round().clamp(80, 260);
+
+    await _settle(
+      targetOffset: const Offset(0, _offscreenY),
+      targetOpacity: 0.0,
+      durationMs: durationMs,
+      curve: Curves.linear,
+    );
+    if (!mounted) return;
+
+    await PlaybackController.instance.clearQueue();
+    if (!mounted) return;
+
+    setState(() => _resetVisualState(triggerEntrance: true));
+  }
+
+  // ---------- Cierre por botón X ----------
+  Future<void> _closeViaButton() async {
+    if (_animatingOut) return;
+    setState(() => _animatingOut = true);
+
+    await _settle(
+      targetOffset: const Offset(0, _offscreenY),
+      targetOpacity: 0.0,
+      durationMs: 260,
+      curve: Curves.easeInCubic,
+    );
+    if (!mounted) return;
+
+    await PlaybackController.instance.clearQueue();
+    if (!mounted) return;
+
+    setState(() => _resetVisualState(triggerEntrance: true));
+  }
+
+  Future<void> _snapBack() async {
+    if (!mounted) return;
+    await _settle(
+      targetOffset: Offset.zero,
+      targetOpacity: 1.0,
+      durationMs: 220,
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  // ---------- Gestos ----------
+  void _onVerticalDragUpdate(DragUpdateDetails d) {
+    if (_animatingOut) return;
+    final next = (_dragOffset.dy + d.delta.dy).clamp(0.0, _offscreenY);
+    setState(() {
+      _dragOffset = Offset(0, next);
+      _dragOpacity = (1.0 - next / _offscreenY).clamp(0.0, 1.0);
+    });
+  }
+
+  void _onVerticalDragEnd(DragEndDetails d) {
+    if (_animatingOut) return;
+    final v = d.primaryVelocity ?? 0;
+    final passed = v > _velocityThreshold || _dragOffset.dy > _dragThreshold;
+    if (passed) {
+      _finishCloseWithInertia();
+    } else {
+      _snapBack();
+    }
+  }
+
+  void _onDragCancel() {
+    if (_animatingOut) return;
+    _snapBack();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -36,8 +226,41 @@ class MiniPlayerCard extends StatelessWidget {
       stream: controller.currentItem,
       builder: (context, mediaSnap) {
         final song = controller.currentSong;
+        final itemId = mediaSnap.data?.id;
+
+        // --- Sin canción actual ---
         if (song == null || mediaSnap.data == null) {
+          if (_lastItemId != null) {
+            _lastItemId = null;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              setState(() => _resetVisualState(triggerEntrance: true));
+            });
+          }
           return const SizedBox.shrink();
+        }
+
+        // --- Hay canción: preparar estado "fuera de pantalla" ANTES del paint ---
+        if (_lastItemId != itemId) {
+          _lastItemId = itemId;
+          _controller.reset();
+          _offsetAnim = null;
+          _opacityAnim = null;
+          // Sincrónico: el primer frame ya pinta el card abajo e invisible.
+          _dragOffset = const Offset(0, _offscreenY);
+          _dragOpacity = 0.0;
+          _settleOffset = Offset.zero;
+          _settleOpacity = 1.0;
+          _pendingEntrance = true;
+        }
+
+        // Disparar la animación en post-frame (tras el primer paint fuera de pantalla).
+        if (_pendingEntrance) {
+          _pendingEntrance = false;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _playEntrance();
+          });
         }
 
         return StreamBuilder<bool>(
@@ -56,13 +279,12 @@ class MiniPlayerCard extends StatelessWidget {
                         .clamp(0.0, 1.0)
                     : 0.0;
 
-                // --- Estado de los botones ---
                 final canGoPrevious =
                     controller.hasPrevious || position > _kRestartThreshold;
                 final canGoNext = controller.hasNext;
-                final canPlayPause = true; // siempre hay canción aquí
+                final canPlayPause = true;
 
-                return Container(
+                final card = Container(
                   margin: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -85,140 +307,180 @@ class MiniPlayerCard extends StatelessWidget {
                       ),
                     ],
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
+                  clipBehavior: Clip.antiAlias,
+                  child: Stack(
                     children: [
-                      // --- Cabecera: cover + info ---
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-                        child: Row(
-                          children: [
-                            _MiniCover(song: song, scheme: scheme, size: 56),
-                            const SizedBox(width: 14),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    song.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: scheme.onSurface,
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: 15,
-                                      letterSpacing: -0.2,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 3),
-                                  Text(
-                                    song.subtitle,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: scheme.onSurfaceVariant,
-                                      fontSize: 12.5,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-
-                      // --- Progreso + tiempos ---
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Column(
-                          children: [
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(3),
-                              child: TweenAnimationBuilder<double>(
-                                tween: Tween(begin: 0, end: progress),
-                                duration: const Duration(milliseconds: 300),
-                                curve: Curves.easeOut,
-                                builder: (_, value, __) =>
-                                    LinearProgressIndicator(
-                                  value: value,
-                                  minHeight: 4,
-                                  backgroundColor:
-                                      scheme.surfaceContainerHighest,
-                                  valueColor: AlwaysStoppedAnimation(
-                                    scheme.primary,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            Row(
-                              mainAxisAlignment:
-                                  MainAxisAlignment.spaceBetween,
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Cabecera
+                          Padding(
+                            padding:
+                                const EdgeInsets.fromLTRB(16, 16, 44, 12),
+                            child: Row(
                               children: [
-                                Text(
-                                  _fmt(position),
-                                  style: TextStyle(
-                                    color: scheme.onSurfaceVariant,
-                                    fontSize: 10.5,
-                                    fontFeatures: const [
-                                      FontFeature.tabularFigures()
-                                    ],
-                                  ),
-                                ),
-                                Text(
-                                  _fmt(duration),
-                                  style: TextStyle(
-                                    color: scheme.onSurfaceVariant,
-                                    fontSize: 10.5,
-                                    fontFeatures: const [
-                                      FontFeature.tabularFigures()
+                                _MiniCover(
+                                    song: song, scheme: scheme, size: 56),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        song.title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: scheme.onSurface,
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 15,
+                                          letterSpacing: -0.2,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        song.subtitle,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: scheme.onSurfaceVariant,
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
                                     ],
                                   ),
                                 ),
                               ],
                             ),
-                          ],
-                        ),
+                          ),
+                          // Progreso
+                          Padding(
+                            padding:
+                                const EdgeInsets.symmetric(horizontal: 16),
+                            child: Column(
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(3),
+                                  child: TweenAnimationBuilder<double>(
+                                    tween: Tween(begin: 0, end: progress),
+                                    duration:
+                                        const Duration(milliseconds: 300),
+                                    curve: Curves.easeOut,
+                                    builder: (_, value, __) =>
+                                        LinearProgressIndicator(
+                                      value: value,
+                                      minHeight: 4,
+                                      backgroundColor:
+                                          scheme.surfaceContainerHighest,
+                                      valueColor: AlwaysStoppedAnimation(
+                                        scheme.primary,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(
+                                      _fmt(position),
+                                      style: TextStyle(
+                                        color: scheme.onSurfaceVariant,
+                                        fontSize: 10.5,
+                                        fontFeatures: const [
+                                          FontFeature.tabularFigures()
+                                        ],
+                                      ),
+                                    ),
+                                    Text(
+                                      _fmt(duration),
+                                      style: TextStyle(
+                                        color: scheme.onSurfaceVariant,
+                                        fontSize: 10.5,
+                                        fontFeatures: const [
+                                          FontFeature.tabularFigures()
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          // Controles
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                _ControlIconButton(
+                                  icon: Icons.skip_previous_rounded,
+                                  iconSize: 30,
+                                  enabled: canGoPrevious,
+                                  scheme: scheme,
+                                  onPressed: controller.previous,
+                                  tooltip: 'Anterior',
+                                ),
+                                _PlayButton(
+                                  isPlaying: isPlaying,
+                                  onPressed: canPlayPause
+                                      ? (isPlaying
+                                          ? controller.pause
+                                          : controller.play)
+                                      : null,
+                                  scheme: scheme,
+                                  size: 56,
+                                ),
+                                _ControlIconButton(
+                                  icon: Icons.skip_next_rounded,
+                                  iconSize: 30,
+                                  enabled: canGoNext,
+                                  scheme: scheme,
+                                  onPressed: controller.next,
+                                  tooltip: 'Siguiente',
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-
-                      // --- Controles ---
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            _ControlIconButton(
-                              icon: Icons.skip_previous_rounded,
-                              iconSize: 30,
-                              enabled: canGoPrevious,
-                              scheme: scheme,
-                              onPressed: controller.previous,
-                              tooltip: 'Anterior',
-                            ),
-                            _PlayButton(
-                              isPlaying: isPlaying,
-                              onPressed: canPlayPause
-                                  ? (isPlaying
-                                      ? controller.pause
-                                      : controller.play)
-                                  : null,
-                              scheme: scheme,
-                              size: 56,
-                            ),
-                            _ControlIconButton(
-                              icon: Icons.skip_next_rounded,
-                              iconSize: 30,
-                              enabled: canGoNext,
-                              scheme: scheme,
-                              onPressed: controller.next,
-                              tooltip: 'Siguiente',
-                            ),
-                          ],
+                      // Botón X
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: IconButton(
+                          icon: const Icon(Icons.close_rounded),
+                          iconSize: 18,
+                          color: scheme.onSurfaceVariant,
+                          tooltip: 'Cerrar',
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 32,
+                            minHeight: 32,
+                          ),
+                          onPressed: _animatingOut ? null : _closeViaButton,
                         ),
                       ),
                     ],
+                  ),
+                );
+
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onVerticalDragUpdate: _onVerticalDragUpdate,
+                  onVerticalDragEnd: _onVerticalDragEnd,
+                  onVerticalDragCancel: _onDragCancel,
+                  child: Opacity(
+                    opacity: _effectiveOpacity,
+                    child: Transform.translate(
+                      offset: _effectiveOffset,
+                      child: card,
+                    ),
                   ),
                 );
               },
@@ -231,7 +493,7 @@ class MiniPlayerCard extends StatelessWidget {
 }
 
 // ============================================================
-// MINIPLAYER TIPO BARRA FLOTANTE (móvil, sobre el contenido)
+// MINIPLAYER TIPO BARRA FLOTANTE (móvil)
 // ============================================================
 class MiniPlayerBar extends StatefulWidget {
   const MiniPlayerBar({super.key});
@@ -252,12 +514,10 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
 
   Offset _dragOffset = Offset.zero;
   double _dragOpacity = 1.0;
-
   Offset _settleOffset = Offset.zero;
   double _settleOpacity = 1.0;
 
   bool _animatingOut = false;
-
   bool _pendingEntrance = false;
 
   String? _lastItemId;
@@ -320,8 +580,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
   double get _effectiveOpacity =>
       (_dragOpacity * _settleOpacity).clamp(0.0, 1.0);
 
-  // ---------- Settle helper ----------
-
   Future<void> _settle({
     required Offset target,
     required double targetOpacity,
@@ -357,18 +615,13 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     onDone?.call();
   }
 
-  // ---------- Cierre (swipe derecha) ----------
-
   Future<void> _closeAndClear() async {
     if (_animatingOut) return;
     setState(() => _animatingOut = true);
-
     await _settle(target: _closeTarget, targetOpacity: 0.0);
     if (!mounted) return;
-
     await PlaybackController.instance.clearQueue();
     if (!mounted) return;
-
     setState(() {
       _animatingOut = false;
       _settleOffset = Offset.zero;
@@ -379,15 +632,11 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     _settleController?.reset();
   }
 
-  // ---------- Ocultar (swipe abajo) ----------
-
   Future<void> _hide() async {
     if (_animatingOut) return;
     setState(() => _animatingOut = true);
-
     await _settle(target: _hideTarget, targetOpacity: 0.0);
     if (!mounted) return;
-
     setState(() {
       _visibility = _MiniPlayerVisibility.hiddenBySwipe;
       _animatingOut = false;
@@ -398,8 +647,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     });
     _settleController?.reset();
   }
-
-  // ---------- Mostrar (tap en FAB) ----------
 
   void _show() {
     if (_visibility == _MiniPlayerVisibility.visible) return;
@@ -416,13 +663,7 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     });
   }
 
-  // ---------- Snap-back ----------
-
-  void _snapBack() {
-    _settle(target: Offset.zero, targetOpacity: 1.0);
-  }
-
-  // ---------- Gestos ----------
+  void _snapBack() => _settle(target: Offset.zero, targetOpacity: 1.0);
 
   void _onHorizontalDragUpdate(DragUpdateDetails d) {
     if (_animatingOut) return;
@@ -482,7 +723,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
         final song = controller.currentSong;
         final itemId = mediaSnap.data?.id;
 
-        // --- Sin canción actual ---
         if (song == null || mediaSnap.data == null) {
           if (_lastItemId != null ||
               _dragOffset != Offset.zero ||
@@ -500,7 +740,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
           return const SizedBox.shrink();
         }
 
-        // --- Hay canción ---
         if (_lastItemId != itemId) {
           _lastItemId = itemId;
           if (!_pendingEntrance) {
@@ -520,7 +759,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
           }
         }
 
-        // --- Animación de entrada ---
         if (_pendingEntrance) {
           _pendingEntrance = false;
           _settleController?.reset();
@@ -536,12 +774,11 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
           });
         }
 
-        // --- Estado oculto: FAB para restaurar ---
         if (_visibility == _MiniPlayerVisibility.hiddenBySwipe) {
           return Align(
-            alignment: Alignment.bottomRight,
+            alignment: Alignment.bottomLeft,
             child: Padding(
-              padding: const EdgeInsets.only(right: 16, bottom: 16),
+              padding: const EdgeInsets.only(left: 12, bottom: 12),
               child: TweenAnimationBuilder<double>(
                 tween: Tween(begin: 0.0, end: 1.0),
                 duration: const Duration(milliseconds: 260),
@@ -550,48 +787,41 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                   return Opacity(
                     opacity: t,
                     child: Transform.translate(
-                      offset: Offset(0, (1 - t) * 24),
+                      offset: Offset(0, (1 - t) * 16),
                       child: child,
                     ),
                   );
                 },
-                child: Material(
-                  color: Colors.transparent,
-                  shape: const CircleBorder(),
-                  elevation: 6,
-                  child: Ink(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          scheme.primary,
-                          Color.lerp(
-                            scheme.primary,
-                            scheme.tertiary,
-                            0.3,
-                          )!,
-                        ],
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withValues(alpha: 0.92),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.white.withValues(alpha: 0.28),
+                        blurRadius: 10,
+                        spreadRadius: 0,
                       ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: scheme.primary.withValues(alpha: 0.35),
-                          blurRadius: 16,
-                          offset: const Offset(0, 6),
-                        ),
-                      ],
-                    ),
+                      BoxShadow(
+                        color: scheme.shadow.withValues(alpha: 0.18),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Material(
+                    color: Colors.transparent,
+                    shape: const CircleBorder(),
+                    clipBehavior: Clip.antiAlias,
                     child: InkWell(
                       customBorder: const CircleBorder(),
                       onTap: _show,
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Icon(
-                          Icons.play_circle_fill_rounded,
-                          color: scheme.onPrimary,
-                          size: 30,
-                        ),
+                      child: const Icon(
+                        Icons.keyboard_arrow_up_rounded,
+                        color: Colors.black,
+                        size: 26,
                       ),
                     ),
                   ),
@@ -601,7 +831,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
           );
         }
 
-        // --- Estado visible: miniplayer + gestos ---
         return StreamBuilder<bool>(
           stream: controller.isPlaying,
           initialData: controller.handler.isPlaying,
@@ -618,7 +847,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                         .clamp(0.0, 1.0)
                     : 0.0;
 
-                // --- Estado de los botones ---
                 final canGoPrevious =
                     controller.hasPrevious || position > _kRestartThreshold;
                 final canGoNext = controller.hasNext;
@@ -720,8 +948,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                                   ),
                                 ),
                                 const SizedBox(width: 4),
-
-                                // Previous (desactivable)
                                 _ControlIconButton(
                                   icon: Icons.skip_previous_rounded,
                                   iconSize: 24,
@@ -731,7 +957,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                                   tooltip: 'Anterior',
                                   compact: true,
                                 ),
-
                                 _PlayButton(
                                   isPlaying: isPlaying,
                                   onPressed: isPlaying
@@ -740,8 +965,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                                   scheme: scheme,
                                   size: 40,
                                 ),
-
-                                // Next (desactivable)
                                 _ControlIconButton(
                                   icon: Icons.skip_next_rounded,
                                   iconSize: 24,
@@ -786,7 +1009,7 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
 }
 
 // ============================================================
-// BOTÓN DE CONTROL REUTILIZABLE (previous/next con estado enabled)
+// BOTÓN DE CONTROL REUTILIZABLE
 // ============================================================
 class _ControlIconButton extends StatelessWidget {
   final IconData icon;
@@ -896,7 +1119,7 @@ class _PlayButton extends StatelessWidget {
 }
 
 // ============================================================
-// CARÁTULA COMPARTIDA (mejorada)
+// CARÁTULA COMPARTIDA
 // ============================================================
 class _MiniCover extends StatelessWidget {
   final Song song;

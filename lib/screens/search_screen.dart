@@ -344,12 +344,12 @@ class _SearchScreenState extends State<SearchScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
         insetPadding: const EdgeInsets.symmetric(
-          horizontal: 16,
+          horizontal: 32,   // antes 16
           vertical: 24,
         ),
         child: ConstrainedBox(
           constraints: const BoxConstraints(
-            maxWidth: 520,
+            maxWidth: 380,   // antes 520
             maxHeight: 640,
           ),
           child: ClipRRect(

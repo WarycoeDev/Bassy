@@ -169,11 +169,11 @@ class _InputDialogState extends State<_InputDialog> {
       ),
       clipBehavior: Clip.antiAlias,
       insetPadding: const EdgeInsets.symmetric(
-        horizontal: 16,
+        horizontal: 32,
         vertical: 24,
       ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
+        constraints: const BoxConstraints(maxWidth: 380),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
           child: Column(
@@ -228,7 +228,11 @@ class _InputDialogState extends State<_InputDialog> {
                   children: [
                     for (final s in widget.suggestions!)
                       ActionChip(
-                        label: Text(s),
+                        label: Text(
+                          s,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                         onPressed: () {
                           _controller.text = s;
                           _controller.selection =
@@ -242,14 +246,26 @@ class _InputDialogState extends State<_InputDialog> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  TextButton(
-                    onPressed: _cancel,
-                    child: Text(widget.cancelLabel),
+                  Flexible(
+                    child: TextButton(
+                      onPressed: _cancel,
+                      child: Text(
+                        widget.cancelLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                   ),
                   const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: _canConfirm ? _confirm : null,
-                    child: Text(widget.confirmLabel),
+                  Flexible(
+                    child: FilledButton(
+                      onPressed: _canConfirm ? _confirm : null,
+                      child: Text(
+                        widget.confirmLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                   ),
                 ],
               ),

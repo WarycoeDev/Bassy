@@ -310,39 +310,39 @@ class SongContextMenu {
   /// El layout interno de [PlaylistDetailScreen] no se modifica: solo se
   /// envuelve en un [Dialog] con tamaño acotado y esquinas redondeadas.
   static void _openPlaylist(BuildContext context, Playlist playlist) {
-    showDialog<void>(
-      context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.45),
-      builder: (dialogContext) {
-        final scheme = Theme.of(dialogContext).colorScheme;
+  showDialog<void>(
+    context: context,
+    barrierColor: Colors.black.withValues(alpha: 0.45),
+    builder: (dialogContext) {
+      final scheme = Theme.of(dialogContext).colorScheme;
 
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          insetPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 24,
+      return Dialog(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        insetPadding: const EdgeInsets.symmetric(
+          horizontal: 32,
+          vertical: 24,
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(
+            maxWidth: 380,
+            maxHeight: 640,
           ),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(
-              maxWidth: 520,
-              maxHeight: 640,
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: Material(
-                color: scheme.surface,
-                child: PlaylistDetailScreen(
-                  playlist: playlist,
-                  showBackButton: false,
-                ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Material(
+              color: scheme.surface,
+              child: PlaylistDetailScreen(
+                playlist: playlist,
+                showBackButton: false,
               ),
             ),
           ),
-        );
-      },
-    );
-  }
+        ),
+      );
+    },
+  );
+}
 
   static Playlist? _findAlbum(Song song) {
     if (!song.hasAlbum) return null;

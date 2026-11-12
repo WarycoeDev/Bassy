@@ -341,7 +341,7 @@ class _DrawerHeader extends StatelessWidget {
 // ============================================================
 // PANEL LATERAL (tablet / PC)
 // ============================================================
-class _DrawerPanel extends StatelessWidget {
+class _DrawerPanel extends StatefulWidget {
   final int selectedIndex;
   final ValueChanged<int> onItemTapped;
   final List<_NavDestination> destinations;
@@ -355,23 +355,79 @@ class _DrawerPanel extends StatelessWidget {
   });
 
   @override
+  State<_DrawerPanel> createState() => _DrawerPanelState();
+}
+
+class _DrawerPanelState extends State<_DrawerPanel> {
+  final GlobalKey _cardKey = GlobalKey();
+
+  /// Alto real que ocupa el miniplayer (0 si no hay canción).
+  double _cardHeight = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measureCard());
+  }
+
+  void _measureCard() {
+    if (!mounted) return;
+    final box = _cardKey.currentContext?.findRenderObject() as RenderBox?;
+    final h = (box != null && box.hasSize) ? box.size.height : 0.0;
+    if ((h - _cardHeight).abs() > 0.5) {
+      setState(() => _cardHeight = h);
+    }
+  }
+
+  bool _onCardSizeChanged(SizeChangedLayoutNotification _) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measureCard());
+    return false;
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Material(
-      color: scheme.surface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      color: widget.scheme.surface,
+      child: Stack(
         children: [
-          _DrawerHeader(scheme: scheme),
-          const SizedBox(height: 8),
-          Expanded(
-            child: _NavList(
-              selectedIndex: selectedIndex,
-              onItemTapped: onItemTapped,
-              destinations: destinations,
-              scheme: scheme,
+          // Header + navegación en una sola columna. Solo hace scroll si
+          // el contenido (más el espacio de la tarjeta) no cabe.
+          Positioned.fill(
+            child: SingleChildScrollView(
+              physics: const ClampingScrollPhysics(),
+              padding: EdgeInsets.only(bottom: _cardHeight),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _DrawerHeader(scheme: widget.scheme),
+                  const SizedBox(height: 8),
+                  _NavList(
+                    selectedIndex: widget.selectedIndex,
+                    onItemTapped: widget.onItemTapped,
+                    destinations: widget.destinations,
+                    scheme: widget.scheme,
+                  ),
+                ],
+              ),
             ),
           ),
-          const RepaintBoundary(child: MiniPlayerCard()),
+
+          // MiniPlayer anclado SIEMPRE al fondo del panel
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: NotificationListener<SizeChangedLayoutNotification>(
+              onNotification: _onCardSizeChanged,
+              child: SizeChangedLayoutNotifier(
+                child: SafeArea(
+                  key: _cardKey,
+                  top: false,
+                  child: const RepaintBoundary(child: MiniPlayerCard()),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -398,48 +454,26 @@ class _NavList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final count = destinations.length;
-
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Stack(
+      child: Column(
         children: [
-          // Indicador en la posición del índice seleccionado.
-          Positioned(
-            top: selectedIndex * _itemExtent,
-            left: 0,
-            right: 0,
-            height: _itemExtent,
-            child: IgnorePointer(
-              child: RepaintBoundary(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
+          for (var i = 0; i < destinations.length; i++)
+            SizedBox(
+              height: _itemExtent,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: _HoverableDrawerItem(
+                  icon: i == selectedIndex
+                      ? destinations[i].selectedIcon
+                      : destinations[i].icon,
+                  label: destinations[i].label,
+                  selected: i == selectedIndex,
+                  scheme: scheme,
+                  onTap: () => onItemTapped(i),
                 ),
               ),
             ),
-          ),
-          Column(
-            children: List.generate(count, (i) {
-              final d = destinations[i];
-              final selected = i == selectedIndex;
-              return SizedBox(
-                height: _itemExtent,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: _HoverableDrawerItem(
-                    icon: selected ? d.selectedIcon : d.icon,
-                    label: d.label,
-                    selected: selected,
-                    scheme: scheme,
-                    onTap: () => onItemTapped(i),
-                  ),
-                ),
-              );
-            }),
-          ),
         ],
       ),
     );
@@ -480,6 +514,14 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
         ? scheme.onSurface
         : scheme.onSurfaceVariant;
 
+    // El fondo de selección/hover se pinta aquí mismo (antes lo hacía
+    // el Positioned del Stack en _NavList, que se desalineaba al scrollear).
+    final bg = selected
+        ? scheme.surfaceContainerHigh
+        : (_hovering
+            ? scheme.surfaceContainer.withValues(alpha: 0.5)
+            : Colors.transparent);
+
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hovering = true),
@@ -490,9 +532,7 @@ class _HoverableDrawerItemState extends State<_HoverableDrawerItem> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14),
           decoration: BoxDecoration(
-            color: (!selected && _hovering)
-                ? scheme.surfaceContainer.withValues(alpha: 0.5)
-                : Colors.transparent,
+            color: bg,
             borderRadius: BorderRadius.circular(14),
           ),
           child: Row(

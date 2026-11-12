@@ -57,12 +57,12 @@ class ActionMenu {
           ),
           clipBehavior: Clip.antiAlias,
           insetPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
+            horizontal: 32,
             vertical: 24,
           ),
           child: ConstrainedBox(
             constraints: const BoxConstraints(
-              maxWidth: 520,
+              maxWidth: 380,
               maxHeight: 640,
             ),
             child: Column(
@@ -128,7 +128,7 @@ class ActionMenu {
                               if (i != actions.length - 1)
                                 Divider(
                                   height: 1,
-                                  indent: 56,
+                                  indent: 52,
                                   color: scheme.outlineVariant.withValues(
                                     alpha: 0.5,
                                   ),
@@ -154,6 +154,7 @@ class ActionMenu {
                         child: Center(
                           child: Text(
                             cancelLabel,
+                            textAlign: TextAlign.center,
                             style: TextStyle(
                               color: scheme.primary,
                               fontWeight: FontWeight.w600,
@@ -202,7 +203,7 @@ class ActionMenu {
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
       ),
-      constraints: const BoxConstraints(minWidth: 260, maxWidth: 520),
+      constraints: const BoxConstraints(minWidth: 220, maxWidth: 320),
       items: [
         PopupMenuItem<void>(
           enabled: false,
@@ -253,9 +254,13 @@ class _PopupActionRow extends StatelessWidget {
       children: [
         Icon(action.icon, color: color, size: 20),
         const SizedBox(width: 12),
-        Text(
-          action.label,
-          style: TextStyle(color: color, fontSize: 14),
+        Flexible(
+          child: Text(
+            action.label,
+            style: TextStyle(color: color, fontSize: 14),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
       ],
     );
@@ -297,10 +302,10 @@ class _MenuHeader extends StatelessWidget {
                 borderRadius: BorderRadius.circular(10),
                 child: Image.file(
                   File(coverPath!),
-                  width: 56,
-                  height: 56,
+                  width: 48,
+                  height: 48,
                   fit: BoxFit.cover,
-                  cacheWidth: 168,
+                  cacheWidth: 144,
                   gaplessPlayback: true,
                   errorBuilder: (_, __, ___) => _fallbackCover(scheme),
                 ),
@@ -313,10 +318,10 @@ class _MenuHeader extends StatelessWidget {
         children: [
           if (leadingWidget != null) ...[
             leadingWidget,
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
           ] else ...[
             _fallbackCover(scheme),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
           ],
           Expanded(
             child: Column(
@@ -356,8 +361,8 @@ class _MenuHeader extends StatelessWidget {
 
   Widget _fallbackCover(ColorScheme scheme) {
     return Container(
-      width: 56,
-      height: 56,
+      width: 48,
+      height: 48,
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(10),
@@ -365,7 +370,7 @@ class _MenuHeader extends StatelessWidget {
       child: Icon(
         fallbackIcon,
         color: scheme.onSurfaceVariant,
-        size: 26,
+        size: 24,
       ),
     );
   }
@@ -397,9 +402,11 @@ class _MenuActionTile extends StatelessWidget {
       title: Text(
         action.label,
         style: TextStyle(color: color, fontSize: 15),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
       ),
       onTap: onTap,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
       visualDensity: VisualDensity.standard,
     );
   }
