@@ -1,4 +1,3 @@
-// lib/services/playback_audio_handler.dart
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -9,7 +8,6 @@ import 'package:just_audio/just_audio.dart';
 
 import '../models/song.dart';
 
-/// Modo de repetición expuesto a la UI.
 enum PlayerRepeatMode { off, all, one }
 
 class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
@@ -39,25 +37,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   static const _rewindThreshold = Duration(seconds: 3);
 
-  // ---- Shuffle / Repeat ----
-
   bool _shuffleEnabled = false;
   PlayerRepeatMode _repeatMode = PlayerRepeatMode.off;
 
   List<Song> _originalOrder = const [];
 
-  // ---- Volumen (persistente, con ValueNotifier) ----
-  //
-  // `ValueNotifier` en lugar de `StreamController` porque:
-  //  - Siempre tiene el último valor disponible para nuevos oyentes y
-  //    builds síncronos (evita el "slider salta al soltar").
-  //  - `_volumeNotifier.value = v` es síncrono: el `ValueListenableBuilder`
-  //    lo ve en el mismo frame.
-
   double _volume = 1.0;
   final ValueNotifier<double> _volumeNotifier = ValueNotifier<double>(1.0);
-
-  // ---- Streams reactivos ----
 
   final _shuffleCtrl = StreamController<bool>.broadcast();
   final _repeatCtrl = StreamController<PlayerRepeatMode>.broadcast();
@@ -260,8 +246,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
-  // ---------- Getters ----------
-
   bool get hasNext {
     if (_queueSource == null) return false;
     return _currentIndex >= 0 && _currentIndex < _songs.length - 1;
@@ -288,8 +272,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get shuffleEnabled => _shuffleEnabled;
   PlayerRepeatMode get repeatMode => _repeatMode;
 
-  // ---------- Emisión reactiva ----------
-
   void _emitCanGoPrevious() {
     final next = canGoPrevious;
     if (next == _canGoPrevious) return;
@@ -315,8 +297,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<bool> get shuffleStream => _shuffleCtrl.stream;
   Stream<PlayerRepeatMode> get repeatStream => _repeatCtrl.stream;
 
-  // ---------- API pública ----------
-
   List<Song> get songs => List.unmodifiable(_songs);
 
   Song? get currentSong =>
@@ -331,8 +311,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<Duration> get positionStream => _player.positionStream;
   Stream<Duration?> get durationStream => _player.durationStream;
   Stream<bool> get playingStream => _player.playingStream;
-
-  // ---------- Shuffle / Repeat ----------
 
   Future<void> setShuffle(bool enabled) async {
     if (_shuffleEnabled == enabled) return;
@@ -463,11 +441,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     await _applyLoopMode();
-    await _player.setVolume(_volume); // reafirma persistencia
+    await _player.setVolume(_volume);
     _emitControlsState();
   }
-
-  // ---------- Control de cola ----------
 
   bool _isPlayable(Song s) {
     final p = s.path;
@@ -560,9 +536,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _currentIndex = newStart;
 
     await _applyLoopMode();
-
-    // Persistencia de volumen entre canciones: no dependemos de que
-    // just_audio lo conserve, lo reafirmamos.
     await _player.setVolume(_volume);
 
     if (autoPlay) {
@@ -649,6 +622,48 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _emitControlsState();
   }
 
+  Future<void> reorderQueue(int oldIndex, int newIndex) async {
+  if (oldIndex < 0 || oldIndex >= _songs.length) return;
+  if (newIndex < 0 || newIndex > _songs.length) return;
+  if (oldIndex == newIndex) return;
+
+  final source = _queueSource;
+  if (source == null) return;
+
+  final targetIndex = newIndex > oldIndex ? newIndex - 1 : newIndex;
+  if (oldIndex == targetIndex) return;
+
+  // Todo esto es síncrono (antes del primer await).
+  final updated = List<Song>.from(_songs);
+  final moved = updated.removeAt(oldIndex);
+  updated.insert(targetIndex, moved);
+  _songs = updated;
+
+  if (_currentIndex == oldIndex) {
+    _currentIndex = targetIndex;
+  } else if (oldIndex < _currentIndex && targetIndex >= _currentIndex) {
+    _currentIndex--;
+  } else if (oldIndex > _currentIndex && targetIndex <= _currentIndex) {
+    _currentIndex++;
+  }
+
+  if (_originalOrder.isNotEmpty && oldIndex < _originalOrder.length) {
+    final original = List<Song>.from(_originalOrder);
+    final movedOriginal = original.removeAt(oldIndex);
+    original.insert(targetIndex.clamp(0, original.length), movedOriginal);
+    _originalOrder = original;
+  }
+
+  // Publicar antes de tocar el audio source.
+  _emitControlsState();
+
+  try {
+    await source.move(oldIndex, targetIndex);
+  } catch (e, st) {
+    debugPrint('PlaybackAudioHandler: move falló -> $e\n$st');
+  }
+}
+
   Future<void> playSong(Song song) async {
     final idx = _songs.indexWhere((s) => s.path == song.path);
     if (idx >= 0 && _queueSource != null) {
@@ -660,8 +675,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   Future<void> playFromQueue(int index) => skipToQueueItem(index);
 
-  // ---------- Velocidad y volumen ----------
-
   Future<void> setSpeed(double speed) async {
     if (speed <= 0) return;
     await _player.setSpeed(speed);
@@ -670,17 +683,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   Future<void> setVolume(double volume) async {
     final v = volume.clamp(0.0, 1.0);
-    // Actualización síncrona del notifier PRIMERO: si esto es un drag
-    // que acaba de terminar, el `ValueListenableBuilder` verá el valor
-    // final en el mismo frame en que se limpia `_volumeValue` en la UI.
     _volume = v;
     _volumeNotifier.value = v;
 
     if ((v - _player.volume).abs() < 0.001) return;
     await _player.setVolume(v);
   }
-
-  // ---------- Overrides ----------
 
   @override
   Future<void> play() async {

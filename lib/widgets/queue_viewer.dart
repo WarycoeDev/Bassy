@@ -1,11 +1,12 @@
-// lib/widgets/queue_viewer.dart
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show FontFeature;
 
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
 import '../services/playback_controller.dart';
+import 'action_menu.dart';
 
 class QueueViewer {
   QueueViewer._();
@@ -72,6 +73,23 @@ class _QueueBodyState extends State<_QueueBody> {
     super.dispose();
   }
 
+  void _handleReorder(int oldIndex, int newIndex) {
+    // La parte síncrona de reorderQueue (hasta su primer await) ya actualiza
+    // el orden, así que el setState refleja el nuevo orden en el mismo frame
+    // del drop y el tile no salta a su posición original.
+    controller.reorderQueue(oldIndex, newIndex);
+    setState(() {});
+  }
+
+  void _handleRemove(int index) {
+    // Nunca eliminar la pista que se está reproduciendo.
+    if (index == controller.currentIndex) return;
+
+    // Dismissible exige que el item ya no esté en el árbol tras onDismissed.
+    controller.removeFromQueue(index);
+    setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -131,7 +149,8 @@ class _QueueBodyState extends State<_QueueBody> {
                     songs: songs,
                     currentIndex: currentIndex,
                     onPlay: controller.playFromQueue,
-                    onRemove: controller.handler.removeFromQueue,
+                    onRemove: _handleRemove,
+                    onReorder: _handleReorder,
                   ),
           ),
         ],
@@ -146,6 +165,7 @@ class _QueueContainer extends StatelessWidget {
   final int currentIndex;
   final void Function(int) onPlay;
   final void Function(int) onRemove;
+  final void Function(int, int) onReorder;
 
   const _QueueContainer({
     required this.scheme,
@@ -153,7 +173,35 @@ class _QueueContainer extends StatelessWidget {
     required this.currentIndex,
     required this.onPlay,
     required this.onRemove,
+    required this.onReorder,
   });
+
+  /// Key única por entrada: si la misma canción aparece varias veces en la
+  /// cola, se añade el número de ocurrencia para evitar colisiones.
+  String _entryKey(int index) {
+    final base = songs[index].path ?? songs[index].title;
+    var occurrence = 0;
+    for (var i = 0; i < index; i++) {
+      if ((songs[i].path ?? songs[i].title) == base) occurrence++;
+    }
+    return '$base#$occurrence';
+  }
+
+  /// Diálogo de confirmación antes de quitar una canción de la cola,
+  /// con el mismo estilo del [ActionMenu].
+  Future<bool> _confirmRemove(BuildContext context, Song song) {
+    return ActionMenu.confirm(
+      context,
+      title: song.title,
+      subtitle: song.subtitle,
+      coverPath: song.coverPath,
+      fallbackIcon: song.kind == MediaKind.podcast
+          ? Icons.mic
+          : Icons.music_note,
+      message: '«${song.title}» se eliminará de la cola de reproducción.',
+      confirmLabel: 'Quitar',
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -172,28 +220,63 @@ class _QueueContainer extends StatelessWidget {
               color: scheme.outlineVariant.withValues(alpha: 0.5),
             ),
           ),
-          child: ListView.separated(
+          child: ReorderableListView.builder(
             shrinkWrap: true,
             padding: const EdgeInsets.symmetric(
               horizontal: 10,
               vertical: 10,
             ),
+            buildDefaultDragHandles: false,
             itemCount: songs.length,
-            separatorBuilder: (_, __) => Divider(
-              height: 1,
-              indent: 64,
-              endIndent: 8,
-              color: scheme.outlineVariant.withValues(alpha: 0.3),
-            ),
+            onReorder: onReorder,
             itemBuilder: (context, index) {
               final song = songs[index];
-              return _QueueTile(
-                song: song,
-                index: index,
-                isCurrent: index == currentIndex,
-                scheme: scheme,
-                onTap: () => onPlay(index),
-                onRemove: () => onRemove(index),
+              final isLast = index == songs.length - 1;
+              final isCurrent = index == currentIndex;
+              final entryKey = _entryKey(index);
+
+              return Column(
+                key: ValueKey('queue-item-$entryKey'),
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Dismissible(
+                    key: ValueKey('dismiss-$entryKey'),
+                    // La pista actual no se puede deslizar para eliminar.
+                    direction: isCurrent
+                        ? DismissDirection.none
+                        : DismissDirection.horizontal,
+                    background: _DismissBg(
+                      scheme: scheme,
+                      alignment: Alignment.centerLeft,
+                      icon: Icons.delete_outline_rounded,
+                      enabled: !isCurrent,
+                    ),
+                    secondaryBackground: _DismissBg(
+                      scheme: scheme,
+                      alignment: Alignment.centerRight,
+                      icon: Icons.delete_outline_rounded,
+                      enabled: !isCurrent,
+                    ),
+                    confirmDismiss: (_) => isCurrent
+                        ? Future.value(false)
+                        : _confirmRemove(context, song),
+                    onDismissed: (_) => onRemove(index),
+                    child: _QueueTile(
+                      song: song,
+                      index: index,
+                      isCurrent: isCurrent,
+                      scheme: scheme,
+                      onTap: () => onPlay(index),
+                    ),
+                  ),
+                  if (!isLast)
+                    Divider(
+                      height: 1,
+                      indent: 64,
+                      endIndent: 8,
+                      color: scheme.outlineVariant.withValues(alpha: 0.3),
+                    ),
+                ],
               );
             },
           ),
@@ -209,7 +292,6 @@ class _QueueTile extends StatelessWidget {
   final bool isCurrent;
   final ColorScheme scheme;
   final VoidCallback onTap;
-  final VoidCallback onRemove;
 
   const _QueueTile({
     required this.song,
@@ -217,7 +299,6 @@ class _QueueTile extends StatelessWidget {
     required this.isCurrent,
     required this.scheme,
     required this.onTap,
-    required this.onRemove,
   });
 
   @override
@@ -289,15 +370,19 @@ class _QueueTile extends StatelessWidget {
                     ),
                   ),
                 ),
-              IconButton(
-                icon: Icon(
-                  Icons.remove_circle_outline_rounded,
-                  color: scheme.onSurfaceVariant,
-                  size: 22,
+              ReorderableDragStartListener(
+                index: index,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 8,
+                  ),
+                  child: Icon(
+                    Icons.drag_handle_rounded,
+                    color: scheme.onSurfaceVariant,
+                    size: 22,
+                  ),
                 ),
-                tooltip: 'Quitar de la cola',
-                visualDensity: VisualDensity.compact,
-                onPressed: onRemove,
               ),
             ],
           ),
@@ -347,6 +432,42 @@ class _QueueCover extends StatelessWidget {
         color: scheme.onSurfaceVariant,
         size: size * 0.5,
       );
+}
+
+class _DismissBg extends StatelessWidget {
+  final ColorScheme scheme;
+  final Alignment alignment;
+  final IconData icon;
+  final bool enabled;
+
+  const _DismissBg({
+    required this.scheme,
+    required this.alignment,
+    required this.icon,
+    this.enabled = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final baseColor = enabled
+        ? scheme.errorContainer
+        : scheme.surfaceContainerHighest;
+
+    return Container(
+      alignment: alignment,
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      decoration: BoxDecoration(
+        color: baseColor.withValues(alpha: 0.9),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Icon(
+        icon,
+        color: enabled
+            ? scheme.onErrorContainer
+            : scheme.onSurfaceVariant.withValues(alpha: 0.4),
+      ),
+    );
+  }
 }
 
 class _EmptyState extends StatelessWidget {

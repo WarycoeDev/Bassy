@@ -1,4 +1,3 @@
-// lib/services/playback_controller.dart
 import 'dart:async';
 
 import 'package:audio_service/audio_service.dart';
@@ -41,8 +40,6 @@ class PlaybackController {
     );
   }
 
-  // ---- Atajos ----
-
   Future<void> setQueue(
     List<Song> songs, {
     int startIndex = 0,
@@ -75,6 +72,11 @@ class PlaybackController {
   Future<void> playFromQueue(int index) => handler.playFromQueue(index);
   Future<void> addToQueue(Song song) => handler.addToQueue(song);
 
+  Future<void> reorderQueue(int oldIndex, int newIndex) =>
+      handler.reorderQueue(oldIndex, newIndex);
+
+  Future<void> removeFromQueue(int index) => handler.removeFromQueue(index);
+
   Future<void> setSpeed(double speed) => handler.setSpeed(speed);
   Future<void> setVolume(double volume) => handler.setVolume(volume);
 
@@ -83,8 +85,6 @@ class PlaybackController {
       handler.setRepeatModeForUI(mode);
 
   Future<void> clearQueue() => handler.clearQueue();
-
-  // ---- Streams ----
 
   Stream<MediaItem?> get currentItem => handler.mediaItem;
   Stream<PlaybackState> get playbackState => handler.playbackState;
@@ -95,8 +95,6 @@ class PlaybackController {
   Stream<bool> get shuffle => handler.shuffleStream;
   Stream<PlayerRepeatMode> get repeat => handler.repeatStream;
 
-  /// Volumen como `ValueListenable` (siempre tiene el último valor,
-  /// ideal para sliders que se arrastran).
   ValueListenable<double> get volume => handler.volumeListenable;
 
   Stream<bool> get canGoPrevious async* {
@@ -149,8 +147,6 @@ class PlaybackController {
     emit();
     yield* controller.stream;
   }
-
-  // ---- Getters ----
 
   List<Song> get songs => _handler?.songs ?? const [];
   Song? get currentSong => _handler?.currentSong;

@@ -2,6 +2,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 /// Acción individual que se muestra en el [ActionMenu].
 class ActionMenuItem {
@@ -30,6 +31,7 @@ class ActionMenuItem {
 /// Dos modos:
 ///  - [show]: bottom sheet (móvil / por defecto).
 ///  - [showAt]: popup anclado a una posición (clic derecho / long-press).
+///  - [confirm]: diálogo de confirmación con el mismo estilo del menú.
 class ActionMenu {
   ActionMenu._();
 
@@ -232,6 +234,161 @@ class ActionMenu {
           ),
       ],
     );
+  }
+
+  // ---------- Confirmación ----------
+
+  /// Diálogo de confirmación con el mismo estilo que el resto del menú.
+  ///
+  /// Reutiliza el header (portada + título + subtítulo) para dar contexto,
+  /// y ofrece un par de botones: cancelar (no destructivo) y confirmar
+  /// (destructivo por defecto). Devuelve `true` si el usuario confirma.
+  static Future<bool> confirm(
+    BuildContext context, {
+    required String message,
+    String? title,
+    String? subtitle,
+    String? coverPath,
+    IconData fallbackIcon = Icons.more_horiz,
+    String confirmLabel = 'Quitar',
+    String cancelLabel = 'Cancelar',
+    IconData confirmIcon = Icons.delete_outline_rounded,
+  }) async {
+    HapticFeedback.mediumImpact();
+
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.5),
+      builder: (ctx) {
+        final scheme = Theme.of(ctx).colorScheme;
+        return Dialog(
+          backgroundColor: scheme.surfaceContainerLow,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          clipBehavior: Clip.antiAlias,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 32,
+            vertical: 24,
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 380),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Header con el mismo estilo que el menú.
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 8, 8, 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _MenuHeader(
+                          title: title,
+                          subtitle: subtitle,
+                          coverPath: coverPath,
+                          fallbackIcon: fallbackIcon,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close),
+                        iconSize: 20,
+                        visualDensity: VisualDensity.compact,
+                        tooltip: 'Cerrar',
+                        onPressed: () => Navigator.pop(ctx, false),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 4),
+                // Mensaje de confirmación.
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+                  child: Text(
+                    message,
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 14.5,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+                // Botones con el mismo lenguaje visual que las acciones.
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Material(
+                          color: scheme.surfaceContainer,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            onTap: () => Navigator.pop(ctx, false),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 14,
+                              ),
+                              child: Center(
+                                child: Text(
+                                  cancelLabel,
+                                  style: TextStyle(
+                                    color: scheme.primary,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 15,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Material(
+                          color: scheme.errorContainer,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            onTap: () => Navigator.pop(ctx, true),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 14,
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    confirmIcon,
+                                    size: 18,
+                                    color: scheme.onErrorContainer,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    confirmLabel,
+                                    style: TextStyle(
+                                      color: scheme.onErrorContainer,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 15,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    return result ?? false;
   }
 }
 
