@@ -55,6 +55,11 @@ class QueuePanel extends StatefulWidget {
 }
 
 class _QueuePanelState extends State<QueuePanel> {
+  /// Altura mínima compartida entre el estado vacío y la lista con pocos
+  /// elementos, para que el panel no cambie de tamaño al vaciarse o al
+  /// tener solo 1-2 ítems. Ajusta este valor a tu gusto.
+  static const double _minPanelHeight = 360;
+
   final controller = PlaybackController.instance;
   final List<StreamSubscription<dynamic>> _subs = [];
 
@@ -128,6 +133,8 @@ class _QueuePanelState extends State<QueuePanel> {
     final isActiveKind = _viewKind == controller.activeQueueKind;
     final currentIndex =
         isActiveKind ? controller.currentIndex : -1;
+
+    final minHeight = widget.embedded ? 0.0 : _minPanelHeight;
 
     return Material(
       color: widget.embedded
@@ -208,21 +215,20 @@ class _QueuePanelState extends State<QueuePanel> {
             color: scheme.outlineVariant.withValues(alpha: 0.5),
           ),
           Flexible(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minHeight: widget.embedded ? 0 : 320,
-              ),
-              child: songs.isEmpty
-                  ? _EmptyState(scheme: scheme, kind: _viewKind)
-                  : _QueueContainer(
-                      scheme: scheme,
-                      songs: songs,
-                      currentIndex: currentIndex,
-                      onPlay: _handlePlay,
-                      onRemove: _handleRemove,
-                      onReorder: _handleReorder,
-                    ),
-            ),
+            child: songs.isEmpty
+                ? SizedBox(
+                    height: minHeight > 0 ? minHeight : null,
+                    child: _EmptyState(scheme: scheme, kind: _viewKind),
+                  )
+                : _QueueContainer(
+                    scheme: scheme,
+                    songs: songs,
+                    currentIndex: currentIndex,
+                    onPlay: _handlePlay,
+                    onRemove: _handleRemove,
+                    onReorder: _handleReorder,
+                    minHeight: minHeight,
+                  ),
           ),
         ],
       ),
@@ -234,6 +240,7 @@ class _QueueContainer extends StatelessWidget {
   final ColorScheme scheme;
   final List<Song> songs;
   final int currentIndex;
+  final double minHeight;
   final Future<void> Function(int) onPlay;
   final Future<void> Function(int) onRemove;
   final Future<void> Function(int, int) onReorder;
@@ -242,6 +249,7 @@ class _QueueContainer extends StatelessWidget {
     required this.scheme,
     required this.songs,
     required this.currentIndex,
+    required this.minHeight,
     required this.onPlay,
     required this.onRemove,
     required this.onReorder,
@@ -281,6 +289,13 @@ class _QueueContainer extends StatelessWidget {
         borderRadius: radius,
         clipBehavior: Clip.antiAlias,
         child: Container(
+          // Compensa el padding vertical (10+10) para que la altura total
+          // del contenedor coincida con la del estado vacío.
+          constraints: BoxConstraints(
+            minHeight: minHeight > 0
+                ? (minHeight - 20).clamp(0, double.infinity)
+                : 0,
+          ),
           decoration: BoxDecoration(
             borderRadius: radius,
             border: Border.all(
@@ -541,6 +556,7 @@ class _DismissBg extends StatelessWidget {
 class _EmptyState extends StatelessWidget {
   final ColorScheme scheme;
   final MediaKind kind;
+
   const _EmptyState({required this.scheme, required this.kind});
 
   @override
