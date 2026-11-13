@@ -9,6 +9,7 @@ import '../models/song.dart';
 import '../services/favorites_store.dart';
 import '../services/media_scanner.dart';
 import '../services/playback_controller.dart';
+import '../widgets/action_menu.dart';
 import '../widgets/nested_navigator_scope.dart';
 import '../widgets/playback_menu.dart';
 import '../widgets/song_tile.dart';
@@ -1011,38 +1012,51 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
                         return Dismissible(
                           key: ValueKey<String>('fav:${song.path}'),
-                          // En modo reordenar desactivamos el swipe para
-                          // no interferir con el drag.
+                          // Deslizar de izquierda a derecha
                           direction: isReorder
                               ? DismissDirection.none
-                              : DismissDirection.endToStart,
+                              : DismissDirection.startToEnd,
+                          
+                          // Fondo que aparece al deslizar (a la izquierda)
                           background: Container(
-                            alignment: Alignment.centerRight,
-                            // Mismo margen que el SongTile para que encaje
+                            alignment: Alignment.centerLeft, // Alineado a la izquierda
                             margin: const EdgeInsets.only(bottom: 10),
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 20),
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
                             decoration: BoxDecoration(
                               color: scheme.errorContainer,
                               borderRadius: BorderRadius.circular(
                                 SongTile.tileRadius,
                               ),
                             ),
-                            // Solo el icono de basurero, sin texto.
                             child: Icon(
                               Icons.delete_outline,
                               color: scheme.onErrorContainer,
                               size: 24,
                             ),
                           ),
+                          
+                          // Mostrar el mismo diálogo de confirmación que la cola
                           confirmDismiss: (_) async {
-                            final removed =
-                                await FavoritesStore.instance.remove(song);
-                            return removed;
+                            final confirmed = await ActionMenu.confirm(
+                              context,
+                              title: song.title,
+                              subtitle: song.subtitle,
+                              coverPath: song.coverPath,
+                              fallbackIcon: song.kind == MediaKind.podcast
+                                  ? Icons.mic
+                                  : Icons.music_note,
+                              message: '«${song.title}» se eliminará de Favoritos.',
+                              confirmLabel: 'Quitar',
+                            );
+                            
+                            if (confirmed) {
+                              await FavoritesStore.instance.remove(song);
+                              return true;
+                            }
+                            return false;
                           },
                           onDismissed: (_) {
-                            final messenger =
-                                ScaffoldMessenger.maybeOf(context);
+                            final messenger = ScaffoldMessenger.maybeOf(context);
                             messenger?.hideCurrentSnackBar();
                             messenger?.showSnackBar(
                               SnackBar(
@@ -1058,8 +1072,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
                               ),
                             );
                           },
-                          // SongTile se encarga del handle y de ocultar
-                          // duración/extensión/peso/menú en modo reordenar.
                           child: SongTile(
                             song: song,
                             queueContext: playlist.songs,
