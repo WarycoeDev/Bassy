@@ -69,100 +69,108 @@ class SongTile extends StatelessWidget {
 
     final bool isInteractive = !reorderMode && !isRemoving;
 
-    final tile = InkWell(
-      onTap: isInteractive ? (onTap ?? () => _defaultOnTap(context)) : null,
+    // IMPORTANTE: el InkWell pinta su splash/highlight sobre el Material
+    // ancestro más cercano. Antes era el del Scaffold, por lo que el efecto
+    // no se recortaba con el scroll del contenedor y se salía de los
+    // límites (y además quedaba tapado por el Container con color).
+    // Ahora cada tile tiene su propio Material (con el color de fondo y el
+    // recorte redondeado), así el efecto vive dentro del tile y se recorta
+    // junto con él.
+    final tile = Material(
+      color: scheme.surfaceContainer,
       borderRadius: BorderRadius.circular(tileRadius),
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainer,
-          borderRadius: BorderRadius.circular(tileRadius),
-        ),
-        child: Row(
-          children: [
-            _buildCover(scheme, cover, hasCover, isPodcast),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    song.title,
-                    style: TextStyle(
-                      color: scheme.onSurface,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    song.artistOrUnknown,
-                    style: TextStyle(
-                      color: scheme.onSurfaceVariant,
-                      fontSize: 12,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
-            if (reorderMode && reorderIndex != null)
-              _buildDragHandle(scheme, reorderIndex!)
-            else
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        song.durationLabel,
-                        style: TextStyle(
-                          color: scheme.onSurfaceVariant,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: isInteractive ? (onTap ?? () => _defaultOnTap(context)) : null,
+        borderRadius: BorderRadius.circular(tileRadius),
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Row(
+            children: [
+              _buildCover(scheme, cover, hasCover, isPodcast),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      song.title,
+                      style: TextStyle(
+                        color: scheme.onSurface,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
                       ),
-                      const SizedBox(height: 2),
-                      Text(
-                        '${song.extension.toUpperCase()} · ${song.sizeLabel}',
-                        style: TextStyle(
-                          color: scheme.onSurfaceVariant,
-                          fontSize: 10,
-                        ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      song.artistOrUnknown,
+                      style: TextStyle(
+                        color: scheme.onSurfaceVariant,
+                        fontSize: 12,
                       ),
-                    ],
-                  ),
-                  const SizedBox(width: 4),
-                  IconButton(
-                    onPressed: onMore ??
-                        () => SongContextMenu.showSheet(
-                              context,
-                              song,
-                              queueContext: queueContext,
-                              queueIndex: queueIndex,
-                            ),
-                    icon: Icon(
-                      Icons.more_vert,
-                      color: scheme.onSurfaceVariant,
-                      size: 20,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    visualDensity: VisualDensity.compact,
-                    style: IconButton.styleFrom(
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                    tooltip: 'Más opciones',
-                  ),
-                ],
+                  ],
+                ),
               ),
-          ],
+              if (reorderMode && reorderIndex != null)
+                _buildDragHandle(scheme, reorderIndex!)
+              else
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          song.durationLabel,
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '${song.extension.toUpperCase()} · ${song.sizeLabel}',
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 10,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(width: 4),
+                    IconButton(
+                      onPressed: onMore ??
+                          () => SongContextMenu.showSheet(
+                                context,
+                                song,
+                                queueContext: queueContext,
+                                queueIndex: queueIndex,
+                              ),
+                      icon: Icon(
+                        Icons.more_vert,
+                        color: scheme.onSurfaceVariant,
+                        size: 20,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      style: IconButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      tooltip: 'Más opciones',
+                    ),
+                  ],
+                ),
+            ],
+          ),
         ),
       ),
     );
