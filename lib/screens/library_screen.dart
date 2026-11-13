@@ -2,7 +2,10 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:bassy/widgets/file_picker_dialog.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../models/playlist.dart';
 import '../models/song.dart';
@@ -11,6 +14,7 @@ import '../services/media_scanner.dart';
 import '../services/playback_controller.dart';
 import '../services/playlists_store.dart';
 import '../widgets/action_menu.dart';
+import '../widgets/directory_picker_dialog.dart';
 import '../widgets/input_menu.dart';
 import '../widgets/nested_navigator_scope.dart';
 import '../widgets/playback_menu.dart';
@@ -327,6 +331,59 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+    Future<void> _importPlaylist() async {
+    // Sugerir Downloads en Android / Documents en desktop.
+    String? initialPath;
+    try {
+      if (Platform.isAndroid) {
+        final ext = await getExternalStorageDirectory();
+        final root = ext?.parent?.parent?.parent?.parent;
+        if (root != null) {
+          final downloads = Directory(
+            '${root.path}${Platform.pathSeparator}Downloads',
+          );
+          if (await downloads.exists()) initialPath = downloads.path;
+        }
+      } else {
+        final docs = await getApplicationDocumentsDirectory();
+        initialPath = docs.path;
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    final path = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => FilePickerDialog(
+        title: 'Importar playlist (.bassy)',
+        initialPath: initialPath,
+        extensions: const ['bassy'],
+      ),
+    );
+    if (path == null || path.trim().isEmpty) return;
+    if (!mounted) return;
+
+    try {
+      final imported =
+          await PlaylistsStore.instance.importFromFile(path);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Playlist «${imported.name}» importada '
+            '(${imported.songPaths.length} canciones)',
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo importar: $e')),
+      );
+    }
+  }
+
   void _openUserPlaylist(BuildContext context, UserPlaylist pl) {
     final all = <Song>[..._songs, ..._podcasts];
     final map = {for (final s in all) s.path: s};
@@ -343,6 +400,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _openPlaylist(context, playlist);
   }
 
+  /// Busca la primera carátula disponible entre las canciones de una
+  /// playlist de usuario.
+  String? _userPlaylistCover(UserPlaylist pl) {
+    if (pl.songPaths.isEmpty) return null;
+    final map = <String, Song>{
+      for (final s in _songs) s.path: s,
+      for (final s in _podcasts) s.path: s,
+    };
+    for (final p in pl.songPaths) {
+      final cover = map[p]?.coverPath;
+      if (cover != null && cover.isNotEmpty) return cover;
+    }
+    return null;
+  }
+
   // ============================================================
   // MENÚ DE OPCIONES DE PLAYLIST (usando ActionMenu)
   // ============================================================
@@ -355,6 +427,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       context,
       title: pl.name,
       subtitle: '${pl.songPaths.length} canciones · .bassy',
+      coverPath: _userPlaylistCover(pl),
       fallbackIcon: Icons.queue_music,
       actions: [
         ActionMenuItem(
@@ -411,8 +484,39 @@ class _LibraryScreenState extends State<LibraryScreen> {
     BuildContext context,
     UserPlaylist pl,
   ) async {
+    // Sugerir Downloads en Android / Documents en desktop.
+    String? initialPath;
     try {
-      final path = await PlaylistsStore.instance.exportTo(pl.id);
+      if (Platform.isAndroid) {
+        final ext = await getExternalStorageDirectory();
+        final root = ext?.parent?.parent?.parent?.parent;
+        if (root != null) {
+          final downloads = Directory(
+            '${root.path}${Platform.pathSeparator}Downloads',
+          );
+          if (await downloads.exists()) initialPath = downloads.path;
+        }
+      } else {
+        final docs = await getApplicationDocumentsDirectory();
+        initialPath = docs.path;
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    final target = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => DirectoryPickerDialog(
+        title: 'Exportar «${pl.name}»',
+        initialPath: initialPath,
+      ),
+    );
+    if (target == null || target.trim().isEmpty) return;
+    if (!mounted) return;
+
+    try {
+      final path =
+          await PlaylistsStore.instance.exportToDirectory(pl.id, target);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -537,13 +641,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-    Widget _buildScrollableContent(BuildContext context) {
+  Widget _buildScrollableContent(BuildContext context) {
     final inline = _inlinePlaylist;
     if (inline != null) {
       return PlaylistDetailScreen(
         playlist: inline,
-        // Favoritos y playlists .bassy necesitan el catálogo para
-        // resolver/reordenar canciones en vivo.
         catalog: (inline.canReorder ||
                 inline.kind == PlaylistKind.custom)
             ? <Song>[..._songs, ..._podcasts]
@@ -771,11 +873,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
         Row(
           children: [
-            _buildIconButton(
-              context,
-              Icons.playlist_add,
-              onTap: _createPlaylist,
-            ),
+
             const SizedBox(width: 8),
             _buildIconButton(
               context,
@@ -1331,7 +1429,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-    Widget _buildPlaylists(BuildContext context) {
+  Widget _buildPlaylists(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();
 
     return AnimatedBuilder(
@@ -1378,27 +1476,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  /// Busca la primera carátula disponible entre las canciones de la
-  /// playlist de usuario (resolviendo `songPaths` contra el catálogo
-  /// actual de `_songs` + `_podcasts`).
-  String? _userPlaylistCover(UserPlaylist pl) {
-    if (pl.songPaths.isEmpty) return null;
-    // Índice path → Song para no recorrer el catálogo por cada path.
-    final map = <String, Song>{
-      for (final s in _songs) s.path: s,
-      for (final s in _podcasts) s.path: s,
-    };
-    for (final p in pl.songPaths) {
-      final song = map[p];
-      final cover = song?.coverPath;
-      if (cover != null && cover.isNotEmpty) return cover;
-    }
-    return null;
-  }
-
-  /// Carátula cuadrada 64×64 con esquinas redondeadas; si no hay
-  /// imagen, muestra el icono `queue_music` con el mismo estilo que
-  /// las demás tarjetas del listado.
+  /// Carátula cuadrada 64×64 con esquinas redondeadas para el listado.
   Widget _buildUserPlaylistCover(
     BuildContext context, {
     required String? coverPath,
@@ -1453,10 +1531,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 fontWeight: FontWeight.bold,
               ),
             ),
-            FilledButton.tonalIcon(
-              onPressed: _createPlaylist,
-              icon: const Icon(Icons.add, size: 18),
-              label: const Text('Nueva'),
+            Row(
+              children: [
+                IconButton.filledTonal(
+                  onPressed: _importPlaylist,
+                  tooltip: 'Importar .bassy',
+                  icon: const Icon(
+                    Icons.ios_share,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonalIcon(
+                  onPressed: _createPlaylist,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('Nueva'),
+                ),
+              ],
             ),
           ],
         ),

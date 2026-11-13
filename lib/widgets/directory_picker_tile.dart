@@ -1,5 +1,7 @@
-import 'package:file_picker/file_picker.dart';
+// lib/widgets/directory_picker_tile.dart
 import 'package:flutter/material.dart';
+
+import 'directory_picker_dialog.dart';
 
 class DirectoryPickerTile extends StatelessWidget {
   final String label;
@@ -19,8 +21,12 @@ class DirectoryPickerTile extends StatelessWidget {
 
   Future<void> _add(BuildContext context) async {
     try {
-      final selected = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: 'Selecciona una carpeta',
+      final selected = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => DirectoryPickerDialog(
+          title: 'Selecciona una carpeta',
+        ),
       );
       if (selected == null || selected.trim().isEmpty) return;
       if (directories.contains(selected)) return;

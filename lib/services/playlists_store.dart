@@ -305,12 +305,16 @@ class PlaylistsStore extends ChangeNotifier {
   // Exportación
   // ============================================================
 
-  /// Exporta el archivo `.bassy` a una carpeta pública accesible:
-  ///  - Android: intenta `<externalFilesDir>/../Downloads/` y, si no
-  ///    existe, cae a `<externalFilesDir>/exports/`.
-  ///  - Desktop: `<documentsDir>/Bassy/exports/`.
+  /// Copia el archivo `.bassy` de la playlist a [targetDirPath], usando
+  /// el **nombre** de la playlist como nombre de archivo (saneado para
+  /// el sistema de archivos). Si ya existe, añade sufijo `_1`, `_2`, …
   /// Devuelve la ruta final del archivo exportado.
-  Future<String> exportTo(String id) async {
+  Future<String> exportToDirectory(String id, String targetDirPath) async {
+    final pl = _playlists[id];
+    if (pl == null) {
+      throw FileSystemException('Playlist no encontrada', id);
+    }
+
     final dir = await _resolveDirectory();
     final source =
         File('${dir.path}${Platform.pathSeparator}$id$fileExtension');
@@ -318,6 +322,33 @@ class PlaylistsStore extends ChangeNotifier {
       throw FileSystemException('No existe el archivo', source.path);
     }
 
+    final targetDir = Directory(targetDirPath);
+    if (!await targetDir.exists()) {
+      await targetDir.create(recursive: true);
+    }
+
+    final base = _sanitizeFileName(pl.name);
+    var fileName = '$base$fileExtension';
+    var target =
+        File('${targetDir.path}${Platform.pathSeparator}$fileName');
+    var counter = 1;
+    while (await target.exists()) {
+      fileName = '${base}_$counter$fileExtension';
+      target =
+          File('${targetDir.path}${Platform.pathSeparator}$fileName');
+      counter++;
+    }
+
+    await source.copy(target.path);
+    return target.path;
+  }
+
+  /// Atajo: exporta el `.bassy` a una carpeta pública predefinida:
+  ///  - Android: intenta `<externalFilesDir>/../Downloads/` y, si no
+  ///    existe, cae a `<externalFilesDir>/exports/`.
+  ///  - Desktop: `<documentsDir>/Bassy/exports/`.
+  /// Devuelve la ruta final del archivo exportado.
+  Future<String> exportTo(String id) async {
     final Directory targetDir;
     if (Platform.isAndroid) {
       final ext = await getExternalStorageDirectory();
@@ -355,14 +386,106 @@ class PlaylistsStore extends ChangeNotifier {
       );
     }
 
-    if (!await targetDir.exists()) {
-      await targetDir.create(recursive: true);
+    return exportToDirectory(id, targetDir.path);
+  }
+
+  /// Sanea un nombre para usarlo como nombre de archivo:
+  ///  - Quita caracteres problemáticos (`\/:*?"<>|` y control chars).
+  ///  - Trim y colapsa espacios múltiples.
+  ///  - Quita puntos finales (Windows no los permite al final).
+  ///  - Si queda vacío, usa `playlist`.
+  ///  - Trunca a 80 caracteres.
+  String _sanitizeFileName(String raw) {
+    var s = raw.trim();
+    s = s.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '');
+    s = s.replaceAll(RegExp(r'\s+'), ' ');
+    s = s.replaceAll(RegExp(r'\.+$'), '');
+    s = s.trim();
+    if (s.isEmpty) s = 'playlist';
+    if (s.length > 80) s = s.substring(0, 80).trimRight();
+    return s;
+  }
+
+  // ============================================================
+  // Importación
+  // ============================================================
+
+  /// Importa una playlist desde un archivo `.bassy` externo.
+  ///
+  /// - Valida que el JSON tenga `name` y `songPaths`.
+  /// - Si el `id` ya existe en el store, genera uno nuevo
+  ///   (`pl_<micros>`) para no pisar la existente.
+  /// - Si el nombre ya existe, sufija `" (importada)"`.
+  /// - Escribe el archivo dentro de `playlists/` y actualiza el store.
+  ///
+  /// Devuelve la playlist importada.
+  Future<UserPlaylist> importFromFile(String sourceFilePath) async {
+    final source = File(sourceFilePath);
+    if (!await source.exists()) {
+      throw FileSystemException('El archivo no existe', sourceFilePath);
     }
 
-    final target = File(
-      '${targetDir.path}${Platform.pathSeparator}$id$fileExtension',
+    final raw = await source.readAsString();
+    if (raw.trim().isEmpty) {
+      throw const FormatException('El archivo está vacío');
+    }
+
+    final Map<String, dynamic> json;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('Formato JSON inválido');
+      }
+      json = decoded;
+    } on FormatException {
+      rethrow;
+    } catch (e) {
+      throw FormatException('No se pudo parsear el JSON: $e');
+    }
+
+    final rawName = json['name'];
+    final rawSongs = json['songPaths'];
+    if (rawName is! String || rawName.trim().isEmpty) {
+      throw const FormatException('Falta el campo "name"');
+    }
+    if (rawSongs is! List) {
+      throw const FormatException('Falta el campo "songPaths"');
+    }
+    final songPaths = rawSongs.whereType<String>().toList();
+
+    final now = DateTime.now();
+    String id = (json['id'] is String && (json['id'] as String).isNotEmpty)
+        ? json['id'] as String
+        : 'pl_${now.microsecondsSinceEpoch}';
+
+    // Si el id ya existe, generamos uno nuevo para no pisar.
+    if (_playlists.containsKey(id)) {
+      id = 'pl_${now.microsecondsSinceEpoch}';
+    }
+
+    // Si el nombre ya existe, sufijamos " (importada)".
+    var name = rawName.trim();
+    if (_playlists.values.any((p) => p.name == name)) {
+      name = '$name (importada)';
+    }
+
+    final created = UserPlaylist(
+      id: id,
+      name: name,
+      songPaths: songPaths,
+      createdAt: now,
+      updatedAt: now,
     );
-    await source.copy(target.path);
-    return target.path;
+
+    final dir = await _resolveDirectory();
+    final file =
+        File('${dir.path}${Platform.pathSeparator}$id$fileExtension');
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(created.toJson()),
+    );
+
+    _playlists[id] = created;
+    notifyListeners();
+    return created;
   }
 }
