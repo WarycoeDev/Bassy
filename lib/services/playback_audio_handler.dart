@@ -180,6 +180,31 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get isActiveQueueEmpty => _activeQueue.isEmpty;
 
   // ============================================================
+  // DEDUPE (clave = path o title)
+  // ============================================================
+
+  String _songKey(Song s) =>
+      (s.path != null && s.path!.isNotEmpty) ? s.path! : s.title;
+
+  /// Deduplica por `path` (o `title` como fallback), preservando el orden.
+  /// Devuelve la lista limpia y el mapa oldIndex -> newIndex.
+  ({List<Song> unique, Map<int, int> indexMap}) _dedupeSongs(
+    List<Song> input,
+  ) {
+    final seen = <String>{};
+    final unique = <Song>[];
+    final map = <int, int>{};
+    for (var i = 0; i < input.length; i++) {
+      final key = _songKey(input[i]);
+      if (seen.add(key)) {
+        map[i] = unique.length;
+        unique.add(input[i]);
+      }
+    }
+    return (unique: unique, indexMap: map);
+  }
+
+  // ============================================================
   // ORDEN FÍSICO DE LA FUENTE (shuffle propio)
   // ============================================================
 
@@ -555,6 +580,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   /// Reemplaza la cola de [kind]. Si [kind] es la activa, recarga el
   /// reproductor; si no, solo guarda datos y NO interrumpe la reproducción.
+  /// La lista entrante se deduplica (primera aparición gana).
   Future<void> setQueueOf(
     MediaKind kind,
     List<Song> songs, {
@@ -587,13 +613,20 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (startIndex < 0 || startIndex >= songs.length) startIndex = 0;
 
     final target = songs[startIndex];
+
+    // --- Dedupe preservando orden (primera aparición gana) ---
+    final dedup = _dedupeSongs(songs);
+    songs = dedup.unique;
+
     final playable = songs.where(_isPlayable).toList();
     if (playable.isEmpty) {
       debugPrint('PlaybackAudioHandler: no hay fuentes válidas en la cola');
       await _clearQueueOf(kind);
       return;
     }
-    var newStart = playable.indexWhere((s) => identical(s, target));
+    // Buscar la canción objetivo en la lista limpia por su clave.
+    final targetKey = _songKey(target);
+    var newStart = playable.indexWhere((s) => _songKey(s) == targetKey);
     if (newStart < 0) newStart = 0;
 
     final targetQueue = _queueFor(kind);
@@ -857,6 +890,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (!_isPlayable(song)) return;
 
     final q = _queueFor(kind);
+
+    // --- No duplicar: ignorar si ya existe en esta cola ---
+    final key = _songKey(song);
+    if (q.songs.any((s) => _songKey(s) == key)) {
+      debugPrint('PlaybackAudioHandler: canción ya en la cola ($key)');
+      return;
+    }
 
     // Si la cola no está activa: solo datos.
     if (kind != _activeQueue.kind) {
