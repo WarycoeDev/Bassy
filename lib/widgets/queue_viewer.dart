@@ -37,16 +37,6 @@ class QueueViewer {
   }
 }
 
-/// Panel de la cola de reproducción.
-///
-/// Si [embedded] es `true` no muestra botón de cerrar (se usa dentro de
-/// la tarjeta flotante del layout de escritorio). Si es `false` muestra
-/// la cabecera con botón de cierre para usarlo dentro de un Dialog.
-///
-/// Muestra un selector Música / Capítulos para visualizar/editar
-/// **ambas** colas independientemente de cuál esté activa.
-///
-/// La lista se centra automáticamente en el elemento que está sonando.
 class QueuePanel extends StatefulWidget {
   final bool embedded;
 
@@ -57,27 +47,19 @@ class QueuePanel extends StatefulWidget {
 }
 
 class _QueuePanelState extends State<QueuePanel> {
-  /// Altura mínima compartida entre el estado vacío y la lista con pocos
-  /// elementos, para que el panel no cambie de tamaño al vaciarse o al
-  /// tener solo 1-2 ítems. Ajusta este valor a tu gusto.
   static const double _minPanelHeight = 360;
-
-  /// Alto fijo de cada fila: tile (8 + 52 + 8) + divisor (1).
-  /// Si cambias el tamaño de la portada o el padding del tile, ajústalo.
-  static const double _itemExtent = 69;
-
-  /// Padding vertical superior de la lista (debe coincidir con el de
-  /// `_QueueContainer`).
+  static const double _itemHeightEstimate = 69;
   static const double _listTopPadding = 10;
 
   final controller = PlaybackController.instance;
   final List<StreamSubscription<dynamic>> _subs = [];
   final ScrollController _scroll = ScrollController();
 
-  /// Cola que el panel está mostrando (no necesariamente la activa).
   MediaKind _viewKind = MediaKind.music;
 
-  // Estado del auto-scroll.
+  /// Canciones en proceso de animación de salida.
+  final Set<String> _removingIds = {};
+
   int _lastIndex = -2;
   MediaKind? _lastKind;
   bool _firstScroll = true;
@@ -103,7 +85,6 @@ class _QueuePanelState extends State<QueuePanel> {
     );
     _subs.add(controller.handler.activeQueueStream.listen((kind) {
       if (!mounted) return;
-      // Seguimos a la cola activa.
       setState(() => _viewKind = kind);
     }));
   }
@@ -117,17 +98,15 @@ class _QueuePanelState extends State<QueuePanel> {
     super.dispose();
   }
 
-  /// Centra el elemento actual cuando cambia (o al cambiar de pestaña).
-  /// La primera vez salta sin animación; después anima.
   void _maybeAutoScroll(int currentIndex, int itemCount) {
-    // Nada que mostrar: no consumimos el "primer scroll".
-    if (itemCount == 0) {
-      _lastIndex = -2;
-      _lastKind = _viewKind;
+    if (itemCount == 0 || _removingIds.isNotEmpty) {
+      if (itemCount == 0) {
+        _lastIndex = -2;
+        _lastKind = _viewKind;
+      }
       return;
     }
 
-    // La cola mostrada no es la activa: lista arriba al cambiar de pestaña.
     if (currentIndex < 0) {
       if (_lastKind != _viewKind) {
         _lastKind = _viewKind;
@@ -150,7 +129,6 @@ class _QueuePanelState extends State<QueuePanel> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (!_scroll.hasClients) {
-        // La lista aún no estaba lista: reintentar en el próximo build.
         _lastIndex = -2;
         return;
       }
@@ -159,8 +137,8 @@ class _QueuePanelState extends State<QueuePanel> {
       _firstScroll = false;
       final pos = _scroll.position;
       final target = (_listTopPadding +
-              currentIndex * _itemExtent +
-              _itemExtent / 2 -
+              currentIndex * _itemHeightEstimate +
+              _itemHeightEstimate / 2 -
               pos.viewportDimension / 2)
           .clamp(pos.minScrollExtent, pos.maxScrollExtent)
           .toDouble();
@@ -177,7 +155,6 @@ class _QueuePanelState extends State<QueuePanel> {
     });
   }
 
-  /// Evita que la lista se mueva sola tras una acción del usuario.
   void _syncLastIndex() {
     if (_viewKind == controller.activeQueueKind) {
       _lastIndex = controller.currentIndex;
@@ -191,21 +168,19 @@ class _QueuePanelState extends State<QueuePanel> {
     if (mounted) setState(() {});
   }
 
-  Future<void> _handleRemove(int index) async {
-    if (_viewKind == controller.activeQueueKind &&
-        index == controller.currentIndex) {
-      return;
-    }
+  /// Este método SÓLO se llama cuando la animación de colapso ya terminó.
+  Future<void> _actuallyRemoveFromQueue(int index, Song song) async {
     await controller.removeFromQueueOf(_viewKind, index);
     _syncLastIndex();
-    if (mounted) setState(() {});
+
+    if (mounted) {
+      setState(() => _removingIds.remove(song.path));
+    }
   }
 
   Future<void> _handlePlay(int index) async {
-    // El usuario ya está viendo esa fila: no hace falta auto-scroll.
     _lastIndex = index;
     _lastKind = _viewKind;
-    // Si la cola mostrada no es la activa, primero la activamos.
     if (_viewKind != controller.activeQueueKind) {
       await controller.switchToQueue(_viewKind);
     }
@@ -316,15 +291,61 @@ class _QueuePanelState extends State<QueuePanel> {
                     songs: songs,
                     currentIndex: currentIndex,
                     onPlay: _handlePlay,
-                    onRemove: _handleRemove,
+                    onRemoveConfirmed: (index, song) async {
+                      // 1. Disparamos la animación de colapso
+                      setState(() => _removingIds.add(song.path));
+
+                      // 2. Esperamos a que termine la animación
+                      await Future.delayed(
+                        _CollapseOnRemove.duration +
+                            const Duration(milliseconds: 20),
+                      );
+
+                      // 3. Eliminamos del Store (esto actualiza la lista real)
+                      await _actuallyRemoveFromQueue(index, song);
+                    },
                     onReorder: _handleReorder,
                     minHeight: minHeight,
                     scrollController: _scroll,
-                    itemExtent: _itemExtent,
                     listPadding: _listTopPadding,
+                    removingIds: _removingIds,
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Colapsa (altura → 0 + fade) el item completo cuando [removing] es true,
+/// de modo que los items de abajo suban suavemente en vez de saltar.
+class _CollapseOnRemove extends StatelessWidget {
+  final bool removing;
+  final Widget child;
+
+  const _CollapseOnRemove({
+    super.key,
+    required this.removing,
+    required this.child,
+  });
+
+  static const Duration duration = Duration(milliseconds: 300);
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSize(
+      duration: duration,
+      curve: Curves.easeInOutCubic,
+      alignment: Alignment.topCenter,
+      child: Align(
+        alignment: Alignment.topCenter,
+        heightFactor: removing ? 0.0 : 1.0,
+        child: AnimatedOpacity(
+          opacity: removing ? 0.0 : 1.0,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          child: child,
+        ),
       ),
     );
   }
@@ -336,10 +357,10 @@ class _QueueContainer extends StatelessWidget {
   final int currentIndex;
   final double minHeight;
   final ScrollController scrollController;
-  final double itemExtent;
   final double listPadding;
+  final Set<String> removingIds;
   final Future<void> Function(int) onPlay;
-  final Future<void> Function(int) onRemove;
+  final Future<void> Function(int index, Song song) onRemoveConfirmed;
   final Future<void> Function(int, int) onReorder;
 
   const _QueueContainer({
@@ -348,10 +369,10 @@ class _QueueContainer extends StatelessWidget {
     required this.currentIndex,
     required this.minHeight,
     required this.scrollController,
-    required this.itemExtent,
     required this.listPadding,
+    required this.removingIds,
     required this.onPlay,
-    required this.onRemove,
+    required this.onRemoveConfirmed,
     required this.onReorder,
   });
 
@@ -389,8 +410,6 @@ class _QueueContainer extends StatelessWidget {
         borderRadius: radius,
         clipBehavior: Clip.antiAlias,
         child: Container(
-          // Compensa el padding vertical (10+10) para que la altura total
-          // del contenedor coincida con la del estado vacío.
           constraints: BoxConstraints(
             minHeight: minHeight > 0
                 ? (minHeight - 20).clamp(0, double.infinity)
@@ -404,7 +423,8 @@ class _QueueContainer extends StatelessWidget {
           ),
           child: ReorderableListView.builder(
             scrollController: scrollController,
-            itemExtent: itemExtent,
+            // Sin prototypeItem: cada item mide su altura real, lo que
+            // permite que el colapso animado funcione.
             shrinkWrap: true,
             padding: EdgeInsets.symmetric(
               horizontal: 10,
@@ -413,53 +433,89 @@ class _QueueContainer extends StatelessWidget {
             buildDefaultDragHandles: false,
             itemCount: songs.length,
             onReorder: (o, n) => onReorder(o, n),
+            proxyDecorator: (child, index, animation) {
+              return AnimatedBuilder(
+                animation: animation,
+                builder: (context, _) {
+                  final elevation = Tween<double>(begin: 0, end: 6)
+                      .evaluate(animation);
+                  return Padding(
+                    padding: EdgeInsets.zero,
+                    child: Material(
+                      elevation: elevation,
+                      color: Colors.transparent,
+                      borderRadius: BorderRadius.circular(14),
+                      clipBehavior: Clip.antiAlias,
+                      shadowColor: Colors.black.withValues(alpha: 0.5),
+                      child: child,
+                    ),
+                  );
+                },
+              );
+            },
             itemBuilder: (context, index) {
               final song = songs[index];
               final isLast = index == songs.length - 1;
               final isCurrent = index == currentIndex;
               final entryKey = _entryKey(index);
+              final isRemoving = removingIds.contains(song.path);
 
-              return Column(
+              return _CollapseOnRemove(
                 key: ValueKey('queue-item-$entryKey'),
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Dismissible(
-                    key: ValueKey('dismiss-$entryKey'),
-                    direction: isCurrent
-                        ? DismissDirection.none
-                        : DismissDirection.horizontal,
-                    background: _DismissBg(
-                      scheme: scheme,
-                      alignment: Alignment.centerLeft,
-                      icon: Icons.delete_outline_rounded,
-                      enabled: !isCurrent,
+                removing: isRemoving,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Dismissible(
+                      key: ValueKey('dismiss-$entryKey'),
+                      direction: (isCurrent || isRemoving)
+                          ? DismissDirection.none
+                          : DismissDirection.horizontal,
+                      background: _DismissBg(
+                        scheme: scheme,
+                        alignment: Alignment.centerLeft,
+                        icon: Icons.delete_outline_rounded,
+                        enabled: !isCurrent && !isRemoving,
+                      ),
+                      secondaryBackground: _DismissBg(
+                        scheme: scheme,
+                        alignment: Alignment.centerRight,
+                        icon: Icons.delete_outline_rounded,
+                        enabled: !isCurrent && !isRemoving,
+                      ),
+                      confirmDismiss: (_) async {
+                        if (isCurrent) return false;
+
+                        final confirmed = await _confirmRemove(context, song);
+                        if (confirmed) {
+                          // Le pasamos el índice original y la canción para
+                          // que _QueuePanel haga la animación y luego elimine.
+                          onRemoveConfirmed(index, song);
+                        }
+
+                        // Siempre retornamos false para que Dismissible NO
+                        // haga su animación (la maneja _CollapseOnRemove).
+                        return false;
+                      },
+                      onDismissed: (_) {},
+                      child: _QueueTile(
+                        song: song,
+                        index: index,
+                        isCurrent: isCurrent,
+                        scheme: scheme,
+                        isRemoving: isRemoving,
+                        onTap: () => onPlay(index),
+                      ),
                     ),
-                    secondaryBackground: _DismissBg(
-                      scheme: scheme,
-                      alignment: Alignment.centerRight,
-                      icon: Icons.delete_outline_rounded,
-                      enabled: !isCurrent,
-                    ),
-                    confirmDismiss: (_) => isCurrent
-                        ? Future.value(false)
-                        : _confirmRemove(context, song),
-                    onDismissed: (_) => onRemove(index),
-                    child: _QueueTile(
-                      song: song,
-                      index: index,
-                      isCurrent: isCurrent,
-                      scheme: scheme,
-                      onTap: () => onPlay(index),
-                    ),
-                  ),
-                  if (!isLast)
-                    Divider(
-                      height: 1,
-                      indent: 64,
-                      endIndent: 8,
-                      color: scheme.outlineVariant.withValues(alpha: 0.3),
-                    ),
-                ],
+                    if (!isLast)
+                      Divider(
+                        height: 1,
+                        indent: 64,
+                        endIndent: 8,
+                        color: scheme.outlineVariant.withValues(alpha: 0.3),
+                      ),
+                  ],
+                ),
               );
             },
           ),
@@ -474,6 +530,7 @@ class _QueueTile extends StatelessWidget {
   final int index;
   final bool isCurrent;
   final ColorScheme scheme;
+  final bool isRemoving;
   final VoidCallback onTap;
 
   const _QueueTile({
@@ -481,12 +538,14 @@ class _QueueTile extends StatelessWidget {
     required this.index,
     required this.isCurrent,
     required this.scheme,
+    required this.isRemoving,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final radius = BorderRadius.circular(14);
+    final isInteractive = !isRemoving;
 
     return Material(
       color: isCurrent
@@ -495,7 +554,7 @@ class _QueueTile extends StatelessWidget {
       borderRadius: radius,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: onTap,
+        onTap: isInteractive ? onTap : null,
         borderRadius: radius,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(8, 8, 4, 8),
@@ -513,9 +572,8 @@ class _QueueTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: isCurrent
-                            ? scheme.primary
-                            : scheme.onSurface,
+                        color:
+                            isCurrent ? scheme.primary : scheme.onSurface,
                         fontWeight: FontWeight.w600,
                         fontSize: 14.5,
                         letterSpacing: -0.1,
@@ -557,6 +615,7 @@ class _QueueTile extends StatelessWidget {
                 ),
               ReorderableDragStartListener(
                 index: index,
+                enabled: isInteractive,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 8,

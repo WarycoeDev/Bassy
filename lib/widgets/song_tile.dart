@@ -21,6 +21,10 @@ class SongTile extends StatelessWidget {
   final bool reorderMode;
   final int? reorderIndex;
 
+  /// Si es true, el tile se encoge a altura 0 suavemente (para animar
+  /// su eliminación de la lista sin que los demás salten de golpe).
+  final bool isRemoving;
+
   static const double tileRadius = 12;
 
   const SongTile({
@@ -33,6 +37,7 @@ class SongTile extends StatelessWidget {
     this.queueIndex,
     this.reorderMode = false,
     this.reorderIndex,
+    this.isRemoving = false,
   });
 
   static final Map<String, _CoverCacheEntry> _coverCache = {};
@@ -62,8 +67,7 @@ class SongTile extends StatelessWidget {
     final cover = song.coverPath;
     final hasCover = _hasCover(cover);
 
-    // Si estamos en modo reordenar, anulamos las acciones de toque.
-    final bool isInteractive = !reorderMode;
+    final bool isInteractive = !reorderMode && !isRemoving;
 
     final tile = InkWell(
       onTap: isInteractive ? (onTap ?? () => _defaultOnTap(context)) : null,
@@ -163,8 +167,6 @@ class SongTile extends StatelessWidget {
       ),
     );
 
-    // Si no es interactivo, evitamos que el GestureDetector capture eventos
-    // de pulsación larga (que abren el menú).
     final interactive = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onLongPressStart: isInteractive
@@ -190,22 +192,32 @@ class SongTile extends StatelessWidget {
       child: tile,
     );
 
-    return RepaintBoundary(
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 10),
-        child: Semantics(
-          label:
-              '${song.title}. ${song.artistOrUnknown}. ${song.durationLabel}',
-          button: isInteractive,
-          onLongPress: isInteractive
-              ? () => SongContextMenu.showSheet(
-                    context,
-                    song,
-                    queueContext: queueContext,
-                    queueIndex: queueIndex,
-                  )
-              : null,
-          child: interactive,
+    // Envolvemos todo en AnimatedSize y ClipRect para que,
+    // cuando isRemoving cambie a true, la altura colapse a 0 suavemente.
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+      alignment: Alignment.topCenter,
+      child: ClipRect(
+        child: SizedBox(
+          height: isRemoving ? 0 : null,
+          child: Padding(
+            padding: EdgeInsets.only(bottom: isRemoving ? 0 : 10),
+            child: Semantics(
+              label:
+                  '${song.title}. ${song.artistOrUnknown}. ${song.durationLabel}',
+              button: isInteractive,
+              onLongPress: isInteractive
+                  ? () => SongContextMenu.showSheet(
+                        context,
+                        song,
+                        queueContext: queueContext,
+                        queueIndex: queueIndex,
+                      )
+                  : null,
+              child: interactive,
+            ),
+          ),
         ),
       ),
     );
