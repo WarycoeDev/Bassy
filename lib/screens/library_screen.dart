@@ -8,7 +8,9 @@ import '../models/playlist.dart';
 import '../models/song.dart';
 import '../services/favorites_store.dart';
 import '../services/media_scanner.dart';
+import '../services/playback_controller.dart';
 import '../widgets/nested_navigator_scope.dart';
+import '../widgets/playback_menu.dart';
 import '../widgets/song_tile.dart';
 import 'playlist_detail_screen.dart';
 
@@ -149,6 +151,63 @@ class _LibraryScreenState extends State<LibraryScreen> {
   /// Solo se usa en la pestaña Favoritos.
   Playlist _favoritesPlaylist() =>
       FavoritesStore.instance.buildPlaylist(_songs);
+
+  // -------------------------------------------------------------------------
+  // Reproducir todo (playlist / favoritos)
+  // -------------------------------------------------------------------------
+
+  Future<void> _playAll(BuildContext context, Playlist playlist) async {
+    if (playlist.songs.isEmpty) return;
+
+    final controller = PlaybackController.instance;
+    if (!controller.isReady) {
+      debugPrint('LibraryScreen: PlaybackController no inicializado');
+      return;
+    }
+
+    final queueNotEmpty = controller.songs.isNotEmpty;
+
+    // Cola vacía → reproducir directamente desde el principio.
+    if (!queueNotEmpty) {
+      await controller.setQueue(
+        playlist.songs,
+        startIndex: 0,
+        autoPlay: true,
+      );
+      return;
+    }
+
+    // Hay contenido en cola → mostrar menú de opciones.
+    await PlaybackMenu.show(
+      context,
+      title: playlist.title,
+      subtitle: '${playlist.count} elementos',
+      coverPath: _playlistCover(playlist),
+      isPodcast: playlist.kind == PlaylistKind.podcast,
+      actions: [
+        PlaybackMenuAction(
+          icon: Icons.play_arrow,
+          label: 'Reproducir ahora',
+          onTap: () async {
+            await controller.setQueue(
+              playlist.songs,
+              startIndex: 0,
+              autoPlay: true,
+            );
+          },
+        ),
+        PlaybackMenuAction(
+          icon: Icons.queue_music,
+          label: 'Añadir a la cola',
+          onTap: () async {
+            for (final s in playlist.songs) {
+              await controller.addToQueue(s);
+            }
+          },
+        ),
+      ],
+    );
+  }
 
   // -------------------------------------------------------------------------
   // Agrupaciones / carátulas
@@ -439,7 +498,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // Progreso de escaneo
   // -------------------------------------------------------------------------
 
-    Widget _buildScanProgress(BuildContext context) {
+  Widget _buildScanProgress(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
     // Mostrar también si hay un statusMessage informativo (verify al
@@ -846,7 +905,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         ),
                         const SizedBox(height: 12),
                         FilledButton.icon(
-                          onPressed: playlist.songs.isEmpty ? null : () {},
+                          onPressed: playlist.songs.isEmpty
+                              ? null
+                              : () => _playAll(context, playlist),
                           icon: const Icon(Icons.play_arrow, size: 20),
                           label: const Text('Reproducir todo'),
                         ),

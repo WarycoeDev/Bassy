@@ -142,16 +142,19 @@ class _QueueBodyState extends State<_QueueBody> {
             color: scheme.outlineVariant.withValues(alpha: 0.5),
           ),
           Flexible(
-            child: songs.isEmpty
-                ? _EmptyState(scheme: scheme)
-                : _QueueContainer(
-                    scheme: scheme,
-                    songs: songs,
-                    currentIndex: currentIndex,
-                    onPlay: controller.playFromQueue,
-                    onRemove: _handleRemove,
-                    onReorder: _handleReorder,
-                  ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 320),
+              child: songs.isEmpty
+                  ? _EmptyState(scheme: scheme)
+                  : _QueueContainer(
+                      scheme: scheme,
+                      songs: songs,
+                      currentIndex: currentIndex,
+                      onPlay: controller.playFromQueue,
+                      onRemove: _handleRemove,
+                      onReorder: _handleReorder,
+                    ),
+            ),
           ),
         ],
       ),

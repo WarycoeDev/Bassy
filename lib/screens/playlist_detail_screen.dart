@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import '../models/playlist.dart';
 import '../models/song.dart';
 import '../services/favorites_store.dart';
+import '../services/playback_controller.dart';
+import '../widgets/playback_menu.dart';
 import '../widgets/song_tile.dart';
 
 class PlaylistDetailScreen extends StatelessWidget {
@@ -40,15 +42,6 @@ class PlaylistDetailScreen extends StatelessWidget {
     this.showBackButton = true,
   });
 
-  /// Primera carátula disponible entre las canciones de la playlist.
-  String? get _coverPath {
-    for (final s in playlist.songs) {
-      final p = s.coverPath;
-      if (p != null && p.isNotEmpty) return p;
-    }
-    return null;
-  }
-
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -79,9 +72,6 @@ class PlaylistDetailScreen extends StatelessWidget {
       },
       child: Scaffold(
         backgroundColor: scheme.surface,
-        // En el flotante (showBackButton == false) no mostramos AppBar:
-        // el título ya está en la cabecera del cuerpo. Así evitamos el
-        // doble título y el botón atrás sobrante.
         appBar: showBackButton
             ? AppBar(
                 backgroundColor: scheme.surface,
@@ -102,8 +92,6 @@ class PlaylistDetailScreen extends StatelessWidget {
               )
             : null,
         body: SafeArea(
-          // En modo reordenable escuchamos al store para que el header
-          // (contador, duración) también se actualice al reordenar.
           child: playlist.canReorder
               ? AnimatedBuilder(
                   animation: FavoritesStore.instance,
@@ -116,12 +104,63 @@ class PlaylistDetailScreen extends StatelessWidget {
     );
   }
 
-  /// Para favoritos, reconstruye la playlist desde el store usando
-  /// el catálogo. Para el resto devuelve la playlist original.
   Playlist _livePlaylist() {
     final cat = catalog;
     if (!playlist.canReorder || cat == null) return playlist;
     return FavoritesStore.instance.buildPlaylist(cat);
+  }
+
+  // ============================================================
+  // ACCIÓN — REPRODUCIR TODO
+  // ============================================================
+
+  Future<void> _playAll(BuildContext context, Playlist live) async {
+    if (live.songs.isEmpty) return;
+
+    final controller = PlaybackController.instance;
+    if (!controller.isReady) {
+      debugPrint('PlaylistDetailScreen: PlaybackController no inicializado');
+      return;
+    }
+
+    final queueNotEmpty = controller.songs.isNotEmpty;
+
+    // Cola vacía → reproducir directamente desde el principio.
+    if (!queueNotEmpty) {
+      await controller.setQueue(live.songs, startIndex: 0, autoPlay: true);
+      return;
+    }
+
+    // Hay contenido en cola → mostrar menú de opciones.
+    await PlaybackMenu.show(
+      context,
+      title: live.title,
+      subtitle: '${live.count} elementos',
+      coverPath: _firstCover(live),
+      isPodcast: live.kind == PlaylistKind.podcast,
+      actions: [
+        PlaybackMenuAction(
+          icon: Icons.play_arrow,
+          label: 'Reproducir ahora',
+          onTap: () async {
+            await controller.setQueue(
+              live.songs,
+              startIndex: 0,
+              autoPlay: true,
+            );
+          },
+        ),
+        PlaybackMenuAction(
+          icon: Icons.queue_music,
+          label: 'Añadir a la cola',
+          onTap: () async {
+            for (final s in live.songs) {
+              await controller.addToQueue(s);
+            }
+          },
+        ),
+      ],
+    );
   }
 
   // ============================================================
@@ -166,7 +205,9 @@ class PlaylistDetailScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: 12),
                     FilledButton.icon(
-                      onPressed: live.songs.isEmpty ? null : () {},
+                      onPressed: live.songs.isEmpty
+                          ? null
+                          : () => _playAll(context, live),
                       icon: const Icon(Icons.play_arrow, size: 20),
                       label: const Text('Reproducir todo'),
                     ),
@@ -200,7 +241,6 @@ class PlaylistDetailScreen extends StatelessWidget {
     ColorScheme scheme,
     Playlist live,
   ) {
-    // Cabecera: carátula pegada a la izquierda + textos.
     final header = Row(
       children: [
         _buildCover(context, live),
@@ -229,7 +269,9 @@ class PlaylistDetailScreen extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               FilledButton.icon(
-                onPressed: live.songs.isEmpty ? null : () {},
+                onPressed: live.songs.isEmpty
+                    ? null
+                    : () => _playAll(context, live),
                 icon: const Icon(Icons.play_arrow, size: 20),
                 label: const Text('Reproducir todo'),
               ),
@@ -242,11 +284,6 @@ class PlaylistDetailScreen extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Stack: la cabecera ocupa el layout normal; el botón atrás
-        // flota ENCIMA de la esquina superior izquierda de la carátula
-        // con fondo circular semitransparente + sombra para que se vea.
-        // Se coloca pegado al borde izquierdo de la carátula (left: 6)
-        // pero sin salirse de ella.
         Stack(
           children: [
             Padding(
