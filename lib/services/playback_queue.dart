@@ -14,8 +14,16 @@ class PlaybackQueue {
   /// `MediaKind.podcast` para la cola de capítulos.
   final MediaKind kind;
 
+  /// Lista visible: SIEMPRE en el orden original.
   List<Song> songs = const [];
+
+  /// Índice de la canción actual dentro de [songs].
   int currentIndex = -1;
+
+  /// Orden físico de los hijos del `ConcatenatingAudioSource`.
+  /// `sourceOrder[i]` = índice en [songs] del hijo `i` de la fuente.
+  /// Sin aleatorio es la identidad; con aleatorio es el orden mezclado.
+  List<int> sourceOrder = const [];
 
   /// Posición guardada para restaurar al reactivar la cola.
   Duration savedPosition = Duration.zero;
@@ -41,8 +49,13 @@ class PlaybackQueue {
 
   bool get hasPrevious => currentIndex > 0 && currentIndex < songs.length;
 
+  /// Deja [sourceOrder] como identidad (orden original).
+  void resetOrder() =>
+      sourceOrder = List<int>.generate(songs.length, (i) => i);
+
   void reset() {
     songs = const [];
+    sourceOrder = const [];
     currentIndex = -1;
     savedPosition = Duration.zero;
     savedPlaying = false;
