@@ -74,6 +74,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   int _selectedFilter = _fAll;
   bool _slideFromRight = true;
 
+  /// Modo reordenar (solo aplica a la pestaña Favoritos).
+  bool _reorderMode = false;
+
   /// Playlist (álbum/artista/podcast/...) abierta inline dentro de la
   /// pestaña actual. Si es null, se muestra el listado normal del filtro.
   Playlist? _inlinePlaylist;
@@ -138,6 +141,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _handleBack() {
     if (_inlinePlaylist != null) {
       _closeInlinePlaylist();
+      return true;
+    }
+    if (_reorderMode) {
+      setState(() => _reorderMode = false);
       return true;
     }
     return false;
@@ -309,6 +316,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     setState(() {
       _selectedFilter = index;
       _inlinePlaylist = null;
+      // Si salimos de Favoritos, salimos del modo reordenar.
+      if (index != _fFavorites) _reorderMode = false;
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -854,7 +863,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   // -------------------------------------------------------------------------
-  // Favoritos — pestaña propia: lista de canciones reordenable
+  // Favoritos — pestaña propia: lista reordenable + swipe-to-delete
   // -------------------------------------------------------------------------
 
   Widget _buildFavoritesList(BuildContext context) {
@@ -904,12 +913,38 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           ),
                         ),
                         const SizedBox(height: 12),
-                        FilledButton.icon(
-                          onPressed: playlist.songs.isEmpty
-                              ? null
-                              : () => _playAll(context, playlist),
-                          icon: const Icon(Icons.play_arrow, size: 20),
-                          label: const Text('Reproducir todo'),
+                        // "Reproducir todo" + botón icono de reordenar,
+                        // siempre en la misma fila.
+                        Row(
+                          children: [
+                            FilledButton.icon(
+                              onPressed: playlist.songs.isEmpty
+                                  ? null
+                                  : () => _playAll(context, playlist),
+                              icon: const Icon(Icons.play_arrow, size: 20),
+                              label: const Text('Reproducir todo'),
+                            ),
+                            const SizedBox(width: 8),
+                            // Botón reordenar: solo icono, al lado del
+                            // de reproducir. swap_vert = entrar en modo
+                            // reordenar; check = salir.
+                            if (playlist.songs.length > 1)
+                              IconButton.filledTonal(
+                                onPressed: () {
+                                  setState(() {
+                                    _reorderMode = !_reorderMode;
+                                  });
+                                },
+                                tooltip:
+                                    _reorderMode ? 'Listo' : 'Reordenar',
+                                icon: Icon(
+                                  _reorderMode
+                                      ? Icons.check
+                                      : Icons.swap_vert,
+                                  size: 20,
+                                ),
+                              ),
+                          ],
                         ),
                       ],
                     ),
@@ -942,26 +977,98 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       ),
                       itemCount: playlist.songs.length,
                       onReorder: FavoritesStore.instance.reorder,
+                      // Desactivamos los handles automáticos: SongTile
+                      // dibuja el suyo propio en modo reordenar.
+                      buildDefaultDragHandles: false,
+                      
+                      // Sombra exacta y sobre el tile (sin franjas abajo).
                       proxyDecorator: (child, index, animation) {
-                        return Material(
-                          elevation: 6,
-                          color: scheme.surfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(12),
-                          child: child,
+                        return AnimatedBuilder(
+                          animation: animation,
+                          builder: (context, _) {
+                            final elevation = Tween<double>(begin: 0, end: 6)
+                                .evaluate(animation);
+                            return Padding(
+                              // Cancelamos el margen de 10px inferior de SongTile
+                              // para que la sombra no cubra el espacio vacío.
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: Material(
+                                elevation: elevation,
+                                color: Colors.transparent,
+                                borderRadius: BorderRadius.circular(SongTile.tileRadius),
+                                clipBehavior: Clip.antiAlias,
+                                shadowColor: Colors.black.withValues(alpha: 0.5),
+                                child: child,
+                              ),
+                            );
+                          },
                         );
                       },
-                      // dentro de _buildFavoritesList, en el itemBuilder del ReorderableListView
-itemBuilder: (context, index) {
-  final song = playlist.songs[index];
-  return RepaintBoundary(
-    key: ValueKey<String>(song.path),
-    child: SongTile(
-      song: song,
-      queueContext: playlist.songs,
-      queueIndex: index,
-    ),
-  );
-},
+                      
+                      itemBuilder: (context, index) {
+                        final song = playlist.songs[index];
+                        final bool isReorder = _reorderMode;
+
+                        return Dismissible(
+                          key: ValueKey<String>('fav:${song.path}'),
+                          // En modo reordenar desactivamos el swipe para
+                          // no interferir con el drag.
+                          direction: isReorder
+                              ? DismissDirection.none
+                              : DismissDirection.endToStart,
+                          background: Container(
+                            alignment: Alignment.centerRight,
+                            // Mismo margen que el SongTile para que encaje
+                            margin: const EdgeInsets.only(bottom: 10),
+                            padding:
+                                const EdgeInsets.symmetric(horizontal: 20),
+                            decoration: BoxDecoration(
+                              color: scheme.errorContainer,
+                              borderRadius: BorderRadius.circular(
+                                SongTile.tileRadius,
+                              ),
+                            ),
+                            // Solo el icono de basurero, sin texto.
+                            child: Icon(
+                              Icons.delete_outline,
+                              color: scheme.onErrorContainer,
+                              size: 24,
+                            ),
+                          ),
+                          confirmDismiss: (_) async {
+                            final removed =
+                                await FavoritesStore.instance.remove(song);
+                            return removed;
+                          },
+                          onDismissed: (_) {
+                            final messenger =
+                                ScaffoldMessenger.maybeOf(context);
+                            messenger?.hideCurrentSnackBar();
+                            messenger?.showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '“${song.title}” eliminada de Favoritos',
+                                ),
+                                behavior: SnackBarBehavior.floating,
+                                action: SnackBarAction(
+                                  label: 'Deshacer',
+                                  onPressed: () =>
+                                      FavoritesStore.instance.add(song),
+                                ),
+                              ),
+                            );
+                          },
+                          // SongTile se encarga del handle y de ocultar
+                          // duración/extensión/peso/menú en modo reordenar.
+                          child: SongTile(
+                            song: song,
+                            queueContext: playlist.songs,
+                            queueIndex: index,
+                            reorderMode: isReorder,
+                            reorderIndex: index,
+                          ),
+                        );
+                      },
                     ),
             ),
           ],

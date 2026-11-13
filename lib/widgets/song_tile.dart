@@ -15,15 +15,13 @@ class SongTile extends StatelessWidget {
   final VoidCallback? onMore;
 
   final bool showPlayingIndicator;
-
-  /// Contexto de reproducción: canciones del álbum/artista/podcast/playlist
-  /// donde vive este tile. Si es null, se reproduce solo `song`
-  /// (comportamiento del listado plano de Library).
   final List<Song>? queueContext;
-
-  /// Índice de `song` dentro de [queueContext]. Se usa como `startIndex`
-  /// al encolar el contexto. Si es null, se busca por path.
   final int? queueIndex;
+
+  final bool reorderMode;
+  final int? reorderIndex;
+
+  static const double tileRadius = 12;
 
   const SongTile({
     super.key,
@@ -33,6 +31,8 @@ class SongTile extends StatelessWidget {
     this.showPlayingIndicator = true,
     this.queueContext,
     this.queueIndex,
+    this.reorderMode = false,
+    this.reorderIndex,
   });
 
   static final Map<String, _CoverCacheEntry> _coverCache = {};
@@ -62,14 +62,17 @@ class SongTile extends StatelessWidget {
     final cover = song.coverPath;
     final hasCover = _hasCover(cover);
 
+    // Si estamos en modo reordenar, anulamos las acciones de toque.
+    final bool isInteractive = !reorderMode;
+
     final tile = InkWell(
-      onTap: onTap ?? () => _defaultOnTap(context),
-      borderRadius: BorderRadius.circular(12),
+      onTap: isInteractive ? (onTap ?? () => _defaultOnTap(context)) : null,
+      borderRadius: BorderRadius.circular(tileRadius),
       child: Container(
         padding: const EdgeInsets.all(8),
         decoration: BoxDecoration(
           color: scheme.surfaceContainer,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(tileRadius),
         ),
         child: Row(
           children: [
@@ -91,7 +94,6 @@ class SongTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 4),
-                  // Solo artista (o "Artista desconocido").
                   Text(
                     song.artistOrUnknown,
                     style: TextStyle(
@@ -104,78 +106,87 @@ class SongTile extends StatelessWidget {
                 ],
               ),
             ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      song.durationLabel,
-                      style: TextStyle(
-                        color: scheme.onSurfaceVariant,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
+            if (reorderMode && reorderIndex != null)
+              _buildDragHandle(scheme, reorderIndex!)
+            else
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        song.durationLabel,
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${song.extension.toUpperCase()} · ${song.sizeLabel}',
-                      style: TextStyle(
-                        color: scheme.onSurfaceVariant,
-                        fontSize: 10,
+                      const SizedBox(height: 2),
+                      Text(
+                        '${song.extension.toUpperCase()} · ${song.sizeLabel}',
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 10,
+                        ),
                       ),
+                    ],
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    onPressed: onMore ??
+                        () => SongContextMenu.showSheet(
+                              context,
+                              song,
+                              queueContext: queueContext,
+                              queueIndex: queueIndex,
+                            ),
+                    icon: Icon(
+                      Icons.more_vert,
+                      color: scheme.onSurfaceVariant,
+                      size: 20,
                     ),
-                  ],
-                ),
-                const SizedBox(width: 4),
-                IconButton(
-                  onPressed: onMore ??
-                      () => SongContextMenu.showSheet(
-                            context,
-                            song,
-                            queueContext: queueContext,
-                            queueIndex: queueIndex,
-                          ),
-                  icon: Icon(
-                    Icons.more_vert,
-                    color: scheme.onSurfaceVariant,
-                    size: 20,
+                    visualDensity: VisualDensity.compact,
+                    style: IconButton.styleFrom(
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    tooltip: 'Más opciones',
                   ),
-                  visualDensity: VisualDensity.compact,
-                  style: IconButton.styleFrom(
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  tooltip: 'Más opciones',
-                ),
-              ],
-            ),
+                ],
+              ),
           ],
         ),
       ),
     );
 
+    // Si no es interactivo, evitamos que el GestureDetector capture eventos
+    // de pulsación larga (que abren el menú).
     final interactive = GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onLongPressStart: (_) {
-        SongContextMenu.showSheet(
-          context,
-          song,
-          queueContext: queueContext,
-          queueIndex: queueIndex,
-        );
-      },
-      onSecondaryTapDown: (_) {
-        SongContextMenu.showSheet(
-          context,
-          song,
-          queueContext: queueContext,
-          queueIndex: queueIndex,
-        );
-      },
+      onLongPressStart: isInteractive
+          ? (_) {
+              SongContextMenu.showSheet(
+                context,
+                song,
+                queueContext: queueContext,
+                queueIndex: queueIndex,
+              );
+            }
+          : null,
+      onSecondaryTapDown: isInteractive
+          ? (_) {
+              SongContextMenu.showSheet(
+                context,
+                song,
+                queueContext: queueContext,
+                queueIndex: queueIndex,
+              );
+            }
+          : null,
       child: tile,
     );
 
@@ -183,15 +194,41 @@ class SongTile extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: Semantics(
-          label: '${song.title}. ${song.artistOrUnknown}. ${song.durationLabel}',
-          button: true,
-          onLongPress: () => SongContextMenu.showSheet(
-            context,
-            song,
-            queueContext: queueContext,
-            queueIndex: queueIndex,
-          ),
+          label:
+              '${song.title}. ${song.artistOrUnknown}. ${song.durationLabel}',
+          button: isInteractive,
+          onLongPress: isInteractive
+              ? () => SongContextMenu.showSheet(
+                    context,
+                    song,
+                    queueContext: queueContext,
+                    queueIndex: queueIndex,
+                  )
+              : null,
           child: interactive,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDragHandle(ColorScheme scheme, int index) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 4),
+      child: ReorderableDragStartListener(
+        key: ValueKey<String>('drag:${song.path}'),
+        index: index,
+        child: Container(
+          width: 48,
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(tileRadius),
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            Icons.drag_handle,
+            size: 28,
+            color: scheme.onSurfaceVariant,
+          ),
         ),
       ),
     );
@@ -243,12 +280,6 @@ class SongTile extends StatelessWidget {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Reproducción
-  // -------------------------------------------------------------------------
-
-  /// Índice efectivo dentro de [queueContext]. Si no se pasó explícitamente,
-  /// se busca por path.
   int _resolvedIndex(List<Song> ctx) {
     final provided = queueIndex;
     if (provided != null &&
@@ -281,8 +312,6 @@ class SongTile extends StatelessWidget {
     final ctx = queueContext;
     final queueSongs = handler.songsOf(song.kind);
 
-    // ---- Sin contexto (listado plano de Library) ----
-    // Se reproduce SOLO la canción tocada, como antes.
     if (ctx == null || ctx.isEmpty) {
       if (queueSongs.isNotEmpty && context.mounted) {
         if (song.kind == MediaKind.podcast) {
@@ -312,16 +341,10 @@ class SongTile extends StatelessWidget {
       return;
     }
 
-    // ---- Con contexto (álbum/artista/podcast/playlist/favoritos) ----
-    // Se encola el contexto completo y se arranca en la canción tocada.
     final startIndex = _resolvedIndex(ctx);
 
-    // Si ya había cola de ese kind, damos a elegir (reemplazar / añadir)
-    // en lugar de machacarla sin avisar.
     if (queueSongs.isNotEmpty && context.mounted) {
       if (song.kind == MediaKind.podcast) {
-        // Podcasts: menú contextual con contexto, para que
-        // "Reproducir ahora" encole todo el podcast.
         await SongContextMenu.showSheet(
           context,
           song,
