@@ -45,6 +45,8 @@ class QueueViewer {
 ///
 /// Muestra un selector Música / Capítulos para visualizar/editar
 /// **ambas** colas independientemente de cuál esté activa.
+///
+/// La lista se centra automáticamente en el elemento que está sonando.
 class QueuePanel extends StatefulWidget {
   final bool embedded;
 
@@ -60,11 +62,25 @@ class _QueuePanelState extends State<QueuePanel> {
   /// tener solo 1-2 ítems. Ajusta este valor a tu gusto.
   static const double _minPanelHeight = 360;
 
+  /// Alto fijo de cada fila: tile (8 + 52 + 8) + divisor (1).
+  /// Si cambias el tamaño de la portada o el padding del tile, ajústalo.
+  static const double _itemExtent = 69;
+
+  /// Padding vertical superior de la lista (debe coincidir con el de
+  /// `_QueueContainer`).
+  static const double _listTopPadding = 10;
+
   final controller = PlaybackController.instance;
   final List<StreamSubscription<dynamic>> _subs = [];
+  final ScrollController _scroll = ScrollController();
 
   /// Cola que el panel está mostrando (no necesariamente la activa).
   MediaKind _viewKind = MediaKind.music;
+
+  // Estado del auto-scroll.
+  int _lastIndex = -2;
+  MediaKind? _lastKind;
+  bool _firstScroll = true;
 
   @override
   void initState() {
@@ -87,7 +103,7 @@ class _QueuePanelState extends State<QueuePanel> {
     );
     _subs.add(controller.handler.activeQueueStream.listen((kind) {
       if (!mounted) return;
-      // Si el usuario no ha cambiado manualmente, seguimos a la activa.
+      // Seguimos a la cola activa.
       setState(() => _viewKind = kind);
     }));
   }
@@ -97,11 +113,81 @@ class _QueuePanelState extends State<QueuePanel> {
     for (final s in _subs) {
       s.cancel();
     }
+    _scroll.dispose();
     super.dispose();
+  }
+
+  /// Centra el elemento actual cuando cambia (o al cambiar de pestaña).
+  /// La primera vez salta sin animación; después anima.
+  void _maybeAutoScroll(int currentIndex, int itemCount) {
+    // Nada que mostrar: no consumimos el "primer scroll".
+    if (itemCount == 0) {
+      _lastIndex = -2;
+      _lastKind = _viewKind;
+      return;
+    }
+
+    // La cola mostrada no es la activa: lista arriba al cambiar de pestaña.
+    if (currentIndex < 0) {
+      if (_lastKind != _viewKind) {
+        _lastKind = _viewKind;
+        _lastIndex = currentIndex;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scroll.hasClients) return;
+          _scroll.jumpTo(_scroll.position.minScrollExtent);
+        });
+      }
+      return;
+    }
+
+    if (_lastIndex == currentIndex && _lastKind == _viewKind) return;
+
+    final animate = !_firstScroll && _lastKind == _viewKind;
+    final kindAtSchedule = _viewKind;
+    _lastIndex = currentIndex;
+    _lastKind = _viewKind;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_scroll.hasClients) {
+        // La lista aún no estaba lista: reintentar en el próximo build.
+        _lastIndex = -2;
+        return;
+      }
+      if (kindAtSchedule != _viewKind) return;
+
+      _firstScroll = false;
+      final pos = _scroll.position;
+      final target = (_listTopPadding +
+              currentIndex * _itemExtent +
+              _itemExtent / 2 -
+              pos.viewportDimension / 2)
+          .clamp(pos.minScrollExtent, pos.maxScrollExtent)
+          .toDouble();
+
+      if (animate) {
+        _scroll.animateTo(
+          target,
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeOutCubic,
+        );
+      } else {
+        _scroll.jumpTo(target);
+      }
+    });
+  }
+
+  /// Evita que la lista se mueva sola tras una acción del usuario.
+  void _syncLastIndex() {
+    if (_viewKind == controller.activeQueueKind) {
+      _lastIndex = controller.currentIndex;
+      _lastKind = _viewKind;
+    }
   }
 
   Future<void> _handleReorder(int oldIndex, int newIndex) async {
     await controller.reorderQueueOf(_viewKind, oldIndex, newIndex);
+    _syncLastIndex();
     if (mounted) setState(() {});
   }
 
@@ -111,10 +197,14 @@ class _QueuePanelState extends State<QueuePanel> {
       return;
     }
     await controller.removeFromQueueOf(_viewKind, index);
+    _syncLastIndex();
     if (mounted) setState(() {});
   }
 
   Future<void> _handlePlay(int index) async {
+    // El usuario ya está viendo esa fila: no hace falta auto-scroll.
+    _lastIndex = index;
+    _lastKind = _viewKind;
     // Si la cola mostrada no es la activa, primero la activamos.
     if (_viewKind != controller.activeQueueKind) {
       await controller.switchToQueue(_viewKind);
@@ -131,8 +221,9 @@ class _QueuePanelState extends State<QueuePanel> {
     final scheme = Theme.of(context).colorScheme;
     final songs = controller.songsOf(_viewKind);
     final isActiveKind = _viewKind == controller.activeQueueKind;
-    final currentIndex =
-        isActiveKind ? controller.currentIndex : -1;
+    final currentIndex = isActiveKind ? controller.currentIndex : -1;
+
+    _maybeAutoScroll(currentIndex, songs.length);
 
     final minHeight = widget.embedded ? 0.0 : _minPanelHeight;
 
@@ -228,6 +319,9 @@ class _QueuePanelState extends State<QueuePanel> {
                     onRemove: _handleRemove,
                     onReorder: _handleReorder,
                     minHeight: minHeight,
+                    scrollController: _scroll,
+                    itemExtent: _itemExtent,
+                    listPadding: _listTopPadding,
                   ),
           ),
         ],
@@ -241,6 +335,9 @@ class _QueueContainer extends StatelessWidget {
   final List<Song> songs;
   final int currentIndex;
   final double minHeight;
+  final ScrollController scrollController;
+  final double itemExtent;
+  final double listPadding;
   final Future<void> Function(int) onPlay;
   final Future<void> Function(int) onRemove;
   final Future<void> Function(int, int) onReorder;
@@ -250,6 +347,9 @@ class _QueueContainer extends StatelessWidget {
     required this.songs,
     required this.currentIndex,
     required this.minHeight,
+    required this.scrollController,
+    required this.itemExtent,
+    required this.listPadding,
     required this.onPlay,
     required this.onRemove,
     required this.onReorder,
@@ -303,10 +403,12 @@ class _QueueContainer extends StatelessWidget {
             ),
           ),
           child: ReorderableListView.builder(
+            scrollController: scrollController,
+            itemExtent: itemExtent,
             shrinkWrap: true,
-            padding: const EdgeInsets.symmetric(
+            padding: EdgeInsets.symmetric(
               horizontal: 10,
-              vertical: 10,
+              vertical: listPadding,
             ),
             buildDefaultDragHandles: false,
             itemCount: songs.length,
