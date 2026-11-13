@@ -1,5 +1,6 @@
 // lib/screens/podcast_player_screen.dart
 import 'dart:io';
+import 'dart:ui' show FontFeature;
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
@@ -13,7 +14,7 @@ String _fmt(Duration d) {
   return '$m:$s';
 }
 
-/// Player de PODCAST: metadatos, velocidad, skip ±15s/30s y progreso.
+/// Player de PODCAST: metadatos, velocidad, skip ±segundos y progreso.
 class PodcastPlayerScreen extends StatefulWidget {
   /// Prefijo del `Hero` que viene del miniplayer que abrió esta pantalla.
   final String? heroTagPrefix;
@@ -29,11 +30,23 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
 
   double _speed = 1.0;
 
-  /// Valor del dedo mientras se arrastra el slider. `null` = no arrastrando.
+  /// Valor del dedo mientras se arrastra el slider de seek. `null` = no arrastrando.
   double? _seekValue;
   bool get _isSeeking => _seekValue != null;
 
+  /// Valor del dedo mientras se arrastra el slider de volumen.
+  double? _volumeValue;
+  bool get _isAdjustingVolume => _volumeValue != null;
+
+  /// Último volumen > 0 para restaurar al desmutear.
+  double _lastNonZeroVolume = 1.0;
+
   static const _speeds = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+  int get _speedIndex {
+    final i = _speeds.indexOf(_speed);
+    return i < 0 ? 1 : i; // fallback a 1.0x
+  }
 
   @override
   void initState() {
@@ -50,6 +63,27 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
     if (!mounted) return;
     setState(() => _seekValue = null);
   }
+
+  void _onSpeedSelected(double v) {
+    if (v == _speed) return;
+    setState(() => _speed = v);
+    _controller.setSpeed(v);
+  }
+
+  // ---------- Callbacks del slider de volumen ----------
+  void _onVolumeStart(double v) => setState(() => _volumeValue = v);
+
+  void _onVolumeChanged(double v) {
+    setState(() => _volumeValue = v);
+    if (v > 0.001) {
+      _lastNonZeroVolume = v;
+    }
+    _controller.setVolume(v);
+  }
+
+  void _onVolumeEnd(double _) => setState(() => _volumeValue = null);
+
+  void _onVolumeUpdateLast(double v) => _lastNonZeroVolume = v;
 
   @override
   Widget build(BuildContext context) {
@@ -102,8 +136,7 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                 builder: (context, playingSnap) {
                   final isPlaying = playingSnap.data ?? false;
 
-                  final cover =
-                      _PodcastCover(song: song, scheme: scheme);
+                  final cover = _PodcastCover(song: song, scheme: scheme);
                   final heroPrefix = widget.heroTagPrefix;
                   final heroCover = heroPrefix == null
                       ? cover
@@ -207,16 +240,16 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
 
                         const SizedBox(height: 8),
 
-                        // Fila de skip + play
+                        // Fila de skip + play (play/pausa copiado de music player)
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             _SkipButton(
-                              icon: Icons.replay_10_rounded,
-                              label: '15',
+                              forward: false,
+                              seconds: 10,
                               onPressed: () {
                                 final t =
-                                    position - const Duration(seconds: 15);
+                                    position - const Duration(seconds: 10);
                                 _controller.seek(
                                   t < Duration.zero ? Duration.zero : t,
                                 );
@@ -233,8 +266,8 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                             ),
                             const SizedBox(width: 24),
                             _SkipButton(
-                              icon: Icons.forward_10_rounded,
-                              label: '30',
+                              forward: true,
+                              seconds: 30,
                               onPressed: () {
                                 final t =
                                     position + const Duration(seconds: 30);
@@ -247,13 +280,31 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                           ],
                         ),
 
+                        const SizedBox(height: 16),
+
+                        // ═══════════════════════════════════════════════
+                        // SLIDER DE VOLUMEN (copiado de music_player_screen)
+                        // ═══════════════════════════════════════════════
+                        _VolumeRow(
+                          scheme: scheme,
+                          isAdjustingVolume: _isAdjustingVolume,
+                          volumeValue: _volumeValue,
+                          lastNonZeroVolume: _lastNonZeroVolume,
+                          onStart: _onVolumeStart,
+                          onChanged: _onVolumeChanged,
+                          onEnd: _onVolumeEnd,
+                          onUpdateLast: _onVolumeUpdateLast,
+                        ),
+
                         const SizedBox(height: 24),
 
-                        // Selector de velocidad
+                        // ═══════════════════════════════════════════════
+                        // VARIANTE 1: Selector de velocidad [- / +]
+                        // ═══════════════════════════════════════════════
                         Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
+                            horizontal: 12,
+                            vertical: 6,
                           ),
                           decoration: BoxDecoration(
                             color: scheme.surfaceContainerHigh,
@@ -280,23 +331,37 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                                 ),
                               ),
                               const Spacer(),
-                              DropdownButton<double>(
-                                value: _speed,
-                                underline: const SizedBox.shrink(),
-                                dropdownColor: scheme.surfaceContainerHigh,
-                                borderRadius: BorderRadius.circular(12),
-                                items: [
-                                  for (final s in _speeds)
-                                    DropdownMenuItem(
-                                      value: s,
-                                      child: Text('${s}x'),
+                              _StepBtn(
+                                icon: Icons.remove_rounded,
+                                scheme: scheme,
+                                enabled: _speedIndex > 0,
+                                onPressed: () => _onSpeedSelected(
+                                  _speeds[_speedIndex - 1],
+                                ),
+                              ),
+                              SizedBox(
+                                width: 56,
+                                child: Center(
+                                  child: Text(
+                                    '${_speed}x',
+                                    style: TextStyle(
+                                      color: scheme.primary,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w700,
+                                      fontFeatures: const [
+                                        FontFeature.tabularFigures(),
+                                      ],
                                     ),
-                                ],
-                                onChanged: (v) {
-                                  if (v == null) return;
-                                  setState(() => _speed = v);
-                                  _controller.setSpeed(v);
-                                },
+                                  ),
+                                ),
+                              ),
+                              _StepBtn(
+                                icon: Icons.add_rounded,
+                                scheme: scheme,
+                                enabled: _speedIndex < _speeds.length - 1,
+                                onPressed: () => _onSpeedSelected(
+                                  _speeds[_speedIndex + 1],
+                                ),
                               ),
                             ],
                           ),
@@ -315,23 +380,11 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              _metaRow(
-                                'Álbum',
-                                song.albumOrUnknown,
-                                scheme,
-                              ),
+                              _metaRow('Álbum', song.albumOrUnknown, scheme),
                               const SizedBox(height: 8),
-                              _metaRow(
-                                'Artista',
-                                song.artistOrUnknown,
-                                scheme,
-                              ),
+                              _metaRow('Artista', song.artistOrUnknown, scheme),
                               const SizedBox(height: 8),
-                              _metaRow(
-                                'Archivo',
-                                song.fileName,
-                                scheme,
-                              ),
+                              _metaRow('Archivo', song.fileName, scheme),
                               const SizedBox(height: 8),
                               _metaRow(
                                 'Formato',
@@ -387,6 +440,91 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
   }
 }
 
+// ============================================================
+// FILA DE VOLUMEN (copiada de music_player_screen.dart)
+// ============================================================
+class _VolumeRow extends StatelessWidget {
+  final ColorScheme scheme;
+  final bool isAdjustingVolume;
+  final double? volumeValue;
+  final double lastNonZeroVolume;
+  final ValueChanged<double> onStart;
+  final ValueChanged<double> onChanged;
+  final ValueChanged<double> onEnd;
+  final ValueChanged<double> onUpdateLast;
+
+  const _VolumeRow({
+    required this.scheme,
+    required this.isAdjustingVolume,
+    required this.volumeValue,
+    required this.lastNonZeroVolume,
+    required this.onStart,
+    required this.onChanged,
+    required this.onEnd,
+    required this.onUpdateLast,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = PlaybackController.instance;
+
+    return ValueListenableBuilder<double>(
+      valueListenable: controller.volume,
+      builder: (context, streamVolume, _) {
+        final safeStream = streamVolume.clamp(0.0, 1.0);
+        final volume = isAdjustingVolume ? volumeValue! : safeStream;
+        final muted = volume <= 0.001;
+        final icon = muted
+            ? Icons.volume_off_rounded
+            : volume < 0.5
+                ? Icons.volume_down_rounded
+                : Icons.volume_up_rounded;
+
+        return Row(
+          children: [
+            IconButton(
+              icon: Icon(
+                icon,
+                color: scheme.onSurfaceVariant,
+              ),
+              tooltip: muted ? 'Activar sonido' : 'Silenciar',
+              onPressed: () {
+                if (muted) {
+                  controller.setVolume(lastNonZeroVolume);
+                } else {
+                  onUpdateLast(volume);
+                  controller.setVolume(0);
+                }
+              },
+            ),
+            Expanded(
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 2,
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 6,
+                  ),
+                  overlayShape: const RoundSliderOverlayShape(
+                    overlayRadius: 12,
+                  ),
+                ),
+                child: Slider(
+                  min: 0,
+                  max: 1,
+                  value: volume,
+                  onChangeStart: onStart,
+                  onChanged: onChanged,
+                  onChangeEnd: onEnd,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _PodcastCover extends StatelessWidget {
   final Song song;
   final ColorScheme scheme;
@@ -438,47 +576,101 @@ class _PodcastCover extends StatelessWidget {
       );
 }
 
+/// Botón de salto (±segundos) con iconos nativos simétricos de Material.
 class _SkipButton extends StatelessWidget {
-  final IconData icon;
-  final String label;
+  final bool forward;
+
+  /// Segundos del salto. Soportados nativamente: 5, 10 y 30.
+  final int seconds;
   final VoidCallback onPressed;
   final ColorScheme scheme;
+
   const _SkipButton({
-    required this.icon,
-    required this.label,
+    required this.forward,
+    required this.seconds,
     required this.onPressed,
     required this.scheme,
   });
 
+  IconData get _icon {
+    if (forward) {
+      switch (seconds) {
+        case 5:
+          return Icons.forward_5_rounded;
+        case 30:
+          return Icons.forward_30_rounded;
+        case 10:
+        default:
+          return Icons.forward_10_rounded;
+      }
+    } else {
+      switch (seconds) {
+        case 5:
+          return Icons.replay_5_rounded;
+        case 30:
+          return Icons.replay_30_rounded;
+        case 10:
+        default:
+          return Icons.replay_10_rounded;
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        IconButton(
-          icon: Icon(icon, size: 38, color: scheme.onSurface),
-          onPressed: onPressed,
-        ),
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 9,
-              fontWeight: FontWeight.w700,
-              color: scheme.onSurface,
-            ),
-          ),
-        ),
-      ],
+    return IconButton(
+      icon: Icon(_icon, size: 38, color: scheme.onSurface),
+      onPressed: onPressed,
     );
   }
 }
 
+/// VARIANTE 1: botón circular [-] / [+] para el selector de velocidad.
+class _StepBtn extends StatelessWidget {
+  final IconData icon;
+  final ColorScheme scheme;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  const _StepBtn({
+    required this.icon,
+    required this.scheme,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: scheme.surfaceContainerHighest,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: enabled ? onPressed : null,
+        child: SizedBox(
+          width: 32,
+          height: 32,
+          child: Icon(
+            icon,
+            size: 18,
+            color: enabled
+                ? scheme.onSurface
+                : scheme.onSurfaceVariant.withValues(alpha: 0.35),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// BOTÓN PLAY/PAUSA (copiado de _BigPlayButton en music_player_screen)
+// ============================================================
 class _PodcastPlayButton extends StatelessWidget {
   final bool isPlaying;
   final VoidCallback onPressed;
   final ColorScheme scheme;
+
   const _PodcastPlayButton({
     required this.isPlaying,
     required this.onPressed,
@@ -516,6 +708,11 @@ class _PodcastPlayButton extends StatelessWidget {
           onTap: onPressed,
           child: AnimatedSwitcher(
             duration: const Duration(milliseconds: 200),
+            // Scale + fade, idéntico a _BigPlayButton del music player.
+            transitionBuilder: (child, animation) => ScaleTransition(
+              scale: animation,
+              child: FadeTransition(opacity: animation, child: child),
+            ),
             child: Icon(
               isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
               key: ValueKey(isPlaying),
