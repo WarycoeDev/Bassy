@@ -7,11 +7,8 @@ import 'package:flutter/foundation.dart';
 import '../models/song.dart';
 import 'playback_audio_handler.dart';
 
-/// Umbral a partir del cual "previous" reinicia la canción en vez de
-/// saltar a la anterior. Debe coincidir con el usado en el miniplayer.
 const Duration kRewindThreshold = Duration(seconds: 3);
 
-/// Fachada que la UI consume. Se inicializa en main() con `init()`.
 class PlaybackController {
   PlaybackController._();
   static final PlaybackController instance = PlaybackController._();
@@ -37,8 +34,6 @@ class PlaybackController {
       config: const AudioServiceConfig(
         androidNotificationChannelId: 'com.example.bassy.audio',
         androidNotificationChannelName: 'Reproducción',
-        // false/false: el servicio sigue en foreground al pausar, así la
-        // notificación y los controles de bloqueo no se desfasan.
         androidNotificationOngoing: false,
         androidStopForegroundOnPause: false,
         androidNotificationIcon: 'mipmap/ic_launcher',
@@ -55,32 +50,23 @@ class PlaybackController {
   }) =>
       handler.setQueue(songs, startIndex: startIndex, autoPlay: autoPlay);
 
-  /// Vacía la cola, deja solo [song] y la reproduce desde 0,
-  /// cortando lo que sonaba antes.
   Future<void> playOnly(Song song) => handler.playOnly(song);
-
   Future<void> playSong(Song song) => handler.playSong(song);
   Future<void> play() => handler.play();
   Future<void> pause() => handler.pause();
   Future<void> next() => handler.skipToNext();
 
-  /// Si llevamos más de [kRewindThreshold] en la canción actual, reinicia;
-  /// si no, salta a la anterior (si existe). Si no hay anterior y estamos
-  /// al inicio, no hace nada.
   Future<void> previous() async {
     final h = _handler;
     if (h == null) return;
-
     final pos = h.position;
     if (pos > kRewindThreshold) {
       await h.seek(Duration.zero);
       return;
     }
-
     if (h.hasPrevious) {
       await h.skipToPrevious();
     } else {
-      // Última red de seguridad: si no hay anterior, volver al inicio.
       await h.seek(Duration.zero);
     }
   }
@@ -89,19 +75,16 @@ class PlaybackController {
   Future<void> playFromQueue(int index) => handler.playFromQueue(index);
   Future<void> addToQueue(Song song) => handler.addToQueue(song);
 
-  /// Velocidad de reproducción (1.0 = normal). Usado por el player de podcast.
   Future<void> setSpeed(double speed) => handler.setSpeed(speed);
+  Future<void> setVolume(double volume) => handler.setVolume(volume);
 
-  /// Shuffle / repeat reales (setter propio de la UI).
   Future<void> setShuffle(bool enabled) => handler.setShuffle(enabled);
   Future<void> setRepeatMode(PlayerRepeatMode mode) =>
       handler.setRepeatModeForUI(mode);
 
-  /// Vacía la cola y detiene la reproducción (usado por el swipe del
-  /// miniplayer para descartar lo que está sonando).
   Future<void> clearQueue() => handler.clearQueue();
 
-  // ---- Streams (nativos, sin rxdart) ----
+  // ---- Streams ----
 
   Stream<MediaItem?> get currentItem => handler.mediaItem;
   Stream<PlaybackState> get playbackState => handler.playbackState;
@@ -109,12 +92,13 @@ class PlaybackController {
   Stream<Duration?> get duration => handler.durationStream;
   Stream<bool> get isPlaying => handler.playingStream;
 
-  /// Shuffle / repeat (reactivos).
   Stream<bool> get shuffle => handler.shuffleStream;
   Stream<PlayerRepeatMode> get repeat => handler.repeatStream;
 
-  /// `true` cuando "previous" debe estar habilitado:
-  /// hay canción anterior **o** ya se superó el umbral de rewind.
+  /// Volumen como `ValueListenable` (siempre tiene el último valor,
+  /// ideal para sliders que se arrastran).
+  ValueListenable<double> get volume => handler.volumeListenable;
+
   Stream<bool> get canGoPrevious async* {
     final controller = StreamController<bool>();
     StreamSubscription<Duration>? posSub;
@@ -139,11 +123,10 @@ class PlaybackController {
       await itemSub?.cancel();
     };
 
-    emit(); // valor inicial
+    emit();
     yield* controller.stream;
   }
 
-  /// `true` cuando "next" debe estar habilitado.
   Stream<bool> get canGoNext async* {
     final controller = StreamController<bool>();
     StreamSubscription<MediaItem?>? itemSub;
@@ -167,7 +150,7 @@ class PlaybackController {
     yield* controller.stream;
   }
 
-  // ---- Getters de datos con guard ----
+  // ---- Getters ----
 
   List<Song> get songs => _handler?.songs ?? const [];
   Song? get currentSong => _handler?.currentSong;
@@ -177,8 +160,8 @@ class PlaybackController {
   bool get hasPrevious => _handler?.hasPrevious ?? false;
   Duration get positionNow => _handler?.position ?? Duration.zero;
 
-  /// Velocidad actual del reproductor (1.0 = normal).
   double get speedNow => _handler?.playerSpeed ?? 1.0;
+  double get volumeNow => _handler?.volume ?? 1.0;
 
   bool get shuffleEnabled => _handler?.shuffleEnabled ?? false;
   PlayerRepeatMode get repeatModeNow =>

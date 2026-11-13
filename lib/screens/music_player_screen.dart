@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../models/song.dart';
 import '../services/playback_audio_handler.dart' show PlayerRepeatMode;
 import '../services/playback_controller.dart';
+import '../widgets/queue_viewer.dart';
 
 String _fmt(Duration d) {
   final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -14,11 +15,7 @@ String _fmt(Duration d) {
   return '$m:$s';
 }
 
-/// Player de MÚSICA: carátula grande, título/artista, barra de progreso
-/// con seek, y controles (shuffle / prev / play-pause / next / repeat).
 class MusicPlayerScreen extends StatefulWidget {
-  /// Prefijo del `Hero` que viene del miniplayer que abrió esta pantalla.
-  /// Si es `null`, no se anima el cover.
   final String? heroTagPrefix;
 
   const MusicPlayerScreen({super.key, this.heroTagPrefix});
@@ -29,6 +26,26 @@ class MusicPlayerScreen extends StatefulWidget {
 
 class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
   final _controller = PlaybackController.instance;
+
+  double? _seekValue;
+  bool get _isSeeking => _seekValue != null;
+
+  double? _volumeValue;
+  bool get _isAdjustingVolume => _volumeValue != null;
+
+  double _lastNonZeroVolume = 1.0;
+
+  /// Estado local de favorito (placeholder hasta que exista persistencia).
+  bool _isFavorite = false;
+
+  Future<void> _onSeekEnd(double valueMs) async {
+    final target = Duration(milliseconds: valueMs.round());
+    await _controller.seek(target);
+    if (!mounted) return;
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    if (!mounted) return;
+    setState(() => _seekValue = null);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -65,8 +82,14 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
               final maxMs = duration.inMilliseconds
                   .toDouble()
                   .clamp(1.0, double.infinity);
-              final valueMs =
+
+              final streamMs =
                   position.inMilliseconds.toDouble().clamp(0.0, maxMs);
+              final valueMs = _isSeeking ? _seekValue! : streamMs;
+
+              final shownPosition = _isSeeking
+                  ? Duration(milliseconds: valueMs.round())
+                  : position;
 
               return StreamBuilder<bool>(
                 stream: _controller.isPlaying,
@@ -89,7 +112,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                             );
 
                       return SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
+                        padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
                         child: Column(
                           children: [
                             const SizedBox(height: 8),
@@ -134,10 +157,14 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                 min: 0,
                                 max: maxMs,
                                 value: valueMs,
+                                onChangeStart: duration.inMilliseconds > 0
+                                    ? (v) => setState(() => _seekValue = v)
+                                    : null,
                                 onChanged: duration.inMilliseconds > 0
-                                    ? (v) => _controller.seek(
-                                          Duration(milliseconds: v.round()),
-                                        )
+                                    ? (v) => setState(() => _seekValue = v)
+                                    : null,
+                                onChangeEnd: duration.inMilliseconds > 0
+                                    ? _onSeekEnd
                                     : null,
                               ),
                             ),
@@ -149,7 +176,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                     MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text(
-                                    _fmt(position),
+                                    _fmt(shownPosition),
                                     style: TextStyle(
                                       color: scheme.onSurfaceVariant,
                                       fontSize: 12,
@@ -175,7 +202,6 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                               children: [
-                                // SHUFFLE
                                 StreamBuilder<bool>(
                                   stream: _controller.shuffle,
                                   initialData: _controller.shuffleEnabled,
@@ -194,7 +220,6 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                     );
                                   },
                                 ),
-                                // PREVIOUS
                                 IconButton(
                                   icon: Icon(
                                     Icons.skip_previous_rounded,
@@ -204,7 +229,6 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                   tooltip: 'Anterior',
                                   onPressed: _controller.previous,
                                 ),
-                                // PLAY / PAUSE
                                 _BigPlayButton(
                                   isPlaying: isPlaying,
                                   onPressed: isPlaying
@@ -212,7 +236,6 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                       : _controller.play,
                                   scheme: scheme,
                                 ),
-                                // NEXT
                                 IconButton(
                                   icon: Icon(
                                     Icons.skip_next_rounded,
@@ -227,7 +250,6 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                       ? _controller.next
                                       : null,
                                 ),
-                                // REPEAT
                                 StreamBuilder<PlayerRepeatMode>(
                                   stream: _controller.repeat,
                                   initialData: _controller.repeatModeNow,
@@ -265,6 +287,117 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                 ),
                               ],
                             ),
+                            const SizedBox(height: 8),
+                            // ---------- VOLUMEN ----------
+                            ValueListenableBuilder<double>(
+                              valueListenable: _controller.volume,
+                              builder: (context, streamVolume, _) {
+                                final safeStream =
+                                    streamVolume.clamp(0.0, 1.0);
+                                final volume = _isAdjustingVolume
+                                    ? _volumeValue!
+                                    : safeStream;
+                                final muted = volume <= 0.001;
+                                final icon = muted
+                                    ? Icons.volume_off_rounded
+                                    : volume < 0.5
+                                        ? Icons.volume_down_rounded
+                                        : Icons.volume_up_rounded;
+
+                                return Row(
+                                  children: [
+                                    IconButton(
+                                      icon: Icon(
+                                        icon,
+                                        color: scheme.onSurfaceVariant,
+                                      ),
+                                      tooltip: muted
+                                          ? 'Activar sonido'
+                                          : 'Silenciar',
+                                      onPressed: () {
+                                        if (muted) {
+                                          _controller.setVolume(
+                                              _lastNonZeroVolume);
+                                        } else {
+                                          _lastNonZeroVolume = volume;
+                                          _controller.setVolume(0);
+                                        }
+                                      },
+                                    ),
+                                    Expanded(
+                                      child: SliderTheme(
+                                        data:
+                                            SliderTheme.of(context).copyWith(
+                                          trackHeight: 2,
+                                          thumbShape:
+                                              const RoundSliderThumbShape(
+                                            enabledThumbRadius: 6,
+                                          ),
+                                          overlayShape:
+                                              const RoundSliderOverlayShape(
+                                            overlayRadius: 12,
+                                          ),
+                                        ),
+                                        child: Slider(
+                                          min: 0,
+                                          max: 1,
+                                          value: volume,
+                                          onChangeStart: (v) {
+                                            setState(
+                                                () => _volumeValue = v);
+                                          },
+                                          onChanged: (v) {
+                                            setState(
+                                                () => _volumeValue = v);
+                                            if (v > 0.001) {
+                                              _lastNonZeroVolume = v;
+                                            }
+                                            _controller.setVolume(v);
+                                          },
+                                          onChangeEnd: (v) {
+                                            setState(
+                                                () => _volumeValue = null);
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
+                            const SizedBox(height: 16),
+                            // ---------- BOTONES CENTRALES ----------
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                // Favoritos (placeholder, sin persistencia aún)
+                                _RoundIconButton(
+                                  icon: _isFavorite
+                                      ? Icons.favorite_rounded
+                                      : Icons.favorite_border_rounded,
+                                  tooltip: _isFavorite
+                                      ? 'Quitar de favoritos'
+                                      : 'Añadir a favoritos',
+                                  scheme: scheme,
+                                  color: _isFavorite ? scheme.error : null,
+                                  onPressed: () {
+                                    setState(
+                                        () => _isFavorite = !_isFavorite);
+                                    // TODO: persistir favorito para `song`.
+                                  },
+                                ),
+                                const SizedBox(width: 12),
+                                // Ver cola (funcional)
+                                _LabeledButton(
+                                  icon: Icons.playlist_play_rounded,
+                                  label: 'Ver Cola',
+                                  scheme: scheme,
+                                  onPressed: () {
+                                    QueueViewer.show(context);
+                                  },
+                                ),
+                              ],
+                            ),
                           ],
                         ),
                       );
@@ -294,7 +427,6 @@ class _Cover extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest,
-        // Radius fijo (24) para que el vuelo del Hero no salte al aterrizar.
         borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
@@ -377,6 +509,124 @@ class _BigPlayButton extends StatelessWidget {
               key: ValueKey(isPlaying),
               color: scheme.onPrimary,
               size: 40,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// BOTÓN REDONDO (solo icono)
+// ============================================================
+class _RoundIconButton extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final ColorScheme scheme;
+
+  /// Color opcional del icono. Si es `null`, usa `scheme.onSurface`.
+  final Color? color;
+
+  final VoidCallback onPressed;
+
+  const _RoundIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.scheme,
+    required this.onPressed,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final iconColor = color ?? scheme.onSurface;
+    return Container(
+      width: 48,
+      height: 48,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: scheme.surfaceContainerHigh,
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.4),
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          customBorder: const CircleBorder(),
+          child: Tooltip(
+            message: tooltip,
+            child: Icon(
+              icon,
+              color: iconColor,
+              size: 24,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// BOTÓN REDONDEADO (icono + texto)
+// ============================================================
+class _LabeledButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final ColorScheme scheme;
+  final VoidCallback onPressed;
+
+  const _LabeledButton({
+    required this.icon,
+    required this.label,
+    required this.scheme,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        color: scheme.surfaceContainerHigh,
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.4),
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(24),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(24),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  color: scheme.onSurface,
+                  size: 22,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ],
             ),
           ),
         ),

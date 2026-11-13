@@ -9,43 +9,23 @@ import 'package:just_audio/just_audio.dart';
 
 import '../models/song.dart';
 
-/// Modo de repetición expuesto a la UI. Se llama `PlayerRepeatMode` para
-/// no colisionar con el `RepeatMode` que exporta `package:flutter/material.dart`.
+/// Modo de repetición expuesto a la UI.
 enum PlayerRepeatMode { off, all, one }
 
-/// Handler que expone la cola y delega la reproducción a just_audio.
-///
-/// Patrón (igual que DecibeXAudioHandler): TODO lo que ve el sistema
-/// (mediaItem, queue, playbackState) sale de un único método, [_publish],
-/// que recalcula el estado completo desde el player. Nada más llama a
-/// mediaItem.add / queue.add / playbackState.add.
 class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   final AudioPlayer _player = AudioPlayer();
 
-  /// Cola actual. Invariante: solo contiene canciones reproducibles
-  /// (path no vacío y archivo existente), por lo que el índice de la cola
-  /// coincide siempre con el índice de la fuente concatenada.
   List<Song> _songs = const [];
   int _currentIndex = -1;
 
   ConcatenatingAudioSource? _queueSource;
 
-  /// Serializa las cargas; la última llamada gana.
   Future<void> _loadChain = Future<void>.value();
   int _loadGeneration = 0;
 
-  /// `true` mientras se reemplaza la fuente (ignora eventos de índice viejos).
   bool _loading = false;
-
-  /// Intención de reproducir mientras dura la carga. Evita publicar
-  /// `playing:false` (el pause() interno) cuando en realidad se está
-  /// cambiando de canción.
   bool _resumeAfterLoad = false;
-
-  /// Evita reentrar en la normalización de "completed".
   bool _handlingCompleted = false;
-
-  // ---- Estado de publicación (dedupe) ----
 
   bool _isSeeking = false;
   int _seekGeneration = 0;
@@ -64,11 +44,20 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _shuffleEnabled = false;
   PlayerRepeatMode _repeatMode = PlayerRepeatMode.off;
 
-  /// Orden original de la cola (sin barajar). Se conserva para poder
-  /// deshacer el shuffle sin perder canciones ni reordenar de más.
   List<Song> _originalOrder = const [];
 
-  // ---- Estado reactivo (para la UI) ----
+  // ---- Volumen (persistente, con ValueNotifier) ----
+  //
+  // `ValueNotifier` en lugar de `StreamController` porque:
+  //  - Siempre tiene el último valor disponible para nuevos oyentes y
+  //    builds síncronos (evita el "slider salta al soltar").
+  //  - `_volumeNotifier.value = v` es síncrono: el `ValueListenableBuilder`
+  //    lo ve en el mismo frame.
+
+  double _volume = 1.0;
+  final ValueNotifier<double> _volumeNotifier = ValueNotifier<double>(1.0);
+
+  // ---- Streams reactivos ----
 
   final _shuffleCtrl = StreamController<bool>.broadcast();
   final _repeatCtrl = StreamController<PlayerRepeatMode>.broadcast();
@@ -81,7 +70,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   final List<StreamSubscription<dynamic>> _subs = [];
 
   PlaybackAudioHandler() {
-    // Solo log de errores; el estado se publica desde los streams de abajo.
     _subs.add(_player.playbackEventStream.listen(
       (_) {},
       onError: (Object e, StackTrace st) {
@@ -99,49 +87,41 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       }
     }));
 
-    // just_audio avanza solo de canción.
     _subs.add(_player.currentIndexStream.listen((sourceIndex) {
-      if (_loading) return; // durante la carga los índices no son fiables
+      if (_loading) return;
       if (sourceIndex == null) return;
       if (sourceIndex < 0 || sourceIndex >= _songs.length) return;
       _currentIndex = sourceIndex;
       _emitControlsState();
     }));
 
-    // La duración real del archivo llega después de cargar.
     _subs.add(_player.durationStream.listen((_) => _publish()));
-
-    // Saltos de posición (seek, cambio de pista).
     _subs.add(_player.positionDiscontinuityStream.listen((_) => _publish()));
-
-    // Posición: republica mientras suena (throttled).
     _subs.add(_player.positionStream.listen(_onPosition));
 
-    // La velocidad puede cambiar desde el sistema (notificación, BT, etc.).
     _subs.add(_player.speedStream.listen((_) => _publish()));
+
+    _subs.add(_player.volumeStream.listen((v) {
+      _volume = v;
+      _volumeNotifier.value = v;
+    }));
 
     _publish();
   }
 
   void _onPosition(Duration _) {
     _emitCanGoPrevious();
-
     if (!_player.playing) return;
-
     final now = DateTime.now();
     if (now.difference(_lastPositionPublish) < _positionPublishEvery) return;
     _lastPositionPublish = now;
-
     _publish();
   }
 
-  /// just_audio deja `playing == true` al terminar la cola; lo normalizamos
-  /// (pausa y vuelve al inicio) para que la notificación sea coherente.
   Future<void> _onCompleted() async {
     if (_handlingCompleted || _loading || _songs.isEmpty) return;
     _handlingCompleted = true;
     try {
-      // Con LoopMode.one, just_audio ya reinicia solo; no intervenimos.
       if (_repeatMode == PlayerRepeatMode.one) return;
       await _player.pause();
       await _player.seek(Duration.zero, index: 0);
@@ -154,9 +134,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  // ---------- Publicación única hacia audio_service ----------
-
-  /// Estado "playing" que ve el sistema.
   bool get _effectivePlaying {
     if (_songs.isEmpty) return false;
     if (_loading) return _resumeAfterLoad;
@@ -174,7 +151,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       ProcessingState.loading => AudioProcessingState.loading,
       ProcessingState.buffering => AudioProcessingState.buffering,
       ProcessingState.ready => AudioProcessingState.ready,
-      // Se normaliza enseguida en _onCompleted; mientras tanto, "ready".
       ProcessingState.completed => AudioProcessingState.ready,
     };
   }
@@ -190,8 +166,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       : AudioServiceShuffleMode.none;
 
   void _publish({bool updateControls = true, bool updateQueue = true}) {
-    // Android reconstruye la notificación al recibir cambios de
-    // controles/cola. Durante un seek solo se actualiza la posición.
     if (_isSeeking) {
       updateControls = false;
       updateQueue = false;
@@ -207,7 +181,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
           _lastMediaItemKey = null;
         }
       } else {
-        // Durante la carga _player.duration es de la pista anterior.
         final d = _loading ? null : _player.duration;
         final liveDuration = (d != null && d > Duration.zero) ? d : null;
         final key = '${song.path ?? song.title}|${liveDuration?.inMilliseconds}';
@@ -287,7 +260,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
-  // ---------- Getters de estado (sincrónicos) ----------
+  // ---------- Getters ----------
 
   bool get hasNext {
     if (_queueSource == null) return false;
@@ -307,8 +280,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   bool get canGoNext => hasNext;
 
-  /// Velocidad actual (1.0 = normal).
   double get playerSpeed => _player.speed;
+
+  double get volume => _volume;
+  ValueListenable<double> get volumeListenable => _volumeNotifier;
 
   bool get shuffleEnabled => _shuffleEnabled;
   PlayerRepeatMode get repeatMode => _repeatMode;
@@ -329,7 +304,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (!_canGoNextCtrl.isClosed) _canGoNextCtrl.add(next);
   }
 
-  /// Emite los estados de los botones y republica todo.
   void _emitControlsState() {
     _emitCanGoPrevious();
     _emitCanGoNext();
@@ -341,7 +315,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<bool> get shuffleStream => _shuffleCtrl.stream;
   Stream<PlayerRepeatMode> get repeatStream => _repeatCtrl.stream;
 
-  // ---------- API pública para la UI ----------
+  // ---------- API pública ----------
 
   List<Song> get songs => List.unmodifiable(_songs);
 
@@ -358,7 +332,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<Duration?> get durationStream => _player.durationStream;
   Stream<bool> get playingStream => _player.playingStream;
 
-  // ---------- Shuffle / Repeat: setters ----------
+  // ---------- Shuffle / Repeat ----------
 
   Future<void> setShuffle(bool enabled) async {
     if (_shuffleEnabled == enabled) return;
@@ -375,7 +349,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     List<Song> newOrder;
     if (enabled) {
-      // Guardar el orden original solo la primera vez que se activa.
       if (_originalOrder.isEmpty) {
         _originalOrder = List<Song>.from(_songs);
       }
@@ -410,7 +383,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
-  /// Setter para la UI (nuestro enum propio).
   Future<void> setRepeatModeForUI(PlayerRepeatMode mode) async {
     if (_repeatMode == mode) return;
     _repeatMode = mode;
@@ -419,27 +391,22 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _publish();
   }
 
-  /// Override del contrato de audio_service (notificación, Bluetooth, coche).
-  /// Traduce `AudioServiceRepeatMode` a nuestro `PlayerRepeatMode`.
   @override
   Future<void> setRepeatMode(AudioServiceRepeatMode repeatMode) async {
     final next = switch (repeatMode) {
       AudioServiceRepeatMode.none => PlayerRepeatMode.off,
       AudioServiceRepeatMode.all => PlayerRepeatMode.all,
       AudioServiceRepeatMode.one => PlayerRepeatMode.one,
-      // "group" no lo soportamos; lo tratamos como off.
       AudioServiceRepeatMode.group => PlayerRepeatMode.off,
     };
     await setRepeatModeForUI(next);
   }
 
-  /// Override del contrato de audio_service (shuffle desde notificación/BT).
   @override
   Future<void> setShuffleMode(AudioServiceShuffleMode shuffleMode) async {
     final enable = switch (shuffleMode) {
       AudioServiceShuffleMode.all => true,
       AudioServiceShuffleMode.none => false,
-      // "group" no lo soportamos; lo tratamos como off.
       AudioServiceShuffleMode.group => false,
     };
     await setShuffle(enable);
@@ -456,8 +423,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  /// Reemplaza la fuente sin cortar audio si es posible: preserva posición
-  /// y estado de reproducción.
   Future<void> _reloadQueueWith(
     List<Song> order,
     int startIndex,
@@ -498,6 +463,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     await _applyLoopMode();
+    await _player.setVolume(_volume); // reafirma persistencia
     _emitControlsState();
   }
 
@@ -513,8 +479,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     return true;
   }
 
-  /// Reemplaza toda la cola. Si llegan varias llamadas seguidas, se ejecutan
-  /// en orden y las intermedias se descartan (gana la última).
   Future<void> setQueue(
     List<Song> songs, {
     int startIndex = 0,
@@ -553,18 +517,14 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     var newStart = playable.indexWhere((s) => identical(s, target));
     if (newStart < 0) newStart = 0;
 
-    // Cualquier carga nueva reinicia shuffle al orden original.
     _originalOrder = List<Song>.from(playable);
     _shuffleEnabled = false;
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
 
-    // Desde aquí el sistema ve "cargando" y la intención de reproducir,
-    // sin pasar nunca por playing:false.
     _loading = true;
     _resumeAfterLoad = autoPlay;
 
     try {
-      // Corta ya el audio anterior (no espera a que termine la canción).
       await _player.pause();
 
       _songs = playable;
@@ -601,14 +561,16 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     await _applyLoopMode();
 
+    // Persistencia de volumen entre canciones: no dependemos de que
+    // just_audio lo conserve, lo reafirmamos.
+    await _player.setVolume(_volume);
+
     if (autoPlay) {
-      // No await: el Future de play() dura toda la canción.
       unawaited(_player.play().catchError((Object e, StackTrace st) {
         debugPrint('PlaybackAudioHandler: play falló -> $e\n$st');
       }));
     }
 
-    // Publica DESPUÉS de lanzar el play (player.playing ya es true).
     _emitControlsState();
   }
 
@@ -625,7 +587,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> clearQueue() {
-    // Invalida cargas pendientes para que no "resuciten" la cola.
     _loadGeneration++;
     return _clearQueue();
   }
@@ -699,7 +660,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   Future<void> playFromQueue(int index) => skipToQueueItem(index);
 
-  // ---------- Velocidad ----------
+  // ---------- Velocidad y volumen ----------
 
   Future<void> setSpeed(double speed) async {
     if (speed <= 0) return;
@@ -707,7 +668,19 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _publish();
   }
 
-  // ---------- Overrides de BaseAudioHandler ----------
+  Future<void> setVolume(double volume) async {
+    final v = volume.clamp(0.0, 1.0);
+    // Actualización síncrona del notifier PRIMERO: si esto es un drag
+    // que acaba de terminar, el `ValueListenableBuilder` verá el valor
+    // final en el mismo frame en que se limpia `_volumeValue` en la UI.
+    _volume = v;
+    _volumeNotifier.value = v;
+
+    if ((v - _player.volume).abs() < 0.001) return;
+    await _player.setVolume(v);
+  }
+
+  // ---------- Overrides ----------
 
   @override
   Future<void> play() async {
@@ -715,11 +688,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       debugPrint('PlaybackAudioHandler: play() sin fuente cargada');
       return;
     }
-    // No await: el Future de play() dura mientras suena.
     unawaited(_player.play().catchError((Object e, StackTrace st) {
       debugPrint('PlaybackAudioHandler: play falló -> $e\n$st');
     }));
-    _publish(); // _player.playing ya es true (just_audio lo fija síncrono)
+    _publish();
   }
 
   @override
@@ -756,11 +728,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> skipToNext() async {
     if (!hasNext || _queueSource == null) return;
     await _player.seekToNext();
-    // El listener de currentIndexStream actualiza el índice y publica.
     _emitControlsState();
   }
 
-  /// "Previous" estilo Spotify/YouTube.
   @override
   Future<void> skipToPrevious() async {
     if (_queueSource == null) return;
@@ -802,10 +772,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<void> onTaskRemoved() async {
-    // Mantener la reproducción mientras el usuario cierra la UI desde
-    // recientes; Android seguirá gestionando la sesión multimedia.
-  }
+  Future<void> onTaskRemoved() async {}
 
   Future<void> dispose() async {
     for (final s in _subs) {
@@ -816,6 +783,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     await _canGoNextCtrl.close();
     await _shuffleCtrl.close();
     await _repeatCtrl.close();
+    _volumeNotifier.dispose();
     await _player.dispose();
   }
 }

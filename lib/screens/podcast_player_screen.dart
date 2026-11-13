@@ -29,6 +29,10 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
 
   double _speed = 1.0;
 
+  /// Valor del dedo mientras se arrastra el slider. `null` = no arrastrando.
+  double? _seekValue;
+  bool get _isSeeking => _seekValue != null;
+
   static const _speeds = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
   @override
@@ -36,6 +40,15 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
     super.initState();
     final current = _controller.speedNow;
     if (current > 0) _speed = current;
+  }
+
+  Future<void> _onSeekEnd(double valueMs) async {
+    final target = Duration(milliseconds: valueMs.round());
+    await _controller.seek(target);
+    if (!mounted) return;
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    if (!mounted) return;
+    setState(() => _seekValue = null);
   }
 
   @override
@@ -73,9 +86,15 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
               final maxMs = duration.inMilliseconds
                   .toDouble()
                   .clamp(1.0, double.infinity);
-              final valueMs =
+
+              final streamMs =
                   position.inMilliseconds.toDouble().clamp(0.0, maxMs);
-              final remaining = duration - position;
+              final valueMs = _isSeeking ? _seekValue! : streamMs;
+
+              final shownPosition = _isSeeking
+                  ? Duration(milliseconds: valueMs.round())
+                  : position;
+              final remaining = duration - shownPosition;
 
               return StreamBuilder<bool>(
                 stream: _controller.isPlaying,
@@ -158,10 +177,14 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                             min: 0,
                             max: maxMs,
                             value: valueMs,
+                            onChangeStart: duration.inMilliseconds > 0
+                                ? (v) => setState(() => _seekValue = v)
+                                : null,
                             onChanged: duration.inMilliseconds > 0
-                                ? (v) => _controller.seek(
-                                      Duration(milliseconds: v.round()),
-                                    )
+                                ? (v) => setState(() => _seekValue = v)
+                                : null,
+                            onChangeEnd: duration.inMilliseconds > 0
+                                ? _onSeekEnd
                                 : null,
                           ),
                         ),
@@ -170,8 +193,14 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Text(_fmt(position), style: _timeStyle(scheme)),
-                              Text(_fmt(duration), style: _timeStyle(scheme)),
+                              Text(
+                                _fmt(shownPosition),
+                                style: _timeStyle(scheme),
+                              ),
+                              Text(
+                                _fmt(duration),
+                                style: _timeStyle(scheme),
+                              ),
                             ],
                           ),
                         ),
