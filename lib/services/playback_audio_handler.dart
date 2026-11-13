@@ -749,6 +749,49 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     await _clearQueueOf(kind);
   }
 
+  /// Limpia **ambas** colas (música y capítulos) y deja el reproductor
+  /// parado. La cola activa vuelve a ser la de música por defecto.
+  Future<void> clearAllQueues() async {
+    _loadGeneration++;
+
+    // Guarda estado actual antes de limpiar.
+    _activeQueue.saveLiveState(
+      position: _player.position,
+      playing: false,
+    );
+
+    // Limpia datos de ambas colas.
+    _musicQueue.reset();
+    _chaptersQueue.reset();
+
+    // Detiene y vacía el player.
+    _queueSource = null;
+    _resumeAfterLoad = false;
+    try {
+      await _player.stop();
+    } catch (e, st) {
+      debugPrint(
+        'PlaybackAudioHandler: stop en clearAllQueues falló -> $e\n$st',
+      );
+    }
+
+    // Cola activa por defecto: música.
+    _activeQueue = _musicQueue;
+
+    // Notifica a la UI del cambio de cola activa.
+    if (!_activeQueueCtrl.isClosed) {
+      _activeQueueCtrl.add(MediaKind.music);
+    }
+    if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
+    if (!_repeatCtrl.isClosed) _repeatCtrl.add(PlayerRepeatMode.off);
+
+    // Fuerza republicación de mediaItem/queue vacíos.
+    _lastMediaItemKey = null;
+    _lastQueueKey = null;
+
+    _emitControlsState();
+  }
+
   // ============================================================
   // ADD / REMOVE / REORDER (activa + por kind)
   // ============================================================
@@ -890,7 +933,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // ============================================================
 
   Future<void> playSong(Song song) async {
-    // Si está en la cola de su kind, saltamos a ella; si no, playOnly.
     final q = _queueFor(song.kind);
     final idx = q.songs.indexWhere((s) => s.path == song.path);
     if (idx >= 0) {

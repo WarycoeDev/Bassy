@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
+import '../services/playback_controller.dart';
 import 'music_player_screen.dart';
 import 'podcast_player_screen.dart';
 
@@ -13,6 +14,9 @@ const double _kDesktopBreakpoint = 900.0;
 /// En pantallas grandes (escritorio/web) el reproductor se abre como un
 /// **popup flotante** con bordes redondeados y sombra. En móvil se mantiene
 /// la transición de pantalla completa deslizante.
+///
+/// Una vez abierto, el player **cambia en vivo** si la cola activa cambia
+/// de `MediaKind` (música ↔ capítulos), sin necesidad de cerrar y reabrir.
 ///
 /// [heroTagPrefix] indica qué miniplayer está abriendo el player, para que
 /// el `Hero` del cover use un tag coherente con el del origen. Si es `null`
@@ -34,9 +38,10 @@ Future<void> openPlayerFor(
       opaque: true,
       transitionDuration: const Duration(milliseconds: 280),
       reverseTransitionDuration: const Duration(milliseconds: 220),
-      pageBuilder: (_, __, ___) => song.kind == MediaKind.podcast
-          ? PodcastPlayerScreen(heroTagPrefix: heroTagPrefix)
-          : MusicPlayerScreen(heroTagPrefix: heroTagPrefix),
+      pageBuilder: (_, __, ___) => _AdaptivePlayerScreen(
+        fallbackSong: song,
+        heroTagPrefix: heroTagPrefix,
+      ),
       transitionsBuilder: (_, anim, __, child) {
         final curved = CurvedAnimation(
           parent: anim,
@@ -94,7 +99,7 @@ Future<void> _showFloatingPlayer(
         child: ClipRRect(
           borderRadius: BorderRadius.circular(28),
           child: _DraggablePlayerContent(
-            song: song,
+            fallbackSong: song,
             heroTagPrefix: heroTagPrefix,
           ),
         ),
@@ -103,24 +108,61 @@ Future<void> _showFloatingPlayer(
   );
 }
 
-/// Contenido del popup: header arrastrable + player embebido.
-///
-/// Como el player tiene su propio `AppBar` con botón de cerrar, aquí solo
-/// envolvemos el screen para que se adapte al diálogo (sin `Scaffold` extra).
+/// Contenido del popup de escritorio: envuelve el player adaptativo.
 class _DraggablePlayerContent extends StatelessWidget {
-  final Song song;
+  final Song fallbackSong;
   final String? heroTagPrefix;
 
   const _DraggablePlayerContent({
-    required this.song,
+    required this.fallbackSong,
     required this.heroTagPrefix,
   });
 
   @override
   Widget build(BuildContext context) {
-    // El screen ya trae Scaffold + AppBar; dentro de un Dialog se ve bien
-    // como tarjeta flotante. Usamos ClipRect para respetar bordes.
-    return song.kind == MediaKind.podcast
+    return _AdaptivePlayerScreen(
+      fallbackSong: fallbackSong,
+      heroTagPrefix: heroTagPrefix,
+    );
+  }
+}
+
+/// Selecciona el screen (música o podcast) según la **cola activa** del
+/// reproductor, y se reconstruye cuando esa cola cambia.
+///
+/// Usa [fallbackSong] para decidir el screen del primer frame si el
+/// `PlaybackController` todavía no está listo (no debería ocurrir en la
+/// práctica, porque el player solo se abre con reproducción activa).
+class _AdaptivePlayerScreen extends StatelessWidget {
+  final Song fallbackSong;
+  final String? heroTagPrefix;
+
+  const _AdaptivePlayerScreen({
+    required this.fallbackSong,
+    required this.heroTagPrefix,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = PlaybackController.instance;
+
+    if (!controller.isReady) {
+      // Sin controller listo: nos guiamos por el kind de la canción.
+      return _screenFor(fallbackSong.kind);
+    }
+
+    return StreamBuilder<MediaKind>(
+      stream: controller.activeQueue,
+      initialData: controller.activeQueueKind,
+      builder: (context, snap) {
+        final kind = snap.data ?? fallbackSong.kind;
+        return _screenFor(kind);
+      },
+    );
+  }
+
+  Widget _screenFor(MediaKind kind) {
+    return kind == MediaKind.podcast
         ? PodcastPlayerScreen(heroTagPrefix: heroTagPrefix)
         : MusicPlayerScreen(heroTagPrefix: heroTagPrefix);
   }

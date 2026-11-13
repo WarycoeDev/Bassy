@@ -92,6 +92,12 @@ class PlaybackController {
 
   Future<void> clearQueue() => handler.clearQueue();
 
+  Future<void> clearQueueOf(MediaKind kind) => handler.clearQueueOf(kind);
+
+  /// Limpia música **y** capítulos y deja el player parado.
+  /// La cola activa vuelve a ser la de música por defecto.
+  Future<void> clearAllQueues() => handler.clearAllQueues();
+
   // ============================================================
   // COLA POR KIND (nueva API)
   // ============================================================
@@ -131,8 +137,6 @@ class PlaybackController {
     int newIndex,
   ) =>
       handler.reorderQueueOf(kind, oldIndex, newIndex);
-
-  Future<void> clearQueueOf(MediaKind kind) => handler.clearQueueOf(kind);
 
   // ============================================================
   // STREAMS

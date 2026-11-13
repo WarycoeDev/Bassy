@@ -187,7 +187,7 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
     );
     if (!mounted) return;
 
-    await PlaybackController.instance.clearQueue();
+    await PlaybackController.instance.clearAllQueues();
     if (!mounted) return;
 
     setState(() => _resetVisualState(triggerEntrance: true));
@@ -206,7 +206,7 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
     );
     if (!mounted) return;
 
-    await PlaybackController.instance.clearQueue();
+    await PlaybackController.instance.clearAllQueues();
     if (!mounted) return;
 
     setState(() => _resetVisualState(triggerEntrance: true));
@@ -700,7 +700,7 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     setState(() => _animatingOut = true);
     await _settle(target: _closeTarget, targetOpacity: 0.0);
     if (!mounted) return;
-    await PlaybackController.instance.clearQueue();
+    await PlaybackController.instance.clearAllQueues();
     if (!mounted) return;
     setState(() {
       _animatingOut = false;
