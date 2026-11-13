@@ -110,7 +110,7 @@ class PlaylistDetailScreen extends StatelessWidget {
     return FavoritesStore.instance.buildPlaylist(cat);
   }
 
-    // ============================================================
+  // ============================================================
   // ACCIÓN — REPRODUCIR TODO
   // ============================================================
 
@@ -123,7 +123,6 @@ class PlaylistDetailScreen extends StatelessWidget {
       return;
     }
 
-    // La cola destino depende del tipo de playlist.
     final queueKind = live.kind == PlaylistKind.podcast
         ? MediaKind.podcast
         : MediaKind.music;
@@ -131,7 +130,6 @@ class PlaylistDetailScreen extends StatelessWidget {
     final targetQueueSongs = controller.songsOf(queueKind);
     final queueHasContent = targetQueueSongs.isNotEmpty;
 
-    // Cola destino vacía → reproducir directamente desde el principio.
     if (!queueHasContent) {
       await controller.switchToQueue(queueKind);
       await controller.setQueueOf(
@@ -143,7 +141,6 @@ class PlaylistDetailScreen extends StatelessWidget {
       return;
     }
 
-    // Hay contenido en esa cola → mostrar menú de opciones.
     await PlaybackMenu.show(
       context,
       title: live.title,
@@ -153,7 +150,7 @@ class PlaylistDetailScreen extends StatelessWidget {
       actions: [
         PlaybackMenuAction(
           icon: Icons.play_arrow,
-          label: 'Reproducir ahora',
+          label: 'Sobreescribir cola y reproducir',
           onTap: () async {
             await controller.switchToQueue(queueKind);
             await controller.setQueueOf(
@@ -371,7 +368,11 @@ class PlaylistDetailScreen extends StatelessWidget {
           final song = live.songs[index];
           return RepaintBoundary(
             key: ValueKey<String>(song.path),
-            child: SongTile(song: song),
+            child: SongTile(
+              song: song,
+              queueContext: live.songs,
+              queueIndex: index,
+            ),
           );
         },
       );
@@ -385,7 +386,11 @@ class PlaylistDetailScreen extends StatelessWidget {
         final song = live.songs[index];
         return RepaintBoundary(
           key: ValueKey<String>(song.path),
-          child: SongTile(song: song),
+          child: SongTile(
+            song: song,
+            queueContext: live.songs,
+            queueIndex: index,
+          ),
         );
       },
     );

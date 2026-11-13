@@ -950,13 +950,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           child: child,
                         );
                       },
-                      itemBuilder: (context, index) {
-                        final song = playlist.songs[index];
-                        return RepaintBoundary(
-                          key: ValueKey<String>(song.path),
-                          child: SongTile(song: song),
-                        );
-                      },
+                      // dentro de _buildFavoritesList, en el itemBuilder del ReorderableListView
+itemBuilder: (context, index) {
+  final song = playlist.songs[index];
+  return RepaintBoundary(
+    key: ValueKey<String>(song.path),
+    child: SongTile(
+      song: song,
+      queueContext: playlist.songs,
+      queueIndex: index,
+    ),
+  );
+},
                     ),
             ),
           ],

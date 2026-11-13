@@ -12,17 +12,22 @@ import '../services/playback_controller.dart';
 import 'action_menu.dart';
 import 'input_menu.dart';
 
-/// Centraliza los dos menús que puede abrir un tile:
+/// Centraliza los menús que puede abrir un tile:
 ///
-///  - **Menú de cola** ([showQueueSheet]): tap normal cuando ya hay cola.
-///    Solo acciones de reproducción/cola.
+///  - **Menú de cola** ([showQueueSheet]): tap normal cuando ya hay cola
+///    y NO hay contexto (listado plano de Library). Solo acciones de
+///    reproducción/cola sobre la canción tocada.
+///  - **Menú de cola con contexto** ([showQueueSheetForContext]): tap
+///    normal dentro de un álbum/artista/playlist/podcast cuando ya hay
+///    cola. Permite reemplazar la cola por el contexto completo o
+///    añadirlo.
 ///  - **Menú de contexto** ([showSheet] / [showAt]): ⋮, long-press o clic
 ///    derecho. Acciones completas según el tipo (canción vs podcast).
 class SongContextMenu {
   SongContextMenu._();
 
   // ============================================================
-  // MENÚ DE COLA (tap normal)
+  // MENÚ DE COLA SIN CONTEXTO (tap normal en listado plano)
   // ============================================================
 
   static Future<void> showQueueSheet(
@@ -52,14 +57,84 @@ class SongContextMenu {
   }
 
   // ============================================================
+  // MENÚ DE COLA CON CONTEXTO (tap normal dentro de álbum/artista/
+  // playlist/podcast/favoritos cuando ya hay cola del mismo kind)
+  // ============================================================
+
+  /// Permite al usuario reemplazar la cola por el **contexto completo**
+  /// (empezando en la canción tocada, `startIndex`) o añadir todo el
+  /// contexto al final de la cola.
+  static Future<void> showQueueSheetForContext(
+    BuildContext context,
+    Song song, {
+    required List<Song> contextSongs,
+    required int startIndex,
+  }) async {
+    if (contextSongs.isEmpty) return;
+
+    final controller = PlaybackController.instance;
+    if (!controller.isReady) return;
+
+    final kind = song.kind;
+    final safeIndex =
+        startIndex >= 0 && startIndex < contextSongs.length ? startIndex : 0;
+
+    final actions = <ActionMenuItem>[
+      ActionMenuItem(
+        icon: Icons.playlist_play,
+        label: 'Sobreescribir cola y reproducir',
+        onTap: () async {
+          await controller.switchToQueue(kind);
+          await controller.setQueueOf(
+            kind,
+            contextSongs,
+            startIndex: safeIndex,
+            autoPlay: true,
+          );
+        },
+      ),
+      ActionMenuItem(
+        icon: Icons.queue_music,
+        label: 'Añadir todo a la cola',
+        onTap: () async {
+          for (final s in contextSongs) {
+            await controller.addToQueueOf(kind, s);
+          }
+        },
+      ),
+      ..._queueAddRemove(song),
+    ];
+
+    await ActionMenu.show(
+      context,
+      title: song.title,
+      subtitle: song.subtitle,
+      coverPath: song.coverPath,
+      fallbackIcon: _fallbackIcon(song),
+      actions: actions,
+    );
+  }
+
+  // ============================================================
   // MENÚ DE CONTEXTO (⋮ / long-press / clic derecho)
   // ============================================================
 
+  /// [queueContext] / [queueIndex] permiten que el "Reproducir ahora"
+  /// encole el **contexto completo** (playlist/álbum/artista/favoritos/
+  /// podcast) y arranque en la canción tocada. Sin contexto → solo la
+  /// canción (listados planos).
   static Future<void> showSheet(
     BuildContext context,
-    Song song,
-  ) async {
-    final actions = _buildContextActions(context, song);
+    Song song, {
+    List<Song>? queueContext,
+    int? queueIndex,
+  }) async {
+    final actions = _buildContextActions(
+      context,
+      song,
+      queueContext: queueContext,
+      queueIndex: queueIndex,
+    );
     await ActionMenu.show(
       context,
       title: song.title,
@@ -74,8 +149,15 @@ class SongContextMenu {
     BuildContext context,
     Song song, {
     required Offset globalPosition,
+    List<Song>? queueContext,
+    int? queueIndex,
   }) {
-    final actions = _buildContextActions(context, song);
+    final actions = _buildContextActions(
+      context,
+      song,
+      queueContext: queueContext,
+      queueIndex: queueIndex,
+    );
     return ActionMenu.showAt(
       context,
       actions: actions,
@@ -89,16 +171,21 @@ class SongContextMenu {
 
   static List<ActionMenuItem> _buildContextActions(
     BuildContext context,
-    Song song,
-  ) {
+    Song song, {
+    List<Song>? queueContext,
+    int? queueIndex,
+  }) {
     if (song.kind == MediaKind.podcast) {
       return [
         ActionMenuItem(
           icon: Icons.play_arrow,
           label: 'Reproducir ahora',
-          onTap: () => _playNow(song),
+          onTap: () => _playNow(
+            song,
+            queueContext: queueContext,
+            queueIndex: queueIndex,
+          ),
         ),
-        ..._queueAddRemove(song),
         ..._podcastActions(context, song),
       ];
     }
@@ -110,7 +197,11 @@ class SongContextMenu {
       ActionMenuItem(
         icon: Icons.play_arrow,
         label: 'Reproducir ahora',
-        onTap: () => _playNow(song),
+        onTap: () => _playNow(
+          song,
+          queueContext: queueContext,
+          queueIndex: queueIndex,
+        ),
       ),
       ..._queueAddRemove(song),
       ActionMenuItem(
@@ -184,7 +275,45 @@ class SongContextMenu {
 
   // ---------- Reproducción ----------
 
-  static Future<void> _playNow(Song song) => _replaceQueueAndPlay(song);
+  /// Reproduce [song]. Si se pasa contexto ([queueContext] + [queueIndex]),
+  /// se encola **el contexto completo** empezando en la canción tocada.
+  /// Sin contexto → solo la canción (listado plano).
+  static Future<void> _playNow(
+    Song song, {
+    List<Song>? queueContext,
+    int? queueIndex,
+  }) async {
+    final c = PlaybackController.instance;
+    if (!c.isReady) return;
+
+    final ctx = queueContext;
+    if (ctx == null || ctx.isEmpty) {
+      await _replaceQueueAndPlay(song);
+      return;
+    }
+
+    final kind = song.kind;
+    final safeIndex = (queueIndex != null &&
+            queueIndex >= 0 &&
+            queueIndex < ctx.length &&
+            ctx[queueIndex].path == song.path)
+        ? queueIndex
+        : ctx.indexWhere((s) => s.path == song.path);
+
+    final startIndex = safeIndex >= 0 ? safeIndex : 0;
+
+    try {
+      await c.switchToQueue(kind);
+      await c.setQueueOf(
+        kind,
+        ctx,
+        startIndex: startIndex,
+        autoPlay: true,
+      );
+    } catch (e) {
+      debugPrint('SongContextMenu: no se pudo reproducir contexto -> $e');
+    }
+  }
 
   static Future<void> _replaceQueueAndPlay(Song song) async {
     final c = PlaybackController.instance;

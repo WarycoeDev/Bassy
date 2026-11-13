@@ -16,12 +16,23 @@ class SongTile extends StatelessWidget {
 
   final bool showPlayingIndicator;
 
+  /// Contexto de reproducción: canciones del álbum/artista/podcast/playlist
+  /// donde vive este tile. Si es null, se reproduce solo `song`
+  /// (comportamiento del listado plano de Library).
+  final List<Song>? queueContext;
+
+  /// Índice de `song` dentro de [queueContext]. Se usa como `startIndex`
+  /// al encolar el contexto. Si es null, se busca por path.
+  final int? queueIndex;
+
   const SongTile({
     super.key,
     required this.song,
     this.onTap,
     this.onMore,
     this.showPlayingIndicator = true,
+    this.queueContext,
+    this.queueIndex,
   });
 
   static final Map<String, _CoverCacheEntry> _coverCache = {};
@@ -123,7 +134,12 @@ class SongTile extends StatelessWidget {
                 const SizedBox(width: 4),
                 IconButton(
                   onPressed: onMore ??
-                      () => SongContextMenu.showSheet(context, song),
+                      () => SongContextMenu.showSheet(
+                            context,
+                            song,
+                            queueContext: queueContext,
+                            queueIndex: queueIndex,
+                          ),
                   icon: Icon(
                     Icons.more_vert,
                     color: scheme.onSurfaceVariant,
@@ -145,10 +161,20 @@ class SongTile extends StatelessWidget {
     final interactive = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onLongPressStart: (_) {
-        SongContextMenu.showSheet(context, song);
+        SongContextMenu.showSheet(
+          context,
+          song,
+          queueContext: queueContext,
+          queueIndex: queueIndex,
+        );
       },
       onSecondaryTapDown: (_) {
-        SongContextMenu.showSheet(context, song);
+        SongContextMenu.showSheet(
+          context,
+          song,
+          queueContext: queueContext,
+          queueIndex: queueIndex,
+        );
       },
       child: tile,
     );
@@ -159,7 +185,12 @@ class SongTile extends StatelessWidget {
         child: Semantics(
           label: '${song.title}. ${song.artistOrUnknown}. ${song.durationLabel}',
           button: true,
-          onLongPress: () => SongContextMenu.showSheet(context, song),
+          onLongPress: () => SongContextMenu.showSheet(
+            context,
+            song,
+            queueContext: queueContext,
+            queueIndex: queueIndex,
+          ),
           child: interactive,
         ),
       ),
@@ -212,7 +243,25 @@ class SongTile extends StatelessWidget {
     );
   }
 
-    Future<void> _defaultOnTap(BuildContext context) async {
+  // -------------------------------------------------------------------------
+  // Reproducción
+  // -------------------------------------------------------------------------
+
+  /// Índice efectivo dentro de [queueContext]. Si no se pasó explícitamente,
+  /// se busca por path.
+  int _resolvedIndex(List<Song> ctx) {
+    final provided = queueIndex;
+    if (provided != null &&
+        provided >= 0 &&
+        provided < ctx.length &&
+        ctx[provided].path == song.path) {
+      return provided;
+    }
+    final found = ctx.indexWhere((s) => s.path == song.path);
+    return found >= 0 ? found : 0;
+  }
+
+  Future<void> _defaultOnTap(BuildContext context) async {
     final c = PlaybackController.instance;
 
     if (!c.isReady) {
@@ -229,10 +278,21 @@ class SongTile extends StatelessWidget {
     }
 
     final handler = c.handler;
+    final ctx = queueContext;
     final queueSongs = handler.songsOf(song.kind);
 
-    // Si la cola de ESTE kind está vacía → reproducir directamente.
-    if (queueSongs.isEmpty) {
+    // ---- Sin contexto (listado plano de Library) ----
+    // Se reproduce SOLO la canción tocada, como antes.
+    if (ctx == null || ctx.isEmpty) {
+      if (queueSongs.isNotEmpty && context.mounted) {
+        if (song.kind == MediaKind.podcast) {
+          await SongContextMenu.showSheet(context, song);
+        } else {
+          await SongContextMenu.showQueueSheet(context, song);
+        }
+        return;
+      }
+
       try {
         await c.switchToQueue(song.kind);
         await handler.setQueueOf(
@@ -252,11 +312,48 @@ class SongTile extends StatelessWidget {
       return;
     }
 
-    if (context.mounted) {
+    // ---- Con contexto (álbum/artista/podcast/playlist/favoritos) ----
+    // Se encola el contexto completo y se arranca en la canción tocada.
+    final startIndex = _resolvedIndex(ctx);
+
+    // Si ya había cola de ese kind, damos a elegir (reemplazar / añadir)
+    // en lugar de machacarla sin avisar.
+    if (queueSongs.isNotEmpty && context.mounted) {
       if (song.kind == MediaKind.podcast) {
-        await SongContextMenu.showSheet(context, song);
-      } else {
-        await SongContextMenu.showQueueSheet(context, song);
+        // Podcasts: menú contextual con contexto, para que
+        // "Reproducir ahora" encole todo el podcast.
+        await SongContextMenu.showSheet(
+          context,
+          song,
+          queueContext: ctx,
+          queueIndex: startIndex,
+        );
+        return;
+      }
+
+      await SongContextMenu.showQueueSheetForContext(
+        context,
+        song,
+        contextSongs: ctx,
+        startIndex: startIndex,
+      );
+      return;
+    }
+
+    try {
+      await c.switchToQueue(song.kind);
+      await handler.setQueueOf(
+        song.kind,
+        ctx,
+        startIndex: startIndex,
+        autoPlay: true,
+      );
+    } catch (e, st) {
+      debugPrint('SongTile: fallo al reproducir contexto -> $e\n$st');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No se pudo reproducir: $e')),
+        );
       }
     }
   }
