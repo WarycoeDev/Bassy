@@ -1,8 +1,10 @@
 // lib/widgets/mini_player.dart
+import 'dart:async';
 import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../models/song.dart';
 import '../screens/player_router.dart';
@@ -25,6 +27,14 @@ const Duration _kRestartThreshold = Duration(seconds: 3);
 const String _kCardHeroPrefix = 'card-';
 const String _kBarHeroPrefix = 'bar-';
 
+/// `true` si el framework está en medio de un frame (build/layout/paint).
+bool _isInFrame() {
+  final phase = SchedulerBinding.instance.schedulerPhase;
+  return phase == SchedulerPhase.persistentCallbacks ||
+      phase == SchedulerPhase.midFrameMicrotasks ||
+      phase == SchedulerPhase.transientCallbacks;
+}
+
 // ============================================================
 // MINIPLAYER TIPO TARJETA (panel lateral tablet/PC)
 // ============================================================
@@ -43,11 +53,11 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
 
   Offset _dragOffset = Offset.zero;
   double _dragOpacity = 1.0;
-  Offset _settleOffset = Offset.zero;
-  double _settleOpacity = 1.0;
 
   bool _animatingOut = false;
   bool _pendingEntrance = false;
+  bool _resetScheduled = false;
+  bool _entranceScheduled = false;
 
   String? _lastItemId;
 
@@ -61,25 +71,13 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 280),
-    )..addListener(_onTick);
+    );
     _pendingEntrance = true;
-  }
-
-  void _onTick() {
-    final o = _offsetAnim;
-    final op = _opacityAnim;
-    if (o == null || op == null || !mounted) return;
-    setState(() {
-      _settleOffset = o.value;
-      _settleOpacity = op.value;
-    });
   }
 
   @override
   void dispose() {
-    _controller
-      ..removeListener(_onTick)
-      ..dispose();
+    _controller.dispose();
     super.dispose();
   }
 
@@ -89,15 +87,46 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
     _opacityAnim = null;
     _dragOffset = Offset.zero;
     _dragOpacity = 1.0;
-    _settleOffset = Offset.zero;
-    _settleOpacity = 1.0;
     _animatingOut = false;
     _pendingEntrance = triggerEntrance;
   }
 
-  Offset get _effectiveOffset => _dragOffset + _settleOffset;
+  Offset get _effectiveOffset =>
+      _dragOffset + (_offsetAnim?.value ?? Offset.zero);
   double get _effectiveOpacity =>
-      (_dragOpacity * _settleOpacity).clamp(0.0, 1.0);
+      (_dragOpacity * (_opacityAnim?.value ?? 1.0)).clamp(0.0, 1.0);
+
+  // ------------------------------------------------------------
+  // Programadores seguros (macrotask: corren FUERA del frame)
+  // ------------------------------------------------------------
+  void _scheduleReset() {
+    if (_resetScheduled) return;
+    _resetScheduled = true;
+    Timer.run(() {
+      _resetScheduled = false;
+      if (!mounted) return;
+      if (_lastItemId != null) return;
+      if (_isInFrame()) {
+        _scheduleReset();
+        return;
+      }
+      setState(() => _resetVisualState(triggerEntrance: true));
+    });
+  }
+
+  void _scheduleEntrance() {
+    if (_entranceScheduled) return;
+    _entranceScheduled = true;
+    Timer.run(() {
+      _entranceScheduled = false;
+      if (!mounted) return;
+      if (_isInFrame()) {
+        _scheduleEntrance();
+        return;
+      }
+      _playEntrance();
+    });
+  }
 
   Future<void> _settle({
     required Offset targetOffset,
@@ -236,33 +265,32 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
         if (song == null || mediaSnap.data == null) {
           if (_lastItemId != null) {
             _lastItemId = null;
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (!mounted) return;
-              setState(() => _resetVisualState(triggerEntrance: true));
-            });
+            _scheduleReset();
           }
           return const SizedBox.shrink();
         }
 
-        // --- Hay canción: preparar estado "fuera de pantalla" ANTES del paint ---
+        // --- Hay canción: preparar estado "fuera de pantalla" SOLO la 1ª vez ---
         if (_lastItemId != itemId) {
+          final hadPrevious = _lastItemId != null;
           _lastItemId = itemId;
-          _controller.reset();
-          _offsetAnim = null;
-          _opacityAnim = null;
-          _dragOffset = const Offset(0, _offscreenY);
-          _dragOpacity = 0.0;
-          _settleOffset = Offset.zero;
-          _settleOpacity = 1.0;
-          _pendingEntrance = true;
+
+          if (!hadPrevious) {
+            // Primera aparición: preparar entrada desde abajo.
+            _controller.reset();
+            _offsetAnim = null;
+            _opacityAnim = null;
+            _dragOffset = const Offset(0, _offscreenY);
+            _dragOpacity = 0.0;
+            _pendingEntrance = true;
+          }
+          // Si ya había canción: no tocar animación ni posición.
+          // El miniplayer permanece visible y solo cambian textos/carátula.
         }
 
         if (_pendingEntrance) {
           _pendingEntrance = false;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            _playEntrance();
-          });
+          _scheduleEntrance();
         }
 
         return StreamBuilder<bool>(
@@ -335,8 +363,7 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
                                 child: Row(
                                   children: [
                                     Hero(
-                                      tag:
-                                          '$_kCardHeroPrefix${song.path}',
+                                      tag: '$_kCardHeroPrefix${song.path}',
                                       child: _MiniCover(
                                         song: song,
                                         scheme: scheme,
@@ -500,12 +527,25 @@ class _MiniPlayerCardState extends State<MiniPlayerCard>
                   onVerticalDragUpdate: _onVerticalDragUpdate,
                   onVerticalDragEnd: _onVerticalDragEnd,
                   onVerticalDragCancel: _onDragCancel,
-                  child: Opacity(
-                    opacity: _effectiveOpacity,
-                    child: Transform.translate(
-                      offset: _effectiveOffset,
-                      child: card,
-                    ),
+                  child: AnimatedBuilder(
+                    animation: _controller,
+                    builder: (context, child) {
+                      final settleOffset =
+                          _offsetAnim?.value ?? Offset.zero;
+                      final settleOpacity =
+                          _opacityAnim?.value ?? 1.0;
+                      final offset = _dragOffset + settleOffset;
+                      final opacity =
+                          (_dragOpacity * settleOpacity).clamp(0.0, 1.0);
+                      return Opacity(
+                        opacity: opacity,
+                        child: Transform.translate(
+                          offset: offset,
+                          child: child,
+                        ),
+                      );
+                    },
+                    child: card,
                   ),
                 );
               },
@@ -539,11 +579,11 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
 
   Offset _dragOffset = Offset.zero;
   double _dragOpacity = 1.0;
-  Offset _settleOffset = Offset.zero;
-  double _settleOpacity = 1.0;
 
   bool _animatingOut = false;
   bool _pendingEntrance = false;
+  bool _resetScheduled = false;
+  bool _entranceScheduled = false;
 
   String? _lastItemId;
 
@@ -555,24 +595,11 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
   @override
   void initState() {
     super.initState();
-    final c = AnimationController(
+    _settleController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 280),
     );
-    c.addListener(_onSettleTick);
-    _settleController = c;
     _pendingEntrance = true;
-  }
-
-  void _onSettleTick() {
-    final o = _offsetAnim;
-    final op = _opacityAnim;
-    if (o == null || op == null) return;
-    if (!mounted) return;
-    setState(() {
-      _settleOffset = o.value;
-      _settleOpacity = op.value;
-    });
   }
 
   @override
@@ -581,10 +608,7 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     _settleController = null;
     _offsetAnim = null;
     _opacityAnim = null;
-    if (c != null) {
-      c.removeListener(_onSettleTick);
-      c.dispose();
-    }
+    c?.dispose();
     super.dispose();
   }
 
@@ -594,16 +618,47 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     _opacityAnim = null;
     _dragOffset = Offset.zero;
     _dragOpacity = 1.0;
-    _settleOffset = Offset.zero;
-    _settleOpacity = 1.0;
     _animatingOut = false;
     _visibility = _MiniPlayerVisibility.visible;
     _pendingEntrance = triggerEntrance;
   }
 
-  Offset get _effectiveOffset => _dragOffset + _settleOffset;
+  Offset get _effectiveOffset =>
+      _dragOffset + (_offsetAnim?.value ?? Offset.zero);
   double get _effectiveOpacity =>
-      (_dragOpacity * _settleOpacity).clamp(0.0, 1.0);
+      (_dragOpacity * (_opacityAnim?.value ?? 1.0)).clamp(0.0, 1.0);
+
+  // ------------------------------------------------------------
+  // Programadores seguros (macrotask: corren FUERA del frame)
+  // ------------------------------------------------------------
+  void _scheduleReset() {
+    if (_resetScheduled) return;
+    _resetScheduled = true;
+    Timer.run(() {
+      _resetScheduled = false;
+      if (!mounted) return;
+      if (_lastItemId != null) return;
+      if (_isInFrame()) {
+        _scheduleReset();
+        return;
+      }
+      setState(() => _resetVisualState(triggerEntrance: true));
+    });
+  }
+
+  void _scheduleEntrance() {
+    if (_entranceScheduled) return;
+    _entranceScheduled = true;
+    Timer.run(() {
+      _entranceScheduled = false;
+      if (!mounted) return;
+      if (_isInFrame()) {
+        _scheduleEntrance();
+        return;
+      }
+      _settle(target: Offset.zero, targetOpacity: 1.0);
+    });
+  }
 
   Future<void> _settle({
     required Offset target,
@@ -649,8 +704,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     if (!mounted) return;
     setState(() {
       _animatingOut = false;
-      _settleOffset = Offset.zero;
-      _settleOpacity = 1.0;
       _dragOffset = Offset.zero;
       _dragOpacity = 1.0;
     });
@@ -665,8 +718,6 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
     setState(() {
       _visibility = _MiniPlayerVisibility.hiddenBySwipe;
       _animatingOut = false;
-      _settleOffset = Offset.zero;
-      _settleOpacity = 1.0;
       _dragOffset = Offset.zero;
       _dragOpacity = 1.0;
     });
@@ -679,13 +730,8 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
       _visibility = _MiniPlayerVisibility.visible;
       _dragOffset = _hideTarget;
       _dragOpacity = 0.0;
-      _settleOffset = Offset.zero;
-      _settleOpacity = 1.0;
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _settle(target: Offset.zero, targetOpacity: 1.0);
-    });
+    _scheduleEntrance();
   }
 
   void _snapBack() => _settle(target: Offset.zero, targetOpacity: 1.0);
@@ -751,52 +797,37 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
         if (song == null || mediaSnap.data == null) {
           if (_lastItemId != null ||
               _dragOffset != Offset.zero ||
-              _settleOffset != Offset.zero ||
+              _offsetAnim != null ||
               _visibility != _MiniPlayerVisibility.visible ||
               _animatingOut ||
               !_pendingEntrance) {
             _lastItemId = null;
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (!mounted) return;
-              if (_lastItemId != null) return;
-              setState(() => _resetVisualState(triggerEntrance: true));
-            });
+            _scheduleReset();
           }
           return const SizedBox.shrink();
         }
 
+        // --- Hay canción: preparar estado "fuera de pantalla" SOLO la 1ª vez ---
         if (_lastItemId != itemId) {
+          final hadPrevious = _lastItemId != null;
           _lastItemId = itemId;
-          if (!_pendingEntrance) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (!mounted) return;
-              if (_lastItemId != itemId) return;
-              setState(() {
-                _settleController?.reset();
-                _offsetAnim = null;
-                _opacityAnim = null;
-                _dragOffset = Offset.zero;
-                _dragOpacity = 1.0;
-                _settleOffset = Offset.zero;
-                _settleOpacity = 1.0;
-              });
-            });
+
+          if (!hadPrevious) {
+            // Primera aparición: preparar entrada desde abajo.
+            _settleController?.reset();
+            _offsetAnim = null;
+            _opacityAnim = null;
+            _dragOffset = _hideTarget;
+            _dragOpacity = 0.0;
+            _pendingEntrance = true;
           }
+          // Si ya había canción: no tocar animación ni posición.
+          // El miniplayer permanece visible y solo cambian textos/carátula.
         }
 
         if (_pendingEntrance) {
           _pendingEntrance = false;
-          _settleController?.reset();
-          _offsetAnim = null;
-          _opacityAnim = null;
-          _dragOffset = _hideTarget;
-          _dragOpacity = 0.0;
-          _settleOffset = Offset.zero;
-          _settleOpacity = 1.0;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            _settle(target: Offset.zero, targetOpacity: 1.0);
-          });
+          _scheduleEntrance();
         }
 
         if (_visibility == _MiniPlayerVisibility.hiddenBySwipe) {
@@ -892,8 +923,8 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                         ),
                         borderRadius: BorderRadius.circular(20),
                         border: Border.all(
-                          color: scheme.outlineVariant
-                              .withValues(alpha: 0.4),
+                          color:
+                              scheme.outlineVariant.withValues(alpha: 0.4),
                         ),
                         boxShadow: [
                           BoxShadow(
@@ -947,8 +978,7 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                                 child: Row(
                                   children: [
                                     Hero(
-                                      tag:
-                                          '$_kBarHeroPrefix${song.path}',
+                                      tag: '$_kBarHeroPrefix${song.path}',
                                       child: _MiniCover(
                                         song: song,
                                         scheme: scheme,
@@ -1028,6 +1058,37 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                   ),
                 );
 
+                final settleController = _settleController;
+
+                final animatedBar = settleController == null
+                    ? Opacity(
+                        opacity: _effectiveOpacity,
+                        child: Transform.translate(
+                          offset: _effectiveOffset,
+                          child: bar,
+                        ),
+                      )
+                    : AnimatedBuilder(
+                        animation: settleController,
+                        builder: (context, child) {
+                          final settleOffset =
+                              _offsetAnim?.value ?? Offset.zero;
+                          final settleOpacity =
+                              _opacityAnim?.value ?? 1.0;
+                          final offset = _dragOffset + settleOffset;
+                          final opacity = (_dragOpacity * settleOpacity)
+                              .clamp(0.0, 1.0);
+                          return Opacity(
+                            opacity: opacity,
+                            child: Transform.translate(
+                              offset: offset,
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: bar,
+                      );
+
                 return GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onHorizontalDragUpdate: _onHorizontalDragUpdate,
@@ -1036,13 +1097,7 @@ class _MiniPlayerBarState extends State<MiniPlayerBar>
                   onVerticalDragUpdate: _onVerticalDragUpdate,
                   onVerticalDragEnd: _onVerticalDragEnd,
                   onVerticalDragCancel: _onDragCancel,
-                  child: Opacity(
-                    opacity: _effectiveOpacity,
-                    child: Transform.translate(
-                      offset: _effectiveOffset,
-                      child: bar,
-                    ),
-                  ),
+                  child: animatedBar,
                 );
               },
             );
