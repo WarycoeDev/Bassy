@@ -138,6 +138,11 @@ class PlaybackController {
   ) =>
       handler.reorderQueueOf(kind, oldIndex, newIndex);
 
+  /// Reproduce el elemento [index] de la cola [kind], activándola si hace
+  /// falta, sin reproducir antes la canción que tenía guardada.
+  Future<void> playFromQueueOf(MediaKind kind, int index) =>
+      handler.playFromQueueOf(kind, index);
+
   // ============================================================
   // STREAMS
   // ============================================================

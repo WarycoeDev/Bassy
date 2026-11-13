@@ -1,7 +1,6 @@
 // lib/services/playback_audio_handler.dart
 import 'dart:async';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
@@ -82,6 +81,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       }
     }));
 
+    // Con shuffle, just_audio sigue reportando el índice REAL dentro de la
+    // lista (no la posición en el orden aleatorio), así que la lista
+    // visible y `currentIndex` siempre coinciden.
     _subs.add(_player.currentIndexStream.listen((sourceIndex) {
       if (_loading) return;
       if (sourceIndex == null) return;
@@ -124,9 +126,17 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   int get currentIndex => _activeQueue.currentIndex;
 
-  bool get hasNext => _queueSource != null && _activeQueue.hasNext;
+  /// Con aleatorio activo el "siguiente" lo decide el player (orden
+  /// aleatorio interno); sin aleatorio es simplemente index + 1.
+  bool get hasNext =>
+      _queueSource != null &&
+      (_activeQueue.shuffleEnabled ? _player.hasNext : _activeQueue.hasNext);
 
-  bool get hasPrevious => _queueSource != null && _activeQueue.hasPrevious;
+  bool get hasPrevious =>
+      _queueSource != null &&
+      (_activeQueue.shuffleEnabled
+          ? _player.hasPrevious
+          : _activeQueue.hasPrevious);
 
   Duration get position => _player.position;
 
@@ -358,55 +368,31 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // SHUFFLE / REPEAT (por cola activa)
   // ============================================================
 
+  /// Activa/desactiva el aleatorio. NO reordena ni reconstruye la lista:
+  /// el player elige el siguiente tema al azar sin repetir hasta agotar
+  /// la cola (con repetir cola, vuelve a empezar la ronda).
   Future<void> setShuffle(bool enabled) async {
     if (_activeQueue.shuffleEnabled == enabled) return;
     _activeQueue.shuffleEnabled = enabled;
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(enabled);
 
-    if (_activeQueue.songs.isEmpty || _queueSource == null) {
-      _publish();
-      return;
-    }
+    await _applyShuffleMode();
+    _emitControlsState();
+  }
 
-    final currentPath = currentSong?.path;
-    final currentPos = _player.position;
-
-    List<Song> newOrder;
-    if (enabled) {
-      if (_activeQueue.originalOrder.isEmpty) {
-        _activeQueue.originalOrder = List<Song>.from(_activeQueue.songs);
+  /// Sincroniza el modo aleatorio del player con el de la cola activa.
+  Future<void> _applyShuffleMode() async {
+    try {
+      if (_activeQueue.shuffleEnabled && _queueSource != null) {
+        await _player.setShuffleModeEnabled(true);
+        // Genera un orden nuevo dejando la canción actual al inicio.
+        await _player.shuffle();
+      } else {
+        await _player.setShuffleModeEnabled(false);
       }
-      final current = currentPath == null
-          ? null
-          : _activeQueue.songs.firstWhere(
-              (s) => s.path == currentPath,
-              orElse: () => _activeQueue.songs.first,
-            );
-      final rest = _activeQueue.songs
-          .where((s) => s.path != currentPath)
-          .toList()
-        ..shuffle(Random());
-      newOrder = [
-        if (current != null) current,
-        ...rest,
-      ];
-    } else {
-      newOrder = _activeQueue.originalOrder.isNotEmpty
-          ? List<Song>.from(_activeQueue.originalOrder)
-          : List<Song>.from(_activeQueue.songs);
+    } catch (e, st) {
+      debugPrint('PlaybackAudioHandler: shuffle falló -> $e\n$st');
     }
-
-    final newIndex = currentPath == null
-        ? 0
-        : newOrder.indexWhere((s) => s.path == currentPath);
-    final targetIndex = newIndex < 0 ? 0 : newIndex;
-
-    await _reloadQueueWith(
-      newOrder,
-      targetIndex,
-      currentPos,
-      keepPlaying: true,
-    );
   }
 
   Future<void> setRepeatModeForUI(PlayerRepeatMode mode) async {
@@ -414,7 +400,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _activeQueue.repeatMode = mode;
     await _applyLoopMode();
     if (!_repeatCtrl.isClosed) _repeatCtrl.add(mode);
-    _publish();
+    _emitControlsState();
   }
 
   @override
@@ -447,54 +433,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       case PlayerRepeatMode.one:
         await _player.setLoopMode(LoopMode.one);
     }
-  }
-
-  // ============================================================
-  // CARGA DE COLA ACTIVA
-  // ============================================================
-
-  Future<void> _reloadQueueWith(
-    List<Song> order,
-    int startIndex,
-    Duration startPosition, {
-    bool keepPlaying = true,
-  }) async {
-    final wasPlaying = _player.playing;
-    _loading = true;
-    _resumeAfterLoad = keepPlaying && wasPlaying;
-
-    try {
-      await _player.pause();
-
-      _activeQueue.songs = order;
-      _activeQueue.currentIndex = startIndex;
-      _publish();
-
-      final concat = ConcatenatingAudioSource(
-        children: [for (final s in _activeQueue.songs) AudioSource.file(s.path!)],
-      );
-      _queueSource = concat;
-
-      await _player.setAudioSource(
-        concat,
-        initialIndex: startIndex,
-        initialPosition: startPosition,
-      );
-    } catch (e, st) {
-      debugPrint('PlaybackAudioHandler: _reloadQueueWith falló -> $e\n$st');
-    } finally {
-      _loading = false;
-    }
-
-    if (_resumeAfterLoad) {
-      unawaited(_player.play().catchError((Object e, StackTrace st) {
-        debugPrint('PlaybackAudioHandler: play falló -> $e\n$st');
-      }));
-    }
-
-    await _applyLoopMode();
-    await _player.setVolume(_volume);
-    _emitControlsState();
   }
 
   bool _isPlayable(Song s) {
@@ -576,7 +514,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (kind != _activeQueue.kind) {
       targetQueue.songs = playable;
       targetQueue.currentIndex = newStart;
-      targetQueue.originalOrder = List<Song>.from(playable);
       targetQueue.shuffleEnabled = false;
       targetQueue.savedPosition = Duration.zero;
       targetQueue.savedPlaying = autoPlay;
@@ -584,8 +521,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    // Es la activa: recarga real.
-    _activeQueue.originalOrder = List<Song>.from(playable);
+    // Es la activa: recarga real. Una cola nueva empieza sin aleatorio.
     _activeQueue.shuffleEnabled = false;
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
 
@@ -627,6 +563,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _activeQueue.currentIndex = newStart;
 
     await _applyLoopMode();
+    await _applyShuffleMode(); // apaga el aleatorio que pudiera quedar
     await _player.setVolume(_volume);
 
     if (autoPlay) {
@@ -643,10 +580,20 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // ============================================================
 
   /// Guarda posición/playing de la activa, pausa, carga [kind] y
-  /// restaura posición/playing de la nueva.
-  Future<void> switchToQueue(MediaKind kind) async {
+  /// restaura posición/playing/aleatorio de la nueva.
+  ///
+  /// Si [startIndex] se indica, la cola destino arranca en ese índice
+  /// (ignorando la posición guardada), sin reproducir antes la canción
+  /// que tenía guardada. Si [autoPlay] se indica, sobreescribe el estado
+  /// de reproducción guardado de la cola destino.
+  Future<void> switchToQueue(
+    MediaKind kind, {
+    int? startIndex,
+    bool? autoPlay,
+  }) async {
     if (kind == _activeQueue.kind && _queueSource != null) {
-      // Ya activa con fuente cargada: no-op.
+      // Ya activa con fuente cargada.
+      if (startIndex != null) await skipToQueueItem(startIndex);
       return;
     }
 
@@ -663,8 +610,23 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       await _player.pause();
     } catch (_) {}
 
+    // 2.5) Si el usuario eligió una canción concreta, la cola destino
+    // arranca directamente ahí (sin pasar por la que sonaba antes).
+    final target = _queueFor(kind);
+    if (startIndex != null &&
+        startIndex >= 0 &&
+        startIndex < target.songs.length) {
+      target.currentIndex = startIndex;
+      target.savedPosition = Duration.zero;
+      target.savedPlaying = autoPlay ?? true;
+    } else if (autoPlay != null) {
+      // Sin startIndex pero con autoPlay explícito: solo sobreescribe
+      // el flag de reproducción.
+      target.savedPlaying = autoPlay;
+    }
+
     // 3) Cambiar activa.
-    _activeQueue = _queueFor(kind);
+    _activeQueue = target;
     _lastMediaItemKey = null;
     _lastQueueKey = null;
 
@@ -674,8 +636,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (_activeQueue.songs.isEmpty) {
       try {
         await _player.stop();
+        await _player.setShuffleModeEnabled(false);
       } catch (_) {}
       _queueSource = null;
+      if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(_activeQueue.shuffleEnabled);
+      if (!_repeatCtrl.isClosed) _repeatCtrl.add(_activeQueue.repeatMode);
       _emitControlsState();
       return;
     }
@@ -704,6 +669,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     await _applyLoopMode();
+    await _applyShuffleMode(); // restaura el aleatorio de esta cola
     await _player.setVolume(_volume);
 
     if (_resumeAfterLoad) {
@@ -735,6 +701,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       _queueSource = null;
       _resumeAfterLoad = false;
       await _player.stop();
+      try {
+        await _player.setShuffleModeEnabled(false);
+      } catch (_) {}
+      if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
     }
     _emitControlsState();
   }
@@ -774,6 +744,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         'PlaybackAudioHandler: stop en clearAllQueues falló -> $e\n$st',
       );
     }
+    try {
+      await _player.setShuffleModeEnabled(false);
+    } catch (_) {}
 
     // Cola activa por defecto: música.
     _activeQueue = _musicQueue;
@@ -808,9 +781,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (kind != _activeQueue.kind) {
       q.songs = [...q.songs, song];
       if (q.currentIndex < 0) q.currentIndex = 0;
-      if (q.originalOrder.isNotEmpty) {
-        q.originalOrder = [...q.originalOrder, song];
-      }
       _emitControlsState();
       return;
     }
@@ -829,9 +799,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     q.songs = [...q.songs, song];
-    if (q.originalOrder.isNotEmpty) {
-      q.originalOrder = [...q.originalOrder, song];
-    }
     await source.add(AudioSource.file(song.path!));
     _emitControlsState();
   }
@@ -843,7 +810,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     final q = _queueFor(kind);
     if (index < 0 || index >= q.songs.length) return;
 
-    final removed = q.songs[index];
     final wasCurrent = index == q.currentIndex;
     final newSongs = List<Song>.from(q.songs)..removeAt(index);
 
@@ -861,8 +827,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     q.songs = newSongs;
     q.currentIndex = newIndex;
-    q.originalOrder =
-        q.originalOrder.where((s) => s.path != removed.path).toList();
 
     if (kind == _activeQueue.kind) {
       final source = _queueSource;
@@ -907,13 +871,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       q.currentIndex++;
     }
 
-    if (q.originalOrder.isNotEmpty && oldIndex < q.originalOrder.length) {
-      final original = List<Song>.from(q.originalOrder);
-      final movedOriginal = original.removeAt(oldIndex);
-      original.insert(targetIndex.clamp(0, original.length), movedOriginal);
-      q.originalOrder = original;
-    }
-
     _emitControlsState();
 
     if (kind == _activeQueue.kind) {
@@ -932,14 +889,25 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // REPRODUCCIÓN
   // ============================================================
 
+  /// Reproduce el elemento [index] de la cola [kind], activándola si hace
+  /// falta, sin reproducir antes la canción que tenía guardada.
+  Future<void> playFromQueueOf(MediaKind kind, int index) async {
+    if (kind == _activeQueue.kind && _queueSource != null) {
+      await skipToQueueItem(index);
+    } else {
+      await switchToQueue(kind, startIndex: index, autoPlay: true);
+    }
+  }
+
   Future<void> playSong(Song song) async {
     final q = _queueFor(song.kind);
     final idx = q.songs.indexWhere((s) => s.path == song.path);
     if (idx >= 0) {
       if (_activeQueue.kind != song.kind || _queueSource == null) {
-        await switchToQueue(song.kind);
+        await switchToQueue(song.kind, startIndex: idx, autoPlay: true);
+      } else {
+        await skipToQueueItem(idx);
       }
-      await skipToQueueItem(idx);
     } else {
       await playOnly(song);
     }
@@ -1056,6 +1024,17 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       debugPrint('PlaybackAudioHandler: seek falló -> $e\n$st');
       return;
     }
+
+    // Con aleatorio: la canción elegida inicia una ronda nueva, así no se
+    // saltan las que quedaban antes de ella en el orden aleatorio.
+    if (q.shuffleEnabled) {
+      try {
+        await _player.shuffle();
+      } catch (e, st) {
+        debugPrint('PlaybackAudioHandler: reshuffle falló -> $e\n$st');
+      }
+    }
+
     unawaited(_player.play().catchError((Object e, StackTrace st) {
       debugPrint('PlaybackAudioHandler: play falló -> $e\n$st');
     }));

@@ -201,15 +201,11 @@ class _QueuePanelState extends State<QueuePanel> {
     if (mounted) setState(() {});
   }
 
-  Future<void> _handlePlay(int index) async {
+    Future<void> _handlePlay(int index) async {
     // El usuario ya está viendo esa fila: no hace falta auto-scroll.
     _lastIndex = index;
     _lastKind = _viewKind;
-    // Si la cola mostrada no es la activa, primero la activamos.
-    if (_viewKind != controller.activeQueueKind) {
-      await controller.switchToQueue(_viewKind);
-    }
-    await controller.playFromQueue(index);
+    await controller.playFromQueueOf(_viewKind, index);
     if (mounted) setState(() {});
   }
 
