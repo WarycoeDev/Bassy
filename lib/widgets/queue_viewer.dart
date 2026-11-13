@@ -7,10 +7,6 @@ import 'package:flutter/material.dart';
 import '../models/song.dart';
 import '../services/playback_controller.dart';
 
-/// Visor de la cola de reproducción actual.
-///
-/// Se abre SIEMPRE como dialog flotante centrado. Permite ver la cola,
-/// saltar a una canción y eliminarla.
 class QueueViewer {
   QueueViewer._();
 
@@ -23,8 +19,15 @@ class QueueViewer {
         insetPadding:
             const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
         clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 640),
+          constraints: const BoxConstraints(
+            minWidth: 380,
+            maxWidth: 480,
+            maxHeight: 640,
+          ),
           child: const _QueueBody(),
         ),
       ),
@@ -51,14 +54,8 @@ class _QueueBodyState extends State<_QueueBody> {
       if (mounted) setState(() {});
     }
 
-    // Cambia la lista (agregar / quitar / reordenar).
     _subs.add(controller.handler.queue.listen(refresh));
-
-    // Cambia la canción actual (saltar, siguiente, anterior, fin de pista).
     _subs.add(controller.handler.mediaItem.listen(refresh));
-
-    // Cambia el índice de la cola en el estado de reproducción. Cubre el caso
-    // en que `currentIndex` se actualiza un instante después de `mediaItem`.
     _subs.add(
       controller.handler.playbackState
           .map((s) => s.queueIndex)
@@ -86,17 +83,23 @@ class _QueueBodyState extends State<_QueueBody> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Cabecera
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 8, 8),
+            padding: const EdgeInsets.fromLTRB(20, 14, 8, 12),
             child: Row(
               children: [
-                Icon(
-                  Icons.queue_music_rounded,
-                  color: scheme.onSurface,
-                  size: 24,
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: scheme.primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    Icons.queue_music_rounded,
+                    color: scheme.primary,
+                    size: 20,
+                  ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
                 Expanded(
                   child: Text(
                     'Cola de reproducción',
@@ -123,31 +126,78 @@ class _QueueBodyState extends State<_QueueBody> {
           Flexible(
             child: songs.isEmpty
                 ? _EmptyState(scheme: scheme)
-                : ListView.separated(
-                    shrinkWrap: true,
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    itemCount: songs.length,
-                    separatorBuilder: (_, __) => Divider(
-                      height: 1,
-                      indent: 76,
-                      endIndent: 16,
-                      color: scheme.outlineVariant.withValues(alpha: 0.35),
-                    ),
-                    itemBuilder: (context, index) {
-                      final song = songs[index];
-                      return _QueueTile(
-                        song: song,
-                        index: index,
-                        isCurrent: index == currentIndex,
-                        scheme: scheme,
-                        onTap: () => controller.playFromQueue(index),
-                        onRemove: () =>
-                            controller.handler.removeFromQueue(index),
-                      );
-                    },
+                : _QueueContainer(
+                    scheme: scheme,
+                    songs: songs,
+                    currentIndex: currentIndex,
+                    onPlay: controller.playFromQueue,
+                    onRemove: controller.handler.removeFromQueue,
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _QueueContainer extends StatelessWidget {
+  final ColorScheme scheme;
+  final List<Song> songs;
+  final int currentIndex;
+  final void Function(int) onPlay;
+  final void Function(int) onRemove;
+
+  const _QueueContainer({
+    required this.scheme,
+    required this.songs,
+    required this.currentIndex,
+    required this.onPlay,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(20);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+      child: Material(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0),
+        borderRadius: radius,
+        clipBehavior: Clip.antiAlias,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.5),
+            ),
+          ),
+          child: ListView.separated(
+            shrinkWrap: true,
+            padding: const EdgeInsets.symmetric(
+              horizontal: 10,
+              vertical: 10,
+            ),
+            itemCount: songs.length,
+            separatorBuilder: (_, __) => Divider(
+              height: 1,
+              indent: 64,
+              endIndent: 8,
+              color: scheme.outlineVariant.withValues(alpha: 0.3),
+            ),
+            itemBuilder: (context, index) {
+              final song = songs[index];
+              return _QueueTile(
+                song: song,
+                index: index,
+                isCurrent: index == currentIndex,
+                scheme: scheme,
+                onTap: () => onPlay(index),
+                onRemove: () => onRemove(index),
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -172,17 +222,22 @@ class _QueueTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(14);
+
     return Material(
       color: isCurrent
-          ? scheme.primary.withValues(alpha: 0.08)
+          ? scheme.primary.withValues(alpha: 0.10)
           : Colors.transparent,
+      borderRadius: radius,
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
+        borderRadius: radius,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 4, 8),
+          padding: const EdgeInsets.fromLTRB(8, 8, 4, 8),
           child: Row(
             children: [
-              _QueueCover(song: song, scheme: scheme, size: 48),
+              _QueueCover(song: song, scheme: scheme, size: 52),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -200,7 +255,7 @@ class _QueueTile extends StatelessWidget {
                         letterSpacing: -0.1,
                       ),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: 3),
                     Text(
                       song.subtitle,
                       maxLines: 1,
@@ -271,8 +326,8 @@ class _QueueCover extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(10),
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
       ),
       clipBehavior: Clip.antiAlias,
       child: hasCover
