@@ -9,7 +9,9 @@ import '../models/song.dart';
 import '../services/favorites_store.dart';
 import '../services/media_scanner.dart';
 import '../services/playback_controller.dart';
+import '../services/playlists_store.dart';
 import '../widgets/action_menu.dart';
+import '../widgets/input_menu.dart';
 import '../widgets/nested_navigator_scope.dart';
 import '../widgets/playback_menu.dart';
 import '../widgets/song_tile.dart';
@@ -69,7 +71,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _reorderMode = false;
   Playlist? _inlinePlaylist;
 
-  /// IDs de canciones que están siendo eliminadas (para animar su salida).
   final Set<String> _removingIds = {};
 
   final Map<int, ScrollController> _scrollControllers = {};
@@ -99,6 +100,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     super.initState();
     LibraryScreen.handleBack = _handleBack;
     FavoritesStore.instance.load();
+    PlaylistsStore.instance.load();
     _startWatching();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -292,6 +294,175 @@ class _LibraryScreenState extends State<LibraryScreen> {
     setState(() => _inlinePlaylist = null);
   }
 
+  // ============================================================
+  // PLAYLISTS DE USUARIO (.bassy)
+  // ============================================================
+
+  Future<void> _createPlaylist() async {
+    final result = await InputMenu.show(
+      context,
+      title: 'Nueva playlist',
+      subtitle: 'Se guardará como archivo .bassy',
+      hintText: 'Nombre de la playlist…',
+      confirmLabel: 'Crear',
+      cancelLabel: 'Cancelar',
+      maxLength: 60,
+    );
+
+    if (result == null || !result.confirmed) return;
+    final name = result.text.trim();
+    if (name.isEmpty) return;
+
+    try {
+      final created = await PlaylistsStore.instance.create(name);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Playlist «${created.name}» creada')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo crear la playlist: $e')),
+      );
+    }
+  }
+
+  void _openUserPlaylist(BuildContext context, UserPlaylist pl) {
+    final all = <Song>[..._songs, ..._podcasts];
+    final map = {for (final s in all) s.path: s};
+    final songs =
+        pl.songPaths.map((p) => map[p]).whereType<Song>().toList();
+
+    final playlist = Playlist(
+      id: 'user:${pl.id}',
+      title: pl.name,
+      subtitle: '${songs.length} canciones',
+      kind: PlaylistKind.custom,
+      songs: songs,
+    );
+    _openPlaylist(context, playlist);
+  }
+
+  // ============================================================
+  // MENÚ DE OPCIONES DE PLAYLIST (usando ActionMenu)
+  // ============================================================
+
+  Future<void> _playlistOptions(
+    BuildContext context,
+    UserPlaylist pl,
+  ) async {
+    await ActionMenu.show(
+      context,
+      title: pl.name,
+      subtitle: '${pl.songPaths.length} canciones · .bassy',
+      fallbackIcon: Icons.queue_music,
+      actions: [
+        ActionMenuItem(
+          icon: Icons.edit_outlined,
+          label: 'Renombrar',
+          onTap: () => _renameUserPlaylist(context, pl),
+        ),
+        ActionMenuItem(
+          icon: Icons.ios_share,
+          label: 'Exportar',
+          onTap: () => _exportUserPlaylist(context, pl),
+        ),
+        ActionMenuItem(
+          icon: Icons.delete_outline,
+          label: 'Eliminar',
+          isDestructive: true,
+          onTap: () => _deleteUserPlaylist(context, pl),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _renameUserPlaylist(
+    BuildContext context,
+    UserPlaylist pl,
+  ) async {
+    final result = await InputMenu.show(
+      context,
+      title: 'Renombrar playlist',
+      initialValue: pl.name,
+      confirmLabel: 'Guardar',
+      cancelLabel: 'Cancelar',
+      maxLength: 60,
+    );
+    if (result == null || !result.confirmed) return;
+    final name = result.text.trim();
+    if (name.isEmpty || name == pl.name) return;
+
+    try {
+      await PlaylistsStore.instance.save(pl.copyWith(name: name));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Playlist renombrada a «$name»')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo renombrar: $e')),
+      );
+    }
+  }
+
+  Future<void> _exportUserPlaylist(
+    BuildContext context,
+    UserPlaylist pl,
+  ) async {
+    try {
+      final path = await PlaylistsStore.instance.exportTo(pl.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Exportado a:\n$path'),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo exportar: $e')),
+      );
+    }
+  }
+
+  Future<void> _deleteUserPlaylist(
+    BuildContext context,
+    UserPlaylist pl,
+  ) async {
+    final confirmed = await ActionMenu.confirm(
+      context,
+      title: pl.name,
+      subtitle: '${pl.songPaths.length} canciones',
+      fallbackIcon: Icons.queue_music,
+      message:
+          '¿Eliminar «${pl.name}»? El archivo .bassy se borrará del disco.',
+      confirmLabel: 'Eliminar',
+      cancelLabel: 'Cancelar',
+      confirmIcon: Icons.delete_outline_rounded,
+    );
+    if (!confirmed) return;
+
+    try {
+      await PlaylistsStore.instance.delete(pl.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Playlist «${pl.name}» eliminada')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo eliminar: $e')),
+      );
+    }
+  }
+
+  // ============================================================
+  // BUILD
+  // ============================================================
+
   @override
   Widget build(BuildContext context) {
     return NestedNavigatorScope(
@@ -315,7 +486,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: AnimatedBuilder(
-                animation: FavoritesStore.instance,
+                animation: Listenable.merge([
+                  FavoritesStore.instance,
+                  PlaylistsStore.instance,
+                ]),
                 builder: (context, _) => _buildHeader(context),
               ),
             ),
@@ -334,14 +508,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   switchInCurve: Curves.easeOutCubic,
                   switchOutCurve: Curves.easeInCubic,
                   transitionBuilder: (child, animation) {
-                    final begin = Offset(_slideFromRight ? 0.15 : -0.15, 0);
+                    final begin =
+                        Offset(_slideFromRight ? 0.15 : -0.15, 0);
                     final offset = Tween<Offset>(
                       begin: begin,
                       end: Offset.zero,
                     ).animate(animation);
                     return FadeTransition(
                       opacity: animation,
-                      child: SlideTransition(position: offset, child: child),
+                      child: SlideTransition(
+                        position: offset,
+                        child: child,
+                      ),
                     );
                   },
                   child: KeyedSubtree(
@@ -410,28 +588,43 @@ class _LibraryScreenState extends State<LibraryScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16),
       children: [
         const SizedBox(height: 8),
-        _buildSectionTitle(context, 'Canciones',
-            onSeeAll: () => _changeFilter(_fSongs)),
+        _buildSectionTitle(
+          context,
+          'Canciones',
+          onSeeAll: () => _changeFilter(_fSongs),
+        ),
         const SizedBox(height: 12),
         _buildSongs(context, limit: 5),
         const SizedBox(height: 24),
-        _buildSectionTitle(context, 'Playlists',
-            onSeeAll: () => _changeFilter(_fPlaylists)),
+        _buildSectionTitle(
+          context,
+          'Playlists',
+          onSeeAll: () => _changeFilter(_fPlaylists),
+        ),
         const SizedBox(height: 12),
         _buildPlaylists(context),
         const SizedBox(height: 24),
-        _buildSectionTitle(context, 'Álbumes',
-            onSeeAll: () => _changeFilter(_fAlbums)),
+        _buildSectionTitle(
+          context,
+          'Álbumes',
+          onSeeAll: () => _changeFilter(_fAlbums),
+        ),
         const SizedBox(height: 12),
         _buildAlbums(context),
         const SizedBox(height: 24),
-        _buildSectionTitle(context, 'Artistas',
-            onSeeAll: () => _changeFilter(_fArtists)),
+        _buildSectionTitle(
+          context,
+          'Artistas',
+          onSeeAll: () => _changeFilter(_fArtists),
+        ),
         const SizedBox(height: 12),
         _buildArtists(context),
         const SizedBox(height: 24),
-        _buildSectionTitle(context, 'Podcasts',
-            onSeeAll: () => _changeFilter(_fPodcasts)),
+        _buildSectionTitle(
+          context,
+          'Podcasts',
+          onSeeAll: () => _changeFilter(_fPodcasts),
+        ),
         const SizedBox(height: 12),
         _buildPodcasts(context, limit: 5),
         const SizedBox(height: 24),
@@ -498,16 +691,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
           if (_scanErrors.isNotEmpty) ...[
             if (_scanning || hasStatus) const SizedBox(height: 8),
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 8,
+              ),
               decoration: BoxDecoration(
                 color: scheme.errorContainer,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Row(
                 children: [
-                  Icon(Icons.warning_amber_rounded,
-                      size: 16, color: scheme.onErrorContainer),
+                  Icon(
+                    Icons.warning_amber_rounded,
+                    size: 16,
+                    color: scheme.onErrorContainer,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -531,12 +729,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final scheme = Theme.of(context).colorScheme;
     final total = _songs.length + _podcasts.length;
     final favCount = FavoritesStore.instance.count;
+    final plCount = PlaylistsStore.instance.playlists.length;
 
     final subtitle = _scanning
         ? (_scanStatus ?? 'Escaneando… $_processedFiles archivos')
         : (total == 0
             ? 'Música local en tu dispositivo'
-            : '$total elementos · $favCount favoritos');
+            : '$total elementos · $favCount favoritos · $plCount playlists');
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -556,8 +755,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
               const SizedBox(height: 4),
               Text(
                 subtitle,
-                style:
-                    TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+                style: TextStyle(
+                  color: scheme.onSurfaceVariant,
+                  fontSize: 13,
+                ),
                 overflow: TextOverflow.ellipsis,
               ),
             ],
@@ -565,6 +766,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
         Row(
           children: [
+            _buildIconButton(
+              context,
+              Icons.playlist_add,
+              onTap: _createPlaylist,
+            ),
+            const SizedBox(width: 8),
             _buildIconButton(
               context,
               Icons.refresh,
@@ -616,19 +823,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               margin: const EdgeInsets.only(right: 10),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 8,
+              ),
               decoration: BoxDecoration(
-                color:
-                    isSelected ? scheme.primary : scheme.surfaceContainer,
+                color: isSelected
+                    ? scheme.primary
+                    : scheme.surfaceContainer,
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Center(
                 child: Text(
                   _filters[index],
                   style: TextStyle(
-                    color:
-                        isSelected ? scheme.onPrimary : scheme.onSurface,
+                    color: isSelected
+                        ? scheme.onPrimary
+                        : scheme.onSurface,
                     fontWeight: FontWeight.w600,
                     fontSize: 14,
                   ),
@@ -664,8 +875,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
             onTap: onSeeAll,
             behavior: HitTestBehavior.opaque,
             child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 4,
+                vertical: 2,
+              ),
               child: Text(
                 'Ver todo',
                 style: TextStyle(
@@ -718,7 +931,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         child: ListView.separated(
           primary: false,
           physics: const ClampingScrollPhysics(),
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          padding: const EdgeInsets.symmetric(
+            horizontal: 4,
+            vertical: 4,
+          ),
           itemCount: _songs.length,
           separatorBuilder: (_, __) => const SizedBox(height: 2),
           itemBuilder: (context, index) {
@@ -793,7 +1009,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   // -------------------------------------------------------------------------
-  // Favoritos — pestaña propia: lista reordenable + swipe-to-delete animado
+  // Favoritos
   // -------------------------------------------------------------------------
 
   Widget _buildFavoritesList(BuildContext context) {
@@ -848,7 +1064,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                               onPressed: playlist.songs.isEmpty
                                   ? null
                                   : () => _playAll(context, playlist),
-                              icon: const Icon(Icons.play_arrow, size: 20),
+                              icon: const Icon(
+                                Icons.play_arrow,
+                                size: 20,
+                              ),
                               label: const Text('Reproducir todo'),
                             ),
                             const SizedBox(width: 8),
@@ -859,8 +1078,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                     _reorderMode = !_reorderMode;
                                   });
                                 },
-                                tooltip:
-                                    _reorderMode ? 'Listo' : 'Reordenar',
+                                tooltip: _reorderMode
+                                    ? 'Listo'
+                                    : 'Reordenar',
                                 icon: Icon(
                                   _reorderMode
                                       ? Icons.check
@@ -906,16 +1126,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         return AnimatedBuilder(
                           animation: animation,
                           builder: (context, _) {
-                            final elevation = Tween<double>(begin: 0, end: 6)
-                                .evaluate(animation);
+                            final elevation =
+                                Tween<double>(begin: 0, end: 6)
+                                    .evaluate(animation);
                             return Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
+                              padding:
+                                  const EdgeInsets.only(bottom: 10),
                               child: Material(
                                 elevation: elevation,
                                 color: Colors.transparent,
-                                borderRadius: BorderRadius.circular(SongTile.tileRadius),
+                                borderRadius: BorderRadius.circular(
+                                  SongTile.tileRadius,
+                                ),
                                 clipBehavior: Clip.antiAlias,
-                                shadowColor: Colors.black.withValues(alpha: 0.5),
+                                shadowColor: Colors.black.withValues(
+                                  alpha: 0.5,
+                                ),
                                 child: child,
                               ),
                             );
@@ -925,11 +1151,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       itemBuilder: (context, index) {
                         final song = playlist.songs[index];
                         final bool isReorder = _reorderMode;
-                        final bool isRemoving = _removingIds.contains(song.path);
+                        final bool isRemoving =
+                            _removingIds.contains(song.path);
 
-                        // El Dismissible envuelve al SongTile. Al confirmar
-                        // la eliminación, animamos el colapso del tile antes
-                        // de quitarlo del store.
                         return Dismissible(
                           key: ValueKey<String>('fav:${song.path}'),
                           direction: isReorder || isRemoving
@@ -938,7 +1162,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           background: Container(
                             alignment: Alignment.centerLeft,
                             margin: const EdgeInsets.only(bottom: 10),
-                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                            ),
                             decoration: BoxDecoration(
                               color: scheme.errorContainer,
                               borderRadius: BorderRadius.circular(
@@ -957,34 +1183,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
                               title: song.title,
                               subtitle: song.subtitle,
                               coverPath: song.coverPath,
-                              fallbackIcon: song.kind == MediaKind.podcast
-                                  ? Icons.mic
-                                  : Icons.music_note,
-                              message: '«${song.title}» se eliminará de Favoritos.',
+                              fallbackIcon:
+                                  song.kind == MediaKind.podcast
+                                      ? Icons.mic
+                                      : Icons.music_note,
+                              message:
+                                  '«${song.title}» se eliminará de Favoritos.',
                               confirmLabel: 'Quitar',
                             );
 
                             if (confirmed) {
-                              // 1. Marcamos para animar la salida.
-                              setState(() => _removingIds.add(song.path));
-
-                              // 2. Esperamos a que AnimatedSize termine (300ms)...
+                              setState(
+                                () => _removingIds.add(song.path),
+                              );
                               await Future.delayed(
                                 const Duration(milliseconds: 300),
                               );
-
-                              // 3. Lo borramos del store.
                               await FavoritesStore.instance.remove(song);
-
-                              // 4. Limpiamos.
                               if (mounted) {
-                                setState(() => _removingIds.remove(song.path));
+                                setState(
+                                  () => _removingIds.remove(song.path),
+                                );
                               }
-                              return false; // El Dismissible no hace nada por su cuenta
+                              return false;
                             }
                             return false;
                           },
-                          onDismissed: (_) {}, // Ya no se usa
+                          onDismissed: (_) {},
                           child: SongTile(
                             song: song,
                             queueContext: playlist.songs,
@@ -1015,11 +1240,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
             gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
-              colors: [scheme.surfaceContainerHigh, scheme.surfaceContainer],
+              colors: [
+                scheme.surfaceContainerHigh,
+                scheme.surfaceContainer,
+              ],
             ),
             border: Border.all(color: scheme.outlineVariant),
           ),
-          child: Icon(Icons.favorite, size: 44, color: scheme.onSurfaceVariant),
+          child: Icon(
+            Icons.favorite,
+            size: 44,
+            color: scheme.onSurfaceVariant,
+          ),
         );
 
     if (coverPath == null) return fallback();
@@ -1042,6 +1274,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     required String title,
     required String subtitle,
     bool showRescan = true,
+    VoidCallback? action,
+    String? actionLabel,
   }) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
@@ -1067,10 +1301,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
           Text(
             subtitle,
             textAlign: TextAlign.center,
-            style:
-                TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+            style: TextStyle(
+              color: scheme.onSurfaceVariant,
+              fontSize: 12,
+            ),
           ),
-          if (showRescan) ...[
+          if (action != null) ...[
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: action,
+              icon: const Icon(Icons.add, size: 18),
+              label: Text(actionLabel ?? 'Crear'),
+            ),
+          ] else if (showRescan) ...[
             const SizedBox(height: 12),
             TextButton.icon(
               onPressed: _scanning ? null : _manualRescan,
@@ -1083,14 +1326,108 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _buildPlaylists(BuildContext context) {
+    Widget _buildPlaylists(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();
-    return _buildEmptyState(
-      context,
-      icon: Icons.queue_music_outlined,
-      title: 'Aún no hay playlists',
-      subtitle: 'Las playlists que crees aparecerán aquí.',
-      showRescan: false,
+
+    return AnimatedBuilder(
+      animation: PlaylistsStore.instance,
+      builder: (context, _) {
+        final playlists = PlaylistsStore.instance.playlists;
+        if (playlists.isEmpty) {
+          return _buildEmptyState(
+            context,
+            icon: Icons.queue_music_outlined,
+            title: 'Aún no hay playlists',
+            subtitle:
+                'Crea tu primera playlist; se guardará como archivo .bassy.',
+            showRescan: false,
+            action: _createPlaylist,
+            actionLabel: 'Crear playlist',
+          );
+        }
+        final scheme = Theme.of(context).colorScheme;
+        return Column(
+          children: playlists.map((pl) {
+            final coverPath = _userPlaylistCover(pl);
+            return GestureDetector(
+              onTap: () => _openUserPlaylist(context, pl),
+              onLongPress: () => _playlistOptions(context, pl),
+              child: _buildDetailCard(
+                context: context,
+                leading: _buildUserPlaylistCover(
+                  context,
+                  coverPath: coverPath,
+                ),
+                title: pl.name,
+                meta: '${pl.songPaths.length} canciones · .bassy',
+                trailing: Icon(
+                  Icons.chevron_right,
+                  color: scheme.onSurfaceVariant,
+                  size: 24,
+                ),
+              ),
+            );
+          }).toList(),
+        );
+      },
+    );
+  }
+
+  /// Busca la primera carátula disponible entre las canciones de la
+  /// playlist de usuario (resolviendo `songPaths` contra el catálogo
+  /// actual de `_songs` + `_podcasts`).
+  String? _userPlaylistCover(UserPlaylist pl) {
+    if (pl.songPaths.isEmpty) return null;
+    // Índice path → Song para no recorrer el catálogo por cada path.
+    final map = <String, Song>{
+      for (final s in _songs) s.path: s,
+      for (final s in _podcasts) s.path: s,
+    };
+    for (final p in pl.songPaths) {
+      final song = map[p];
+      final cover = song?.coverPath;
+      if (cover != null && cover.isNotEmpty) return cover;
+    }
+    return null;
+  }
+
+  /// Carátula cuadrada 64×64 con esquinas redondeadas; si no hay
+  /// imagen, muestra el icono `queue_music` con el mismo estilo que
+  /// las demás tarjetas del listado.
+  Widget _buildUserPlaylistCover(
+    BuildContext context, {
+    required String? coverPath,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+
+    Widget fallback() => Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            color: scheme.surfaceContainerHigh,
+            border: Border.all(color: scheme.outlineVariant),
+          ),
+          child: Icon(
+            Icons.queue_music,
+            color: scheme.onSurfaceVariant,
+            size: 30,
+          ),
+        );
+
+    if (coverPath == null) return fallback();
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: Image.file(
+        File(coverPath),
+        width: 64,
+        height: 64,
+        fit: BoxFit.cover,
+        cacheWidth: 192,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => fallback(),
+      ),
     );
   }
 
@@ -1100,6 +1437,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16),
       children: [
         const SizedBox(height: 8),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Playlists',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurface,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: _createPlaylist,
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('Nueva'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
         _buildPlaylists(context),
         const SizedBox(height: 24),
       ],
@@ -1507,7 +1863,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       ],
                     ),
                   ),
-                  Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
+                  Icon(
+                    Icons.chevron_right,
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ],
               ),
             ),

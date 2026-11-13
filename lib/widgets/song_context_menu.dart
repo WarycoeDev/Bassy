@@ -11,18 +11,8 @@ import '../services/favorites_store.dart';
 import '../services/playback_controller.dart';
 import 'action_menu.dart';
 import 'input_menu.dart';
+import 'playlist_picker_dialog.dart';
 
-/// Centraliza los menús que puede abrir un tile:
-///
-///  - **Menú de cola** ([showQueueSheet]): tap normal cuando ya hay cola
-///    y NO hay contexto (listado plano de Library). Solo acciones de
-///    reproducción/cola sobre la canción tocada.
-///  - **Menú de cola con contexto** ([showQueueSheetForContext]): tap
-///    normal dentro de un álbum/artista/playlist/podcast cuando ya hay
-///    cola. Permite reemplazar la cola por el contexto completo o
-///    añadirlo.
-///  - **Menú de contexto** ([showSheet] / [showAt]): ⋮, long-press o clic
-///    derecho. Acciones completas según el tipo (canción vs podcast).
 class SongContextMenu {
   SongContextMenu._();
 
@@ -57,13 +47,9 @@ class SongContextMenu {
   }
 
   // ============================================================
-  // MENÚ DE COLA CON CONTEXTO (tap normal dentro de álbum/artista/
-  // playlist/podcast/favoritos cuando ya hay cola del mismo kind)
+  // MENÚ DE COLA CON CONTEXTO
   // ============================================================
 
-  /// Permite al usuario reemplazar la cola por el **contexto completo**
-  /// (empezando en la canción tocada, `startIndex`) o añadir todo el
-  /// contexto al final de la cola.
   static Future<void> showQueueSheetForContext(
     BuildContext context,
     Song song, {
@@ -116,13 +102,9 @@ class SongContextMenu {
   }
 
   // ============================================================
-  // MENÚ DE CONTEXTO (⋮ / long-press / clic derecho)
+  // MENÚ DE CONTEXTO
   // ============================================================
 
-  /// [queueContext] / [queueIndex] permiten que el "Reproducir ahora"
-  /// encole el **contexto completo** (playlist/álbum/artista/favoritos/
-  /// podcast) y arranque en la canción tocada. Sin contexto → solo la
-  /// canción (listados planos).
   static Future<void> showSheet(
     BuildContext context,
     Song song, {
@@ -229,9 +211,6 @@ class SongContextMenu {
     ];
   }
 
-  /// Bloque reutilizable "Añadir / Quitar de la cola" según estado.
-  /// **Rutea por `song.kind`**: música → cola de música,
-  /// podcast → cola de capítulos.
   static List<ActionMenuItem> _queueAddRemove(Song song) {
     final c = PlaybackController.instance;
     final handler = c.isReady ? c.handler : null;
@@ -273,11 +252,6 @@ class SongContextMenu {
     ];
   }
 
-  // ---------- Reproducción ----------
-
-  /// Reproduce [song]. Si se pasa contexto ([queueContext] + [queueIndex]),
-  /// se encola **el contexto completo** empezando en la canción tocada.
-  /// Sin contexto → solo la canción (listado plano).
   static Future<void> _playNow(
     Song song, {
     List<Song>? queueContext,
@@ -325,8 +299,6 @@ class SongContextMenu {
     }
   }
 
-  // ---------- Acciones específicas de canción ----------
-
   static List<ActionMenuItem> _musicActions(
     BuildContext context,
     Song song,
@@ -364,27 +336,18 @@ class SongContextMenu {
     ];
   }
 
-  // ---------- Añadir a playlist (placeholder con InputMenu) ----------
+  // ---------- Añadir a playlist (picker con checkboxes) ----------
 
   static Future<void> _addToPlaylist(
     BuildContext context,
     Song song,
   ) async {
-    final result = await InputMenu.show(
-      context,
-      title: 'Añadir a playlist',
-      subtitle: song.title,
-      hintText: 'Nombre de la playlist',
-      confirmLabel: 'Añadir',
-      suggestions: const ['Favoritos', 'Escuchar luego', 'En el coche'],
-    );
-    if (result == null || !result.confirmed) return;
-    if (!context.mounted) return;
+    final changed = await PlaylistPickerDialog.show(context, song);
+    if (!changed || !context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'TODO: añadir a "${result.text}" (playlist store pendiente)',
-        ),
+      const SnackBar(
+        content: Text('Playlists actualizadas'),
+        duration: Duration(seconds: 1),
       ),
     );
   }
@@ -434,8 +397,6 @@ class SongContextMenu {
       ),
     ];
   }
-
-  // ---------- Navegación a álbum / artista ----------
 
   static void _openPlaylist(BuildContext context, Playlist playlist) {
     showDialog<void>(
@@ -490,18 +451,12 @@ class SongContextMenu {
     return null;
   }
 
-  // ---------- Helpers ----------
-
   static IconData _fallbackIcon(Song song) =>
       song.kind == MediaKind.podcast ? Icons.mic : Icons.music_note;
 
-  static bool _isPlayed(Song song) {
-    return false;
-  }
+  static bool _isPlayed(Song song) => false;
 
-  static Duration _playbackPosition(Song song) {
-    return Duration.zero;
-  }
+  static Duration _playbackPosition(Song song) => Duration.zero;
 
   static void _todo(BuildContext context, String label) {
     ScaffoldMessenger.of(context).showSnackBar(

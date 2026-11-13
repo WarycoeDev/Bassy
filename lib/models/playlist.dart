@@ -2,8 +2,8 @@ import 'package:flutter/foundation.dart';
 
 import 'song.dart';
 
-/// Categoría agrupadora: álbum, artista o podcast.
-enum PlaylistKind { album, artist, podcast, favorites }
+/// Categoría agrupadora: álbum, artista, podcast o playlist de usuario.
+enum PlaylistKind { album, artist, podcast, favorites, custom }
 
 @immutable
 class Playlist {
@@ -31,8 +31,8 @@ class Playlist {
 
   bool get isFavorites => kind == PlaylistKind.favorites;
 
-/// Solo los favoritos permiten reordenar manualmente.
-bool get canReorder => kind == PlaylistKind.favorites;
+  /// Solo los favoritos permiten reordenar manualmente.
+  bool get canReorder => kind == PlaylistKind.favorites;
 
   String get totalDurationLabel {
     final total = totalDuration.inSeconds;
@@ -48,7 +48,7 @@ bool get canReorder => kind == PlaylistKind.favorites;
   static List<Playlist> fromAlbums(List<Song> songs) {
     final map = <String, List<Song>>{};
     for (final s in songs) {
-      if (s.kind != MediaKind.music) continue; // no agrupar podcasts
+      if (s.kind != MediaKind.music) continue;
       final key = s.albumOrUnknown;
       map.putIfAbsent(key, () => []).add(s);
     }
@@ -81,12 +81,10 @@ bool get canReorder => kind == PlaylistKind.favorites;
     return List<Playlist>.unmodifiable(result);
   }
 
-  /// Agrupa canciones por artista. Las que no tienen artista van a
-  /// "Artista desconocido" (al final del listado).
   static List<Playlist> fromArtists(List<Song> songs) {
     final map = <String, List<Song>>{};
     for (final s in songs) {
-      if (s.kind != MediaKind.music) continue; // no agrupar podcasts
+      if (s.kind != MediaKind.music) continue;
       final key = s.artistOrUnknown;
       map.putIfAbsent(key, () => []).add(s);
     }
@@ -124,12 +122,12 @@ bool get canReorder => kind == PlaylistKind.favorites;
     return List<Playlist>.unmodifiable(result);
   }
 
-  /// Agrupa podcasts por carpeta padre (cada carpeta = un "show").
   static List<Playlist> fromPodcasts(List<Song> podcasts) {
     final map = <String, List<Song>>{};
     for (final s in podcasts) {
       final parts = s.path.split(RegExp(r'[/\\]'));
-      final folder = parts.length >= 2 ? parts[parts.length - 2] : 'Podcasts';
+      final folder =
+          parts.length >= 2 ? parts[parts.length - 2] : 'Podcasts';
       map.putIfAbsent(folder, () => []).add(s);
     }
     final result =
@@ -142,13 +140,12 @@ bool get canReorder => kind == PlaylistKind.favorites;
             songs: List<Song>.unmodifiable(e.value),
           );
         }).toList()..sort(
-          (a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
+          (a, b) =>
+              a.title.toLowerCase().compareTo(b.title.toLowerCase()),
         );
     return List<Playlist>.unmodifiable(result);
   }
 
-  /// Compara títulos alfabéticamente pero deja el valor `unknownLast`
-  /// siempre al final (o al principio si `unknownFirst == true`).
   static int _compareWithUnknownLast(
     String a,
     String b,

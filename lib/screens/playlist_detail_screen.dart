@@ -12,25 +12,9 @@ import '../widgets/song_tile.dart';
 
 class PlaylistDetailScreen extends StatelessWidget {
   final Playlist playlist;
-
-  /// Catálogo completo de canciones. Solo se usa cuando
-  /// `playlist.canReorder` es true (favoritos), para reconstruir la
-  /// playlist desde `FavoritesStore` en cada rebuild y reflejar el
-  /// orden guardado en vivo. Para álbumes/artistas/podcasts es null.
   final List<Song>? catalog;
-
-  /// Si es true, se renderiza solo el cuerpo (cabecera + lista) sin
-  /// Scaffold/AppBar/PopScope, para poder embeberlo en otra pantalla
-  /// (p. ej. dentro de una pestaña de LibraryScreen).
   final bool inline;
-
-  /// Callback opcional para el botón "atrás" en modo inline.
   final VoidCallback? onBack;
-
-  /// Si es false, se oculta el AppBar completo (y por tanto su título y
-  /// botón de atrás). Útil cuando la pantalla se muestra dentro de un
-  /// diálogo flotante: el título ya lo pinta la cabecera del cuerpo, así
-  /// evitamos el doble título y el botón atrás innecesario.
   final bool showBackButton;
 
   const PlaylistDetailScreen({
@@ -46,7 +30,6 @@ class PlaylistDetailScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    // ----- Modo embebido (inline) -----
     if (inline) {
       return SafeArea(
         top: false,
@@ -60,7 +43,6 @@ class PlaylistDetailScreen extends StatelessWidget {
       );
     }
 
-    // ----- Modo pantalla completa / diálogo -----
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -109,10 +91,6 @@ class PlaylistDetailScreen extends StatelessWidget {
     if (!playlist.canReorder || cat == null) return playlist;
     return FavoritesStore.instance.buildPlaylist(cat);
   }
-
-  // ============================================================
-  // ACCIÓN — REPRODUCIR TODO
-  // ============================================================
 
   Future<void> _playAll(BuildContext context, Playlist live) async {
     if (live.songs.isEmpty) return;
@@ -173,10 +151,6 @@ class PlaylistDetailScreen extends StatelessWidget {
       ],
     );
   }
-
-  // ============================================================
-  // CUERPO — MODO PANTALLA COMPLETA
-  // ============================================================
 
   Widget _buildBody(
     BuildContext context,
@@ -242,10 +216,6 @@ class PlaylistDetailScreen extends StatelessWidget {
       ],
     );
   }
-
-  // ============================================================
-  // CUERPO — MODO INLINE (embebido en una pestaña)
-  // ============================================================
 
   Widget _buildInlineBody(
     BuildContext context,
@@ -342,10 +312,6 @@ class PlaylistDetailScreen extends StatelessWidget {
     );
   }
 
-  // ============================================================
-  // LISTA DE CANCIONES (compartida por ambos modos)
-  // ============================================================
-
   Widget _buildSongList(
     BuildContext context,
     ColorScheme scheme,
@@ -396,10 +362,6 @@ class PlaylistDetailScreen extends StatelessWidget {
     );
   }
 
-  // ============================================================
-  // CARÁTULA
-  // ============================================================
-
   Widget _buildCover(BuildContext context, Playlist live) {
     final coverPath = _firstCover(live);
 
@@ -442,6 +404,9 @@ class PlaylistDetailScreen extends StatelessWidget {
         break;
       case PlaylistKind.favorites:
         icon = Icons.favorite;
+        break;
+      case PlaylistKind.custom:
+        icon = Icons.queue_music;
         break;
     }
     return Container(
