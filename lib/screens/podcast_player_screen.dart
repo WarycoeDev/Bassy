@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../models/song.dart';
 import '../services/playback_controller.dart';
+import '../widgets/queue_viewer.dart';
 
 String _fmt(Duration d) {
   final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -240,7 +241,7 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
 
                         const SizedBox(height: 8),
 
-                        // Fila de skip + play (play/pausa copiado de music player)
+                        // Fila de skip + play
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -283,7 +284,7 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                         const SizedBox(height: 16),
 
                         // ═══════════════════════════════════════════════
-                        // SLIDER DE VOLUMEN (copiado de music_player_screen)
+                        // SLIDER DE VOLUMEN
                         // ═══════════════════════════════════════════════
                         _VolumeRow(
                           scheme: scheme,
@@ -299,7 +300,7 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                         const SizedBox(height: 24),
 
                         // ═══════════════════════════════════════════════
-                        // VARIANTE 1: Selector de velocidad [- / +]
+                        // SELECTOR DE VELOCIDAD [- / +]
                         // ═══════════════════════════════════════════════
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -364,6 +365,31 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                                 ),
                               ),
                             ],
+                          ),
+                        ),
+
+                        const SizedBox(height: 16),
+
+                        // ═══════════════════════════════════════════════
+                        // BOTÓN VER COLA / VER CAPÍTULOS
+                        // ═══════════════════════════════════════════════
+                        Center(
+                          child: StreamBuilder<MediaKind>(
+                            stream: _controller.activeQueue,
+                            initialData: _controller.isReady
+                                ? _controller.activeQueueKind
+                                : MediaKind.music,
+                            builder: (context, snap) {
+                              final kind = snap.data ?? MediaKind.music;
+                              final isPodcast = kind == MediaKind.podcast;
+                              return _LabeledButton(
+                                icon: Icons.playlist_play_rounded,
+                                label:
+                                    isPodcast ? 'Ver Capítulos' : 'Ver Cola',
+                                scheme: scheme,
+                                onPressed: () => QueueViewer.show(context),
+                              );
+                            },
                           ),
                         ),
 
@@ -441,7 +467,7 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
 }
 
 // ============================================================
-// FILA DE VOLUMEN (copiada de music_player_screen.dart)
+// FILA DE VOLUMEN
 // ============================================================
 class _VolumeRow extends StatelessWidget {
   final ColorScheme scheme;
@@ -625,7 +651,7 @@ class _SkipButton extends StatelessWidget {
   }
 }
 
-/// VARIANTE 1: botón circular [-] / [+] para el selector de velocidad.
+/// Botón circular [-] / [+] para el selector de velocidad.
 class _StepBtn extends StatelessWidget {
   final IconData icon;
   final ColorScheme scheme;
@@ -664,7 +690,7 @@ class _StepBtn extends StatelessWidget {
 }
 
 // ============================================================
-// BOTÓN PLAY/PAUSA (copiado de _BigPlayButton en music_player_screen)
+// BOTÓN PLAY/PAUSA
 // ============================================================
 class _PodcastPlayButton extends StatelessWidget {
   final bool isPlaying;
@@ -708,7 +734,6 @@ class _PodcastPlayButton extends StatelessWidget {
           onTap: onPressed,
           child: AnimatedSwitcher(
             duration: const Duration(milliseconds: 200),
-            // Scale + fade, idéntico a _BigPlayButton del music player.
             transitionBuilder: (child, animation) => ScaleTransition(
               scale: animation,
               child: FadeTransition(opacity: animation, child: child),
@@ -718,6 +743,69 @@ class _PodcastPlayButton extends StatelessWidget {
               key: ValueKey(isPlaying),
               color: scheme.onPrimary,
               size: 40,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// BOTÓN REDONDEADO (icono + texto) — Ver Cola / Ver Capítulos
+// ============================================================
+class _LabeledButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final ColorScheme scheme;
+  final VoidCallback onPressed;
+
+  const _LabeledButton({
+    required this.icon,
+    required this.label,
+    required this.scheme,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        color: scheme.surfaceContainerHigh,
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.4),
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(24),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(24),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  color: scheme.onSurface,
+                  size: 22,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ],
             ),
           ),
         ),

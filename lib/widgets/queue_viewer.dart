@@ -1,3 +1,4 @@
+// lib/widgets/queue_viewer.dart
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show FontFeature;
@@ -41,6 +42,9 @@ class QueueViewer {
 /// Si [embedded] es `true` no muestra botón de cerrar (se usa dentro de
 /// la tarjeta flotante del layout de escritorio). Si es `false` muestra
 /// la cabecera con botón de cierre para usarlo dentro de un Dialog.
+///
+/// Muestra un selector Música / Capítulos para visualizar/editar
+/// **ambas** colas independientemente de cuál esté activa.
 class QueuePanel extends StatefulWidget {
   final bool embedded;
 
@@ -54,9 +58,15 @@ class _QueuePanelState extends State<QueuePanel> {
   final controller = PlaybackController.instance;
   final List<StreamSubscription<dynamic>> _subs = [];
 
+  /// Cola que el panel está mostrando (no necesariamente la activa).
+  MediaKind _viewKind = MediaKind.music;
+
   @override
   void initState() {
     super.initState();
+    if (controller.isReady) {
+      _viewKind = controller.activeQueueKind;
+    }
 
     void refresh(dynamic _) {
       if (mounted) setState(() {});
@@ -70,6 +80,11 @@ class _QueuePanelState extends State<QueuePanel> {
           .distinct()
           .listen(refresh),
     );
+    _subs.add(controller.handler.activeQueueStream.listen((kind) {
+      if (!mounted) return;
+      // Si el usuario no ha cambiado manualmente, seguimos a la activa.
+      setState(() => _viewKind = kind);
+    }));
   }
 
   @override
@@ -80,22 +95,39 @@ class _QueuePanelState extends State<QueuePanel> {
     super.dispose();
   }
 
-  void _handleReorder(int oldIndex, int newIndex) {
-    controller.reorderQueue(oldIndex, newIndex);
-    setState(() {});
+  Future<void> _handleReorder(int oldIndex, int newIndex) async {
+    await controller.reorderQueueOf(_viewKind, oldIndex, newIndex);
+    if (mounted) setState(() {});
   }
 
-  void _handleRemove(int index) {
-    if (index == controller.currentIndex) return;
-    controller.removeFromQueue(index);
-    setState(() {});
+  Future<void> _handleRemove(int index) async {
+    if (_viewKind == controller.activeQueueKind &&
+        index == controller.currentIndex) {
+      return;
+    }
+    await controller.removeFromQueueOf(_viewKind, index);
+    if (mounted) setState(() {});
   }
+
+  Future<void> _handlePlay(int index) async {
+    // Si la cola mostrada no es la activa, primero la activamos.
+    if (_viewKind != controller.activeQueueKind) {
+      await controller.switchToQueue(_viewKind);
+    }
+    await controller.playFromQueue(index);
+    if (mounted) setState(() {});
+  }
+
+  String get _title =>
+      _viewKind == MediaKind.podcast ? 'Capítulos' : 'Cola de reproducción';
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final songs = controller.songs;
-    final currentIndex = controller.currentIndex;
+    final songs = controller.songsOf(_viewKind);
+    final isActiveKind = _viewKind == controller.activeQueueKind;
+    final currentIndex =
+        isActiveKind ? controller.currentIndex : -1;
 
     return Material(
       color: widget.embedded
@@ -120,7 +152,9 @@ class _QueuePanelState extends State<QueuePanel> {
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Icon(
-                    Icons.queue_music_rounded,
+                    _viewKind == MediaKind.podcast
+                        ? Icons.mic
+                        : Icons.queue_music_rounded,
                     color: scheme.primary,
                     size: 20,
                   ),
@@ -128,7 +162,7 @@ class _QueuePanelState extends State<QueuePanel> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    'Cola de reproducción',
+                    _title,
                     style: TextStyle(
                       color: scheme.onSurface,
                       fontSize: 18,
@@ -146,6 +180,29 @@ class _QueuePanelState extends State<QueuePanel> {
               ],
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: SegmentedButton<MediaKind>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment<MediaKind>(
+                  value: MediaKind.music,
+                  label: Text('Música'),
+                  icon: Icon(Icons.music_note, size: 18),
+                ),
+                ButtonSegment<MediaKind>(
+                  value: MediaKind.podcast,
+                  label: Text('Capítulos'),
+                  icon: Icon(Icons.mic, size: 18),
+                ),
+              ],
+              selected: {_viewKind},
+              onSelectionChanged: (sel) {
+                if (sel.isEmpty) return;
+                setState(() => _viewKind = sel.first);
+              },
+            ),
+          ),
           Divider(
             height: 1,
             color: scheme.outlineVariant.withValues(alpha: 0.5),
@@ -156,12 +213,12 @@ class _QueuePanelState extends State<QueuePanel> {
                 minHeight: widget.embedded ? 0 : 320,
               ),
               child: songs.isEmpty
-                  ? _EmptyState(scheme: scheme)
+                  ? _EmptyState(scheme: scheme, kind: _viewKind)
                   : _QueueContainer(
                       scheme: scheme,
                       songs: songs,
                       currentIndex: currentIndex,
-                      onPlay: controller.playFromQueue,
+                      onPlay: _handlePlay,
                       onRemove: _handleRemove,
                       onReorder: _handleReorder,
                     ),
@@ -177,9 +234,9 @@ class _QueueContainer extends StatelessWidget {
   final ColorScheme scheme;
   final List<Song> songs;
   final int currentIndex;
-  final void Function(int) onPlay;
-  final void Function(int) onRemove;
-  final void Function(int, int) onReorder;
+  final Future<void> Function(int) onPlay;
+  final Future<void> Function(int) onRemove;
+  final Future<void> Function(int, int) onReorder;
 
   const _QueueContainer({
     required this.scheme,
@@ -208,7 +265,7 @@ class _QueueContainer extends StatelessWidget {
       fallbackIcon: song.kind == MediaKind.podcast
           ? Icons.mic
           : Icons.music_note,
-      message: '«${song.title}» se eliminará de la cola de reproducción.',
+      message: '«${song.title}» se eliminará de la cola.',
       confirmLabel: 'Quitar',
     );
   }
@@ -238,7 +295,7 @@ class _QueueContainer extends StatelessWidget {
             ),
             buildDefaultDragHandles: false,
             itemCount: songs.length,
-            onReorder: onReorder,
+            onReorder: (o, n) => onReorder(o, n),
             itemBuilder: (context, index) {
               final song = songs[index];
               final isLast = index == songs.length - 1;
@@ -483,10 +540,12 @@ class _DismissBg extends StatelessWidget {
 
 class _EmptyState extends StatelessWidget {
   final ColorScheme scheme;
-  const _EmptyState({required this.scheme});
+  final MediaKind kind;
+  const _EmptyState({required this.scheme, required this.kind});
 
   @override
   Widget build(BuildContext context) {
+    final isPodcast = kind == MediaKind.podcast;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -494,13 +553,13 @@ class _EmptyState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              Icons.queue_music_rounded,
+              isPodcast ? Icons.mic_none_rounded : Icons.queue_music_rounded,
               size: 56,
               color: scheme.onSurfaceVariant.withValues(alpha: 0.5),
             ),
             const SizedBox(height: 12),
             Text(
-              'La cola está vacía',
+              isPodcast ? 'No hay capítulos en cola' : 'La cola está vacía',
               style: TextStyle(
                 color: scheme.onSurfaceVariant,
                 fontSize: 15,

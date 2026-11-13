@@ -25,7 +25,6 @@ class SongContextMenu {
   // MENÚ DE COLA (tap normal)
   // ============================================================
 
-  /// Menú reducido al tocar un tile cuando la cola ya tiene canciones.
   static Future<void> showQueueSheet(
     BuildContext context,
     Song song,
@@ -56,7 +55,6 @@ class SongContextMenu {
   // MENÚ DE CONTEXTO (⋮ / long-press / clic derecho)
   // ============================================================
 
-  /// Bottom sheet con todas las acciones según tipo.
   static Future<void> showSheet(
     BuildContext context,
     Song song,
@@ -72,7 +70,6 @@ class SongContextMenu {
     );
   }
 
-  /// Popup anclado a [globalPosition] (long-press / clic derecho).
   static Future<void> showAt(
     BuildContext context,
     Song song, {
@@ -94,7 +91,6 @@ class SongContextMenu {
     BuildContext context,
     Song song,
   ) {
-    // Para podcasts: solo reproducción + acciones propias de podcast.
     if (song.kind == MediaKind.podcast) {
       return [
         ActionMenuItem(
@@ -102,11 +98,11 @@ class SongContextMenu {
           label: 'Reproducir ahora',
           onTap: () => _playNow(song),
         ),
+        ..._queueAddRemove(song),
         ..._podcastActions(context, song),
       ];
     }
 
-    // Canciones: acciones completas (cola + organización + navegación).
     final favorites = FavoritesStore.instance;
     final isFav = favorites.contains(song);
 
@@ -143,11 +139,19 @@ class SongContextMenu {
   }
 
   /// Bloque reutilizable "Añadir / Quitar de la cola" según estado.
+  /// **Rutea por `song.kind`**: música → cola de música,
+  /// podcast → cola de capítulos.
   static List<ActionMenuItem> _queueAddRemove(Song song) {
     final c = PlaybackController.instance;
     final handler = c.isReady ? c.handler : null;
-    final inQueue = handler?.songs.any((s) => s.path == song.path) ?? false;
-    final isCurrent = handler?.currentSong?.path == song.path;
+    final kind = song.kind;
+
+    final queueSongs = handler?.songsOf(kind) ?? const <Song>[];
+    final inQueue = queueSongs.any((s) => s.path == song.path);
+    final isCurrent =
+        handler != null &&
+        handler.activeQueueKind == kind &&
+        handler.currentSong?.path == song.path;
 
     if (!inQueue) {
       return [
@@ -156,7 +160,7 @@ class SongContextMenu {
           label: 'Añadir a la cola',
           onTap: () async {
             if (handler == null) return;
-            await handler.addToQueue(song);
+            await handler.addToQueueOf(kind, song);
           },
         ),
       ];
@@ -169,8 +173,10 @@ class SongContextMenu {
         enabled: !isCurrent,
         onTap: () async {
           if (handler == null) return;
-          final idx = handler.songs.indexWhere((s) => s.path == song.path);
-          if (idx >= 0) await handler.removeFromQueue(idx);
+          final idx = queueSongs.indexWhere((s) => s.path == song.path);
+          if (idx >= 0) {
+            await handler.removeFromQueueOf(kind, idx);
+          }
         },
       ),
     ];
@@ -180,8 +186,6 @@ class SongContextMenu {
 
   static Future<void> _playNow(Song song) => _replaceQueueAndPlay(song);
 
-  /// Vacía la cola, deja solo [song] y la reproduce desde 0,
-  /// deteniendo lo que sonaba antes.
   static Future<void> _replaceQueueAndPlay(Song song) async {
     final c = PlaybackController.instance;
     if (!c.isReady) return;
@@ -237,7 +241,6 @@ class SongContextMenu {
     BuildContext context,
     Song song,
   ) async {
-    // TODO: conectar PlaylistsStore cuando exista.
     final result = await InputMenu.show(
       context,
       title: 'Añadir a playlist',
@@ -305,44 +308,40 @@ class SongContextMenu {
 
   // ---------- Navegación a álbum / artista ----------
 
-  /// Abre la playlist (álbum/artista) como una ventana flotante centrada
-  /// sobre el contexto actual, en lugar de empujar una ruta completa.
-  /// El layout interno de [PlaylistDetailScreen] no se modifica: solo se
-  /// envuelve en un [Dialog] con tamaño acotado y esquinas redondeadas.
   static void _openPlaylist(BuildContext context, Playlist playlist) {
-  showDialog<void>(
-    context: context,
-    barrierColor: Colors.black.withValues(alpha: 0.45),
-    builder: (dialogContext) {
-      final scheme = Theme.of(dialogContext).colorScheme;
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (dialogContext) {
+        final scheme = Theme.of(dialogContext).colorScheme;
 
-      return Dialog(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        insetPadding: const EdgeInsets.symmetric(
-          horizontal: 32,
-          vertical: 24,
-        ),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 380,
-            maxHeight: 640,
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 32,
+            vertical: 24,
           ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(18),
-            child: Material(
-              color: scheme.surface,
-              child: PlaylistDetailScreen(
-                playlist: playlist,
-                showBackButton: false,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              maxWidth: 380,
+              maxHeight: 640,
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: Material(
+                color: scheme.surface,
+                child: PlaylistDetailScreen(
+                  playlist: playlist,
+                  showBackButton: false,
+                ),
               ),
             ),
           ),
-        ),
-      );
-    },
-  );
-}
+        );
+      },
+    );
+  }
 
   static Playlist? _findAlbum(Song song) {
     if (!song.hasAlbum) return null;
@@ -368,12 +367,10 @@ class SongContextMenu {
       song.kind == MediaKind.podcast ? Icons.mic : Icons.music_note;
 
   static bool _isPlayed(Song song) {
-    // TODO: ajusta al campo real (p.ej. song.isPlayed).
     return false;
   }
 
   static Duration _playbackPosition(Song song) {
-    // TODO: ajusta al campo real (p.ej. song.playbackPosition).
     return Duration.zero;
   }
 

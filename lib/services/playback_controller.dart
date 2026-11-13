@@ -1,3 +1,4 @@
+// lib/services/playback_controller.dart
 import 'dart:async';
 
 import 'package:audio_service/audio_service.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/song.dart';
 import 'playback_audio_handler.dart';
+import 'playback_queue.dart';
 
 const Duration kRewindThreshold = Duration(seconds: 3);
 
@@ -39,6 +41,10 @@ class PlaybackController {
       ),
     );
   }
+
+  // ============================================================
+  // COLA ACTIVA (compatibilidad)
+  // ============================================================
 
   Future<void> setQueue(
     List<Song> songs, {
@@ -85,6 +91,52 @@ class PlaybackController {
       handler.setRepeatModeForUI(mode);
 
   Future<void> clearQueue() => handler.clearQueue();
+
+  // ============================================================
+  // COLA POR KIND (nueva API)
+  // ============================================================
+
+  Future<void> switchToQueue(MediaKind kind) => handler.switchToQueue(kind);
+
+  MediaKind get activeQueueKind => handler.activeQueueKind;
+
+  Stream<MediaKind> get activeQueue => handler.activeQueueStream;
+
+  List<Song> songsOf(MediaKind kind) => handler.songsOf(kind);
+
+  Song? currentSongOf(MediaKind kind) => handler.currentSongOf(kind);
+
+  Future<void> setQueueOf(
+    MediaKind kind,
+    List<Song> songs, {
+    int startIndex = 0,
+    bool autoPlay = true,
+  }) =>
+      handler.setQueueOf(
+        kind,
+        songs,
+        startIndex: startIndex,
+        autoPlay: autoPlay,
+      );
+
+  Future<void> addToQueueOf(MediaKind kind, Song song) =>
+      handler.addToQueueOf(kind, song);
+
+  Future<void> removeFromQueueOf(MediaKind kind, int index) =>
+      handler.removeFromQueueOf(kind, index);
+
+  Future<void> reorderQueueOf(
+    MediaKind kind,
+    int oldIndex,
+    int newIndex,
+  ) =>
+      handler.reorderQueueOf(kind, oldIndex, newIndex);
+
+  Future<void> clearQueueOf(MediaKind kind) => handler.clearQueueOf(kind);
+
+  // ============================================================
+  // STREAMS
+  // ============================================================
 
   Stream<MediaItem?> get currentItem => handler.mediaItem;
   Stream<PlaybackState> get playbackState => handler.playbackState;
@@ -147,6 +199,10 @@ class PlaybackController {
     emit();
     yield* controller.stream;
   }
+
+  // ============================================================
+  // GETTERS SÍNCRONOS (cola activa)
+  // ============================================================
 
   List<Song> get songs => _handler?.songs ?? const [];
   Song? get currentSong => _handler?.currentSong;

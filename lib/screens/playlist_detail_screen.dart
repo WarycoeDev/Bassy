@@ -110,7 +110,7 @@ class PlaylistDetailScreen extends StatelessWidget {
     return FavoritesStore.instance.buildPlaylist(cat);
   }
 
-  // ============================================================
+    // ============================================================
   // ACCIÓN — REPRODUCIR TODO
   // ============================================================
 
@@ -123,15 +123,27 @@ class PlaylistDetailScreen extends StatelessWidget {
       return;
     }
 
-    final queueNotEmpty = controller.songs.isNotEmpty;
+    // La cola destino depende del tipo de playlist.
+    final queueKind = live.kind == PlaylistKind.podcast
+        ? MediaKind.podcast
+        : MediaKind.music;
 
-    // Cola vacía → reproducir directamente desde el principio.
-    if (!queueNotEmpty) {
-      await controller.setQueue(live.songs, startIndex: 0, autoPlay: true);
+    final targetQueueSongs = controller.songsOf(queueKind);
+    final queueHasContent = targetQueueSongs.isNotEmpty;
+
+    // Cola destino vacía → reproducir directamente desde el principio.
+    if (!queueHasContent) {
+      await controller.switchToQueue(queueKind);
+      await controller.setQueueOf(
+        queueKind,
+        live.songs,
+        startIndex: 0,
+        autoPlay: true,
+      );
       return;
     }
 
-    // Hay contenido en cola → mostrar menú de opciones.
+    // Hay contenido en esa cola → mostrar menú de opciones.
     await PlaybackMenu.show(
       context,
       title: live.title,
@@ -143,7 +155,9 @@ class PlaylistDetailScreen extends StatelessWidget {
           icon: Icons.play_arrow,
           label: 'Reproducir ahora',
           onTap: () async {
-            await controller.setQueue(
+            await controller.switchToQueue(queueKind);
+            await controller.setQueueOf(
+              queueKind,
               live.songs,
               startIndex: 0,
               autoPlay: true,
@@ -155,7 +169,7 @@ class PlaylistDetailScreen extends StatelessWidget {
           label: 'Añadir a la cola',
           onTap: () async {
             for (final s in live.songs) {
-              await controller.addToQueue(s);
+              await controller.addToQueueOf(queueKind, s);
             }
           },
         ),
