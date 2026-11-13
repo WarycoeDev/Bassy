@@ -15,6 +15,10 @@ String _fmt(Duration d) {
   return '$m:$s';
 }
 
+/// Breakpoint a partir del cual se usa el layout de escritorio
+/// (panel lateral con la cola siempre visible).
+const double _kDesktopBreakpoint = 900.0;
+
 /// Player de PODCAST: metadatos, velocidad, skip ±segundos y progreso.
 class PodcastPlayerScreen extends StatefulWidget {
   /// Prefijo del `Hero` que viene del miniplayer que abrió esta pantalla.
@@ -146,288 +150,383 @@ class _PodcastPlayerScreenState extends State<PodcastPlayerScreen> {
                           child: cover,
                         );
 
-                  return SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Cabecera horizontal: cover + meta
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            heroCover,
-                            const SizedBox(width: 16),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    song.title,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: scheme.onSurface,
-                                      fontSize: 19,
-                                      fontWeight: FontWeight.w700,
-                                      letterSpacing: -0.3,
+                  return LayoutBuilder(
+                    builder: (context, constraints) {
+                      final isDesktop =
+                          constraints.maxWidth >= _kDesktopBreakpoint;
+
+                      final playerColumn = _buildPlayerColumn(
+                        context: context,
+                        scheme: scheme,
+                        song: song,
+                        isPlaying: isPlaying,
+                        position: position,
+                        duration: duration,
+                        maxMs: maxMs,
+                        valueMs: valueMs,
+                        shownPosition: shownPosition,
+                        remaining: remaining,
+                        heroCover: heroCover,
+                        isDesktop: isDesktop,
+                      );
+
+                      if (!isDesktop) {
+                        return playerColumn;
+                      }
+
+                      // Escritorio: player + cola siempre visible
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(flex: 5, child: playerColumn),
+                          Container(
+                            width: 1,
+                            color: scheme.outlineVariant
+                                .withValues(alpha: 0.4),
+                          ),
+                          Expanded(
+                            flex: 4,
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                  16, 16, 24, 24),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(24),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: scheme.surfaceContainerLow,
+                                    borderRadius: BorderRadius.circular(24),
+                                    border: Border.all(
+                                      color: scheme.outlineVariant
+                                          .withValues(alpha: 0.5),
                                     ),
                                   ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    song.subtitle,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: scheme.onSurfaceVariant,
-                                      fontSize: 13.5,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  Text(
-                                    'Faltan ${_fmt(remaining)}',
-                                    style: TextStyle(
-                                      color: scheme.primary,
-                                      fontSize: 12.5,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 24),
-
-                        // Barra de progreso con seek
-                        SliderTheme(
-                          data: SliderTheme.of(context).copyWith(
-                            trackHeight: 3,
-                            thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 7,
-                            ),
-                          ),
-                          child: Slider(
-                            min: 0,
-                            max: maxMs,
-                            value: valueMs,
-                            onChangeStart: duration.inMilliseconds > 0
-                                ? (v) => setState(() => _seekValue = v)
-                                : null,
-                            onChanged: duration.inMilliseconds > 0
-                                ? (v) => setState(() => _seekValue = v)
-                                : null,
-                            onChangeEnd: duration.inMilliseconds > 0
-                                ? _onSeekEnd
-                                : null,
-                          ),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                _fmt(shownPosition),
-                                style: _timeStyle(scheme),
-                              ),
-                              Text(
-                                _fmt(duration),
-                                style: _timeStyle(scheme),
-                              ),
-                            ],
-                          ),
-                        ),
-
-                        const SizedBox(height: 8),
-
-                        // Fila de skip + play
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            _SkipButton(
-                              forward: false,
-                              seconds: 10,
-                              onPressed: () {
-                                final t =
-                                    position - const Duration(seconds: 10);
-                                _controller.seek(
-                                  t < Duration.zero ? Duration.zero : t,
-                                );
-                              },
-                              scheme: scheme,
-                            ),
-                            const SizedBox(width: 24),
-                            _PodcastPlayButton(
-                              isPlaying: isPlaying,
-                              onPressed: isPlaying
-                                  ? _controller.pause
-                                  : _controller.play,
-                              scheme: scheme,
-                            ),
-                            const SizedBox(width: 24),
-                            _SkipButton(
-                              forward: true,
-                              seconds: 30,
-                              onPressed: () {
-                                final t =
-                                    position + const Duration(seconds: 30);
-                                _controller.seek(
-                                  t > duration ? duration : t,
-                                );
-                              },
-                              scheme: scheme,
-                            ),
-                          ],
-                        ),
-
-                        const SizedBox(height: 16),
-
-                        // ═══════════════════════════════════════════════
-                        // SLIDER DE VOLUMEN
-                        // ═══════════════════════════════════════════════
-                        _VolumeRow(
-                          scheme: scheme,
-                          isAdjustingVolume: _isAdjustingVolume,
-                          volumeValue: _volumeValue,
-                          lastNonZeroVolume: _lastNonZeroVolume,
-                          onStart: _onVolumeStart,
-                          onChanged: _onVolumeChanged,
-                          onEnd: _onVolumeEnd,
-                          onUpdateLast: _onVolumeUpdateLast,
-                        ),
-
-                        const SizedBox(height: 24),
-
-                        // ═══════════════════════════════════════════════
-                        // SELECTOR DE VELOCIDAD [- / +]
-                        // ═══════════════════════════════════════════════
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: scheme.surfaceContainerHigh,
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: scheme.outlineVariant
-                                  .withValues(alpha: 0.4),
-                            ),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.speed_rounded,
-                                size: 20,
-                                color: scheme.onSurfaceVariant,
-                              ),
-                              const SizedBox(width: 12),
-                              Text(
-                                'Velocidad',
-                                style: TextStyle(
-                                  color: scheme.onSurface,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600,
+                                  clipBehavior: Clip.antiAlias,
+                                  child: const QueuePanel(embedded: true),
                                 ),
                               ),
-                              const Spacer(),
-                              _StepBtn(
-                                icon: Icons.remove_rounded,
-                                scheme: scheme,
-                                enabled: _speedIndex > 0,
-                                onPressed: () => _onSpeedSelected(
-                                  _speeds[_speedIndex - 1],
-                                ),
-                              ),
-                              SizedBox(
-                                width: 56,
-                                child: Center(
-                                  child: Text(
-                                    '${_speed}x',
-                                    style: TextStyle(
-                                      color: scheme.primary,
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w700,
-                                      fontFeatures: const [
-                                        FontFeature.tabularFigures(),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              _StepBtn(
-                                icon: Icons.add_rounded,
-                                scheme: scheme,
-                                enabled: _speedIndex < _speeds.length - 1,
-                                onPressed: () => _onSpeedSelected(
-                                  _speeds[_speedIndex + 1],
-                                ),
-                              ),
-                            ],
+                            ),
                           ),
-                        ),
-
-                        const SizedBox(height: 16),
-
-                        // ═══════════════════════════════════════════════
-                        // BOTÓN VER COLA / VER CAPÍTULOS
-                        // ═══════════════════════════════════════════════
-                        Center(
-                          child: StreamBuilder<MediaKind>(
-                            stream: _controller.activeQueue,
-                            initialData: _controller.isReady
-                                ? _controller.activeQueueKind
-                                : MediaKind.music,
-                            builder: (context, snap) {
-                              final kind = snap.data ?? MediaKind.music;
-                              final isPodcast = kind == MediaKind.podcast;
-                              return _LabeledButton(
-                                icon: Icons.playlist_play_rounded,
-                                label:
-                                    isPodcast ? 'Ver Capítulos' : 'Ver Cola',
-                                scheme: scheme,
-                                onPressed: () => QueueViewer.show(context),
-                              );
-                            },
-                          ),
-                        ),
-
-                        const SizedBox(height: 16),
-
-                        // Metadatos disponibles en Song
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: scheme.surfaceContainer,
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              _metaRow('Álbum', song.albumOrUnknown, scheme),
-                              const SizedBox(height: 8),
-                              _metaRow('Artista', song.artistOrUnknown, scheme),
-                              const SizedBox(height: 8),
-                              _metaRow('Archivo', song.fileName, scheme),
-                              const SizedBox(height: 8),
-                              _metaRow(
-                                'Formato',
-                                '${song.extension.toUpperCase()} · ${song.sizeLabel}',
-                                scheme,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
+                        ],
+                      );
+                    },
                   );
                 },
               );
             },
           );
         },
+      ),
+    );
+  }
+
+  // ============================================================
+  // COLUMNA DEL PLAYER (compartida por móvil y escritorio)
+  // ============================================================
+  Widget _buildPlayerColumn({
+    required BuildContext context,
+    required ColorScheme scheme,
+    required Song song,
+    required bool isPlaying,
+    required Duration position,
+    required Duration duration,
+    required double maxMs,
+    required double valueMs,
+    required Duration shownPosition,
+    required Duration remaining,
+    required Widget heroCover,
+    required bool isDesktop,
+  }) {
+    final _controller = PlaybackController.instance;
+
+    final headerRow = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        heroCover,
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                song.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: scheme.onSurface,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.3,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                song.subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: scheme.onSurfaceVariant,
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Faltan ${_fmt(remaining)}',
+                style: TextStyle(
+                  color: scheme.primary,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+
+    return SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(
+        isDesktop ? 48 : 20,
+        8,
+        isDesktop ? 48 : 20,
+        32,
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: isDesktop ? 560 : double.infinity,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Cabecera horizontal: cover + meta
+              headerRow,
+              const SizedBox(height: 24),
+
+              // Barra de progreso con seek
+              SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 3,
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 7,
+                  ),
+                ),
+                child: Slider(
+                  min: 0,
+                  max: maxMs,
+                  value: valueMs,
+                  onChangeStart: duration.inMilliseconds > 0
+                      ? (v) => setState(() => _seekValue = v)
+                      : null,
+                  onChanged: duration.inMilliseconds > 0
+                      ? (v) => setState(() => _seekValue = v)
+                      : null,
+                  onChangeEnd: duration.inMilliseconds > 0
+                      ? _onSeekEnd
+                      : null,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      _fmt(shownPosition),
+                      style: _timeStyle(scheme),
+                    ),
+                    Text(
+                      _fmt(duration),
+                      style: _timeStyle(scheme),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 8),
+
+              // Fila de skip + play
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _SkipButton(
+                    forward: false,
+                    seconds: 10,
+                    onPressed: () {
+                      final t = position - const Duration(seconds: 10);
+                      _controller.seek(
+                        t < Duration.zero ? Duration.zero : t,
+                      );
+                    },
+                    scheme: scheme,
+                  ),
+                  const SizedBox(width: 24),
+                  _PodcastPlayButton(
+                    isPlaying: isPlaying,
+                    onPressed: isPlaying
+                        ? _controller.pause
+                        : _controller.play,
+                    scheme: scheme,
+                  ),
+                  const SizedBox(width: 24),
+                  _SkipButton(
+                    forward: true,
+                    seconds: 30,
+                    onPressed: () {
+                      final t = position + const Duration(seconds: 30);
+                      _controller.seek(
+                        t > duration ? duration : t,
+                      );
+                    },
+                    scheme: scheme,
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 16),
+
+              // ═══════════════════════════════════════════════
+              // SLIDER DE VOLUMEN
+              // ═══════════════════════════════════════════════
+              _VolumeRow(
+                scheme: scheme,
+                isAdjustingVolume: _isAdjustingVolume,
+                volumeValue: _volumeValue,
+                lastNonZeroVolume: _lastNonZeroVolume,
+                onStart: _onVolumeStart,
+                onChanged: _onVolumeChanged,
+                onEnd: _onVolumeEnd,
+                onUpdateLast: _onVolumeUpdateLast,
+              ),
+
+              const SizedBox(height: 24),
+
+              // ═══════════════════════════════════════════════
+              // SELECTOR DE VELOCIDAD [- / +]
+              // ═══════════════════════════════════════════════
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: scheme.outlineVariant.withValues(alpha: 0.4),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.speed_rounded,
+                      size: 20,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      'Velocidad',
+                      style: TextStyle(
+                        color: scheme.onSurface,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const Spacer(),
+                    _StepBtn(
+                      icon: Icons.remove_rounded,
+                      scheme: scheme,
+                      enabled: _speedIndex > 0,
+                      onPressed: () => _onSpeedSelected(
+                        _speeds[_speedIndex - 1],
+                      ),
+                    ),
+                    SizedBox(
+                      width: 56,
+                      child: Center(
+                        child: Text(
+                          '${_speed}x',
+                          style: TextStyle(
+                            color: scheme.primary,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            fontFeatures: const [
+                              FontFeature.tabularFigures(),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    _StepBtn(
+                      icon: Icons.add_rounded,
+                      scheme: scheme,
+                      enabled: _speedIndex < _speeds.length - 1,
+                      onPressed: () => _onSpeedSelected(
+                        _speeds[_speedIndex + 1],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // En escritorio la cola ya está siempre visible en el panel
+              // lateral, así que no mostramos el botón.
+              if (!isDesktop) ...[
+                const SizedBox(height: 16),
+
+                // ═══════════════════════════════════════════════
+                // BOTÓN VER COLA / VER CAPÍTULOS
+                // ═══════════════════════════════════════════════
+                Center(
+                  child: StreamBuilder<MediaKind>(
+                    stream: _controller.activeQueue,
+                    initialData: _controller.isReady
+                        ? _controller.activeQueueKind
+                        : MediaKind.music,
+                    builder: (context, snap) {
+                      final kind = snap.data ?? MediaKind.music;
+                      final isPodcast = kind == MediaKind.podcast;
+                      return _LabeledButton(
+                        icon: Icons.playlist_play_rounded,
+                        label: isPodcast ? 'Ver Capítulos' : 'Ver Cola',
+                        scheme: scheme,
+                        onPressed: () => QueueViewer.show(context),
+                      );
+                    },
+                  ),
+                ),
+              ],
+
+              const SizedBox(height: 16),
+
+              // Metadatos disponibles en Song
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainer,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _metaRow('Álbum', song.albumOrUnknown, scheme),
+                    const SizedBox(height: 8),
+                    _metaRow('Artista', song.artistOrUnknown, scheme),
+                    const SizedBox(height: 8),
+                    _metaRow('Archivo', song.fileName, scheme),
+                    const SizedBox(height: 8),
+                    _metaRow(
+                      'Formato',
+                      '${song.extension.toUpperCase()} · ${song.sizeLabel}',
+                      scheme,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
