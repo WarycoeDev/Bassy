@@ -142,6 +142,28 @@ class FavoritesStore extends ChangeNotifier {
     await _persist();
   }
 
+  /// Aplica un orden explícito de paths (usado por la UI al salir del
+  /// modo reordenar). Filtra paths que ya no sean favoritos.
+  Future<void> reorderToPaths(List<String> orderedPaths) async {
+    final current = _paths.toSet();
+    final filtered = <String>[
+      for (final p in orderedPaths)
+        if (current.contains(p)) p,
+    ];
+    // Añade cualquier favorito que no estuviera en orderedPaths (por
+    // seguridad, no se pierde nada).
+    final seen = filtered.toSet();
+    for (final p in _paths) {
+      if (!seen.contains(p)) filtered.add(p);
+    }
+    if (listEquals(filtered, _paths)) return;
+    _paths
+      ..clear()
+      ..addAll(filtered);
+    notifyListeners();
+    await _persist();
+  }
+
   /// Construye la `Playlist` de favoritos resolviendo contra [catalog].
   /// Las canciones que ya no existen en el catálogo se omiten.
   Playlist buildPlaylist(List<Song> catalog) {

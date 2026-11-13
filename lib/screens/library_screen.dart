@@ -537,12 +537,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _buildScrollableContent(BuildContext context) {
+    Widget _buildScrollableContent(BuildContext context) {
     final inline = _inlinePlaylist;
     if (inline != null) {
       return PlaylistDetailScreen(
         playlist: inline,
-        catalog: inline.canReorder ? _songs : null,
+        // Favoritos y playlists .bassy necesitan el catálogo para
+        // resolver/reordenar canciones en vivo.
+        catalog: (inline.canReorder ||
+                inline.kind == PlaylistKind.custom)
+            ? <Song>[..._songs, ..._podcasts]
+            : null,
         inline: true,
         onBack: _closeInlinePlaylist,
       );

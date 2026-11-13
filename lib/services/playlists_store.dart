@@ -225,7 +225,7 @@ class PlaylistsStore extends ChangeNotifier {
   }
 
   /// Aplica cambios en lote: añade la canción a [addToIds] y la quita de
-  /// [removeFromIds]. Es lo que usa [PlaylistPickerDialog] al pulsar
+  /// [removeFromIds]. Es lo que usa `PlaylistPickerDialog` al pulsar
   /// "Guardar".
   Future<void> setSongInPlaylists(
     Song song, {
@@ -248,6 +248,57 @@ class PlaylistsStore extends ChangeNotifier {
       if (pl.songPaths.contains(song.path)) continue;
       await save(pl.copyWith(songPaths: [...pl.songPaths, song.path]));
     }
+  }
+
+  /// Reordena: mueve el elemento en [oldIndex] a [newIndex].
+  /// Acepta `newIndex == songPaths.length` (soltar al final).
+  Future<void> reorder(
+    String playlistId,
+    int oldIndex,
+    int newIndex,
+  ) async {
+    final pl = _playlists[playlistId];
+    if (pl == null) return;
+    final paths = [...pl.songPaths];
+    if (oldIndex < 0 || oldIndex >= paths.length) return;
+    if (newIndex > oldIndex) newIndex -= 1;
+    if (newIndex < 0) newIndex = 0;
+    if (newIndex >= paths.length) newIndex = paths.length - 1;
+    if (oldIndex == newIndex) return;
+    final item = paths.removeAt(oldIndex);
+    paths.insert(newIndex, item);
+    await save(pl.copyWith(songPaths: paths));
+  }
+
+  /// Aplica un orden explícito de paths (usado por la UI al salir del
+  /// modo reordenar). Filtra paths que ya no pertenezcan a la playlist
+  /// y preserva los que falten para no perder nada.
+  Future<void> reorderToPaths(
+    String playlistId,
+    List<String> orderedPaths,
+  ) async {
+    final pl = _playlists[playlistId];
+    if (pl == null) return;
+    final current = pl.songPaths.toSet();
+    final filtered = <String>[
+      for (final p in orderedPaths)
+        if (current.contains(p)) p,
+    ];
+    final seen = filtered.toSet();
+    for (final p in pl.songPaths) {
+      if (!seen.contains(p)) filtered.add(p);
+    }
+    if (listEquals(filtered, pl.songPaths)) return;
+    await save(pl.copyWith(songPaths: filtered));
+  }
+
+  /// Quita la canción en [index] de la playlist.
+  Future<void> removeAt(String playlistId, int index) async {
+    final pl = _playlists[playlistId];
+    if (pl == null) return;
+    if (index < 0 || index >= pl.songPaths.length) return;
+    final paths = [...pl.songPaths]..removeAt(index);
+    await save(pl.copyWith(songPaths: paths));
   }
 
   // ============================================================
@@ -281,17 +332,20 @@ class PlaylistsStore extends ChangeNotifier {
           if (await downloads.exists()) {
             targetDir = downloads;
           } else {
-            targetDir =
-                Directory('${ext.path}${Platform.pathSeparator}$_exportsFolder');
+            targetDir = Directory(
+              '${ext.path}${Platform.pathSeparator}$_exportsFolder',
+            );
           }
         } else {
-          targetDir =
-              Directory('${ext.path}${Platform.pathSeparator}$_exportsFolder');
+          targetDir = Directory(
+            '${ext.path}${Platform.pathSeparator}$_exportsFolder',
+          );
         }
       } else {
         final docs = await getApplicationDocumentsDirectory();
-        targetDir =
-            Directory('${docs.path}${Platform.pathSeparator}$_exportsFolder');
+        targetDir = Directory(
+          '${docs.path}${Platform.pathSeparator}$_exportsFolder',
+        );
       }
     } else {
       final docs = await getApplicationDocumentsDirectory();

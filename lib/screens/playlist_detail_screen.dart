@@ -7,12 +7,18 @@ import '../models/playlist.dart';
 import '../models/song.dart';
 import '../services/favorites_store.dart';
 import '../services/playback_controller.dart';
+import '../services/playlists_store.dart';
+import '../widgets/action_menu.dart';
 import '../widgets/playback_menu.dart';
 import '../widgets/song_tile.dart';
 
-class PlaylistDetailScreen extends StatelessWidget {
+class PlaylistDetailScreen extends StatefulWidget {
   final Playlist playlist;
+
+  /// Catálogo completo de canciones. Necesario para reconstruir en vivo
+  /// Favoritos y playlists `.bassy` (resolver `songPaths` y reordenar).
   final List<Song>? catalog;
+
   final bool inline;
   final VoidCallback? onBack;
   final bool showBackButton;
@@ -27,70 +33,211 @@ class PlaylistDetailScreen extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+  State<PlaylistDetailScreen> createState() => _PlaylistDetailScreenState();
+}
 
-    if (inline) {
-      return SafeArea(
-        top: false,
-        child: playlist.canReorder
-            ? AnimatedBuilder(
-                animation: FavoritesStore.instance,
-                builder: (context, _) =>
-                    _buildInlineBody(context, scheme, _livePlaylist()),
-              )
-            : _buildInlineBody(context, scheme, playlist),
+class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
+  bool _reorderMode = false;
+  final Set<String> _removingIds = {};
+
+  /// Snapshot local mientras se reordena. Evita que el `AnimatedBuilder`
+  /// externo reconstruya la lista en cada `notifyListeners` del store,
+  /// que era lo que causaba el "parpadeo" entre posición vieja y nueva.
+  List<Song>? _localSongs;
+
+  bool get _isFavorites => widget.playlist.kind == PlaylistKind.favorites;
+
+  bool get _isUserPlaylist => widget.playlist.kind == PlaylistKind.custom;
+
+  String? get _userId {
+    final id = widget.playlist.id;
+    if (!_isUserPlaylist) return null;
+    return id.startsWith('user:') ? id.substring('user:'.length) : id;
+  }
+
+  bool get _canReorder => _isFavorites || _isUserPlaylist;
+
+  // ============================================================
+  // Playlist "viva"
+  // ============================================================
+
+  Playlist _livePlaylist() {
+    // En reorderMode usamos el snapshot local (evita parpadeos).
+    if (_reorderMode && _localSongs != null) {
+      final songs = _localSongs!;
+      return Playlist(
+        id: widget.playlist.id,
+        title: widget.playlist.title,
+        subtitle: '${songs.length} canciones',
+        kind: widget.playlist.kind,
+        songs: List<Song>.unmodifiable(songs),
       );
     }
 
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, result) {
-        if (didPop) return;
-        final nav = Navigator.of(context);
-        if (nav.canPop()) {
-          nav.pop();
-        }
-      },
-      child: Scaffold(
-        backgroundColor: scheme.surface,
-        appBar: showBackButton
-            ? AppBar(
-                backgroundColor: scheme.surface,
-                elevation: 0,
-                leading: IconButton(
-                  icon: const Icon(Icons.arrow_back),
-                  tooltip: 'Atrás',
-                  onPressed: () => Navigator.of(context).maybePop(),
-                ),
-                title: Text(
-                  playlist.title,
-                  style: TextStyle(
-                    color: scheme.onSurface,
-                    fontWeight: FontWeight.bold,
+    if (_isFavorites) {
+      final cat = widget.catalog;
+      if (cat == null) return widget.playlist;
+      return FavoritesStore.instance.buildPlaylist(cat);
+    }
+
+    if (_isUserPlaylist) {
+      final uid = _userId;
+      if (uid == null) return widget.playlist;
+      final pl = PlaylistsStore.instance.byId(uid);
+      if (pl == null) return widget.playlist;
+      final cat = widget.catalog ?? const <Song>[];
+      final map = {for (final s in cat) s.path: s};
+      final songs =
+          pl.songPaths.map((p) => map[p]).whereType<Song>().toList();
+      return Playlist(
+        id: widget.playlist.id,
+        title: pl.name,
+        subtitle: '${songs.length} canciones',
+        kind: PlaylistKind.custom,
+        songs: songs,
+      );
+    }
+
+    return widget.playlist;
+  }
+
+  // ============================================================
+  // Reorder / remove
+  // ============================================================
+
+  void _enterReorderMode(Playlist live) {
+    setState(() {
+      _reorderMode = true;
+      _localSongs = List<Song>.of(live.songs);
+    });
+  }
+
+  Future<void> _exitReorderMode() async {
+    final snapshot = _localSongs;
+    if (snapshot == null) {
+      setState(() => _reorderMode = false);
+      return;
+    }
+
+    // Volcamos el orden final al store de una sola vez.
+    if (_isFavorites) {
+      await FavoritesStore.instance.reorderToPaths(
+        snapshot.map((s) => s.path).toList(),
+      );
+    } else {
+      final uid = _userId;
+      if (uid != null) {
+        await PlaylistsStore.instance.reorderToPaths(
+          uid,
+          snapshot.map((s) => s.path).toList(),
+        );
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _reorderMode = false;
+      _localSongs = null;
+    });
+  }
+
+  void _onLocalReorder(int oldIndex, int newIndex) {
+    final list = _localSongs;
+    if (list == null) return;
+    if (newIndex > oldIndex) newIndex -= 1;
+    if (oldIndex == newIndex) return;
+    setState(() {
+      final item = list.removeAt(oldIndex);
+      list.insert(newIndex, item);
+    });
+  }
+
+  Future<void> _removeAt(Song song, int index) async {
+    if (_isFavorites) {
+      setState(() => _removingIds.add(song.path));
+      await Future.delayed(const Duration(milliseconds: 300));
+      await FavoritesStore.instance.remove(song);
+      if (mounted) setState(() => _removingIds.remove(song.path));
+      return;
+    }
+    final uid = _userId;
+    if (uid == null) return;
+    setState(() => _removingIds.add(song.path));
+    await Future.delayed(const Duration(milliseconds: 300));
+    await PlaylistsStore.instance.removeAt(uid, index);
+    if (mounted) setState(() => _removingIds.remove(song.path));
+  }
+
+  // ============================================================
+  // Build
+  // ============================================================
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    // Durante reorderMode NO escuchamos al store: el snapshot local
+    // manda. Así evitamos parpadeos por rebuilds intermedios.
+    final Listenable? listenable = _reorderMode
+        ? null
+        : (_isFavorites
+            ? FavoritesStore.instance
+            : (_isUserPlaylist ? PlaylistsStore.instance : null));
+
+    Widget bodyFor(Playlist live) {
+      if (widget.inline) {
+        return SafeArea(
+          top: false,
+          child: _buildInlineBody(context, scheme, live),
+        );
+      }
+      return PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, result) {
+          if (didPop) return;
+          final nav = Navigator.of(context);
+          if (nav.canPop()) nav.pop();
+        },
+        child: Scaffold(
+          backgroundColor: scheme.surface,
+          appBar: widget.showBackButton
+              ? AppBar(
+                  backgroundColor: scheme.surface,
+                  elevation: 0,
+                  leading: IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    tooltip: 'Atrás',
+                    onPressed: () => Navigator.of(context).maybePop(),
                   ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              )
-            : null,
-        body: SafeArea(
-          child: playlist.canReorder
-              ? AnimatedBuilder(
-                  animation: FavoritesStore.instance,
-                  builder: (context, _) =>
-                      _buildBody(context, scheme, _livePlaylist()),
+                  title: Text(
+                    widget.playlist.title,
+                    style: TextStyle(
+                      color: scheme.onSurface,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 )
-              : _buildBody(context, scheme, playlist),
+              : null,
+          body: SafeArea(
+            child: _buildBody(context, scheme, live),
+          ),
         ),
-      ),
+      );
+    }
+
+    if (listenable == null) {
+      return bodyFor(_livePlaylist());
+    }
+    return AnimatedBuilder(
+      animation: listenable,
+      builder: (context, _) => bodyFor(_livePlaylist()),
     );
   }
 
-  Playlist _livePlaylist() {
-    final cat = catalog;
-    if (!playlist.canReorder || cat == null) return playlist;
-    return FavoritesStore.instance.buildPlaylist(cat);
-  }
+  // ============================================================
+  // Reproducir todo
+  // ============================================================
 
   Future<void> _playAll(BuildContext context, Playlist live) async {
     if (live.songs.isEmpty) return;
@@ -152,6 +299,10 @@ class PlaylistDetailScreen extends StatelessWidget {
     );
   }
 
+  // ============================================================
+  // Cuerpo pantalla completa
+  // ============================================================
+
   Widget _buildBody(
     BuildContext context,
     ColorScheme scheme,
@@ -189,13 +340,7 @@ class PlaylistDetailScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: live.songs.isEmpty
-                          ? null
-                          : () => _playAll(context, live),
-                      icon: const Icon(Icons.play_arrow, size: 20),
-                      label: const Text('Reproducir todo'),
-                    ),
+                    _buildHeaderActions(context, live),
                   ],
                 ),
               ),
@@ -216,6 +361,10 @@ class PlaylistDetailScreen extends StatelessWidget {
       ],
     );
   }
+
+  // ============================================================
+  // Cuerpo inline
+  // ============================================================
 
   Widget _buildInlineBody(
     BuildContext context,
@@ -249,13 +398,7 @@ class PlaylistDetailScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: live.songs.isEmpty
-                    ? null
-                    : () => _playAll(context, live),
-                icon: const Icon(Icons.play_arrow, size: 20),
-                label: const Text('Reproducir todo'),
-              ),
+              _buildHeaderActions(context, live),
             ],
           ),
         ),
@@ -271,7 +414,7 @@ class PlaylistDetailScreen extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
               child: header,
             ),
-            if (onBack != null)
+            if (widget.onBack != null)
               Positioned(
                 top: 10,
                 left: 6,
@@ -282,7 +425,7 @@ class PlaylistDetailScreen extends StatelessWidget {
                   shadowColor: Colors.black54,
                   clipBehavior: Clip.antiAlias,
                   child: InkWell(
-                    onTap: onBack,
+                    onTap: widget.onBack,
                     customBorder: const CircleBorder(),
                     child: const Padding(
                       padding: EdgeInsets.all(6),
@@ -312,22 +455,66 @@ class PlaylistDetailScreen extends StatelessWidget {
     );
   }
 
+  Widget _buildHeaderActions(BuildContext context, Playlist live) {
+    return Row(
+      children: [
+        FilledButton.icon(
+          onPressed: live.songs.isEmpty
+              ? null
+              : () => _playAll(context, live),
+          icon: const Icon(Icons.play_arrow, size: 20),
+          label: const Text('Reproducir todo'),
+        ),
+        if (_canReorder && live.songs.length > 1) ...[
+          const SizedBox(width: 8),
+          IconButton.filledTonal(
+            onPressed: () {
+              if (_reorderMode) {
+                _exitReorderMode();
+              } else {
+                _enterReorderMode(live);
+              }
+            },
+            tooltip: _reorderMode ? 'Listo' : 'Reordenar',
+            icon: Icon(
+              _reorderMode ? Icons.check : Icons.swap_vert,
+              size: 20,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ============================================================
+  // Lista de canciones
+  // ============================================================
+
   Widget _buildSongList(
     BuildContext context,
     ColorScheme scheme,
     Playlist live,
   ) {
-    if (live.canReorder) {
+    // Modo reordenar: usa el snapshot local, sin escuchar al store.
+    if (_canReorder && _reorderMode) {
       return ReorderableListView.builder(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         itemCount: live.songs.length,
-        onReorder: FavoritesStore.instance.reorder,
+        onReorder: _onLocalReorder,
+        buildDefaultDragHandles: false,
+        // Sin AnimatedBuilder: elevación fija para evitar repaints
+        // por frame durante el arrastre.
         proxyDecorator: (child, index, animation) {
-          return Material(
-            elevation: 6,
-            color: scheme.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(12),
-            child: child,
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Material(
+              elevation: 6,
+              color: scheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(SongTile.tileRadius),
+              clipBehavior: Clip.antiAlias,
+              shadowColor: Colors.black.withValues(alpha: 0.5),
+              child: child,
+            ),
           );
         },
         itemBuilder: (context, index) {
@@ -338,12 +525,74 @@ class PlaylistDetailScreen extends StatelessWidget {
               song: song,
               queueContext: live.songs,
               queueIndex: index,
+              reorderMode: true,
+              reorderIndex: index,
             ),
           );
         },
       );
     }
 
+    // Modo normal con swipe-to-delete para Favoritos y .bassy.
+    if (_canReorder) {
+      return ListView.builder(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        itemCount: live.songs.length,
+        itemBuilder: (context, index) {
+          final song = live.songs[index];
+          final isRemoving = _removingIds.contains(song.path);
+
+          return Dismissible(
+            key: ValueKey<String>('swipe:${song.path}'),
+            direction: isRemoving
+                ? DismissDirection.none
+                : DismissDirection.startToEnd,
+            background: Container(
+              alignment: Alignment.centerLeft,
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              decoration: BoxDecoration(
+                color: scheme.errorContainer,
+                borderRadius:
+                    BorderRadius.circular(SongTile.tileRadius),
+              ),
+              child: Icon(
+                Icons.delete_outline,
+                color: scheme.onErrorContainer,
+                size: 24,
+              ),
+            ),
+            confirmDismiss: (_) async {
+              final confirmed = await ActionMenu.confirm(
+                context,
+                title: song.title,
+                subtitle: song.subtitle,
+                coverPath: song.coverPath,
+                fallbackIcon: song.kind == MediaKind.podcast
+                    ? Icons.mic
+                    : Icons.music_note,
+                message:
+                    '«${song.title}» se eliminará de «${live.title}».',
+                confirmLabel: 'Quitar',
+              );
+              if (confirmed) {
+                await _removeAt(song, index);
+              }
+              return false;
+            },
+            onDismissed: (_) {},
+            child: SongTile(
+              song: song,
+              queueContext: live.songs,
+              queueIndex: index,
+              isRemoving: isRemoving,
+            ),
+          );
+        },
+      );
+    }
+
+    // Lista plana (álbum/artista/podcast).
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       itemCount: live.songs.length,
@@ -361,6 +610,10 @@ class PlaylistDetailScreen extends StatelessWidget {
       },
     );
   }
+
+  // ============================================================
+  // Carátula
+  // ============================================================
 
   Widget _buildCover(BuildContext context, Playlist live) {
     final coverPath = _firstCover(live);
