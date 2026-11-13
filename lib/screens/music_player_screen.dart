@@ -1,6 +1,6 @@
 // lib/screens/music_player_screen.dart
 import 'dart:io';
-import 'dart:ui' show FontFeature;
+import 'dart:ui' show FontFeature, ImageFilter;
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
@@ -16,6 +16,10 @@ String _fmt(Duration d) {
   final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
   return '$m:$s';
 }
+
+/// Breakpoint a partir del cual se usa el layout de escritorio
+/// (panel lateral con la cola siempre visible).
+const double _kDesktopBreakpoint = 900.0;
 
 class MusicPlayerScreen extends StatefulWidget {
   final String? heroTagPrefix;
@@ -78,337 +82,62 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
             return const Center(child: Text('Sin reproducción'));
           }
 
-          return StreamBuilder<Duration>(
-            stream: _controller.position,
-            builder: (context, posSnap) {
-              final position = posSnap.data ?? Duration.zero;
-              final duration = song.duration > Duration.zero
-                  ? song.duration
-                  : (mediaSnap.data?.duration ?? Duration.zero);
-              final maxMs = duration.inMilliseconds
-                  .toDouble()
-                  .clamp(1.0, double.infinity);
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              final isDesktop = constraints.maxWidth >= _kDesktopBreakpoint;
 
-              final streamMs =
-                  position.inMilliseconds.toDouble().clamp(0.0, maxMs);
-              final valueMs = _isSeeking ? _seekValue! : streamMs;
+              if (isDesktop) {
+                return _DesktopLayout(
+                  song: song,
+                  mediaItem: mediaSnap.data!,
+                  heroTagPrefix: widget.heroTagPrefix,
+                  isSeeking: _isSeeking,
+                  seekValue: _seekValue,
+                  isAdjustingVolume: _isAdjustingVolume,
+                  volumeValue: _volumeValue,
+                  lastNonZeroVolume: _lastNonZeroVolume,
+                  onSeekStart: (v) => setState(() => _seekValue = v),
+                  onSeekChanged: (v) => setState(() => _seekValue = v),
+                  onSeekEnd: _onSeekEnd,
+                  onVolumeStart: (v) =>
+                      setState(() => _volumeValue = v),
+                  onVolumeChanged: (v) {
+                    setState(() => _volumeValue = v);
+                    if (v > 0.001) {
+                      _lastNonZeroVolume = v;
+                    }
+                    _controller.setVolume(v);
+                  },
+                  onVolumeEnd: (_) =>
+                      setState(() => _volumeValue = null),
+                  onVolumeUpdateLast: (v) =>
+                      _lastNonZeroVolume = v,
+                );
+              }
 
-              final shownPosition = _isSeeking
-                  ? Duration(milliseconds: valueMs.round())
-                  : position;
-
-              return StreamBuilder<bool>(
-                stream: _controller.isPlaying,
-                initialData: _controller.handler.isPlaying,
-                builder: (context, playingSnap) {
-                  final isPlaying = playingSnap.data ?? false;
-
-                  return LayoutBuilder(
-                    builder: (context, constraints) {
-                      final coverSize = (constraints.maxWidth * 0.72)
-                          .clamp(180.0, 360.0);
-
-                      // Animación de la carátula al cambiar de canción.
-                      // El Hero se mantiene FUERA del AnimatedSwitcher para
-                      // no interferir con el vuelo del Hero entre pantallas.
-                      final cover = _AnimatedCover(
-                        song: song,
-                        size: coverSize,
-                      );
-                      final heroPrefix = widget.heroTagPrefix;
-                      final heroCover = heroPrefix == null
-                          ? cover
-                          : Hero(
-                              tag: '$heroPrefix${song.path}',
-                              child: cover,
-                            );
-
-                      return SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-                        child: Column(
-                          children: [
-                            const SizedBox(height: 8),
-                            heroCover,
-                            const SizedBox(height: 32),
-                            // Título + artista animados (cross-fade + scale)
-                            _AnimatedSongInfo(
-                              song: song,
-                              scheme: scheme,
-                            ),
-                            const SizedBox(height: 28),
-                            SliderTheme(
-                              data: SliderTheme.of(context).copyWith(
-                                trackHeight: 3,
-                                thumbShape: const RoundSliderThumbShape(
-                                  enabledThumbRadius: 7,
-                                ),
-                                overlayShape: const RoundSliderOverlayShape(
-                                  overlayRadius: 16,
-                                ),
-                              ),
-                              child: Slider(
-                                min: 0,
-                                max: maxMs,
-                                value: valueMs,
-                                onChangeStart: duration.inMilliseconds > 0
-                                    ? (v) => setState(() => _seekValue = v)
-                                    : null,
-                                onChanged: duration.inMilliseconds > 0
-                                    ? (v) => setState(() => _seekValue = v)
-                                    : null,
-                                onChangeEnd: duration.inMilliseconds > 0
-                                    ? _onSeekEnd
-                                    : null,
-                              ),
-                            ),
-                            Padding(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 8),
-                              child: Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text(
-                                    _fmt(shownPosition),
-                                    style: TextStyle(
-                                      color: scheme.onSurfaceVariant,
-                                      fontSize: 12,
-                                      fontFeatures: const [
-                                        FontFeature.tabularFigures()
-                                      ],
-                                    ),
-                                  ),
-                                  Text(
-                                    _fmt(duration),
-                                    style: TextStyle(
-                                      color: scheme.onSurfaceVariant,
-                                      fontSize: 12,
-                                      fontFeatures: const [
-                                        FontFeature.tabularFigures()
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                              children: [
-                                // ---------- ALEATORIO (animado) ----------
-                                StreamBuilder<bool>(
-                                  stream: _controller.shuffle,
-                                  initialData: _controller.shuffleEnabled,
-                                  builder: (context, snap) {
-                                    final on = snap.data ?? false;
-                                    return _AnimatedIconButton(
-                                      icon: Icons.shuffle_rounded,
-                                      tooltip: 'Aleatorio',
-                                      scheme: scheme,
-                                      size: 24,
-                                      color: on
-                                          ? scheme.primary
-                                          : scheme.onSurfaceVariant,
-                                      stateKey: on,
-                                      onPressed: () =>
-                                          _controller.setShuffle(!on),
-                                    );
-                                  },
-                                ),
-                                IconButton(
-                                  icon: Icon(
-                                    Icons.skip_previous_rounded,
-                                    size: 40,
-                                    color: scheme.onSurface,
-                                  ),
-                                  tooltip: 'Anterior',
-                                  onPressed: _controller.previous,
-                                ),
-                                _BigPlayButton(
-                                  isPlaying: isPlaying,
-                                  onPressed: isPlaying
-                                      ? _controller.pause
-                                      : _controller.play,
-                                  scheme: scheme,
-                                ),
-                                IconButton(
-                                  icon: Icon(
-                                    Icons.skip_next_rounded,
-                                    size: 40,
-                                    color: _controller.hasNext
-                                        ? scheme.onSurface
-                                        : scheme.onSurface
-                                            .withValues(alpha: 0.3),
-                                  ),
-                                  tooltip: 'Siguiente',
-                                  onPressed: _controller.hasNext
-                                      ? _controller.next
-                                      : null,
-                                ),
-                                // ---------- REPETIR (animado) ----------
-                                StreamBuilder<PlayerRepeatMode>(
-                                  stream: _controller.repeat,
-                                  initialData: _controller.repeatModeNow,
-                                  builder: (context, snap) {
-                                    final mode =
-                                        snap.data ?? PlayerRepeatMode.off;
-                                    final icon = switch (mode) {
-                                      PlayerRepeatMode.one =>
-                                        Icons.repeat_one_rounded,
-                                      _ => Icons.repeat_rounded,
-                                    };
-                                    final active =
-                                        mode != PlayerRepeatMode.off;
-                                    return _AnimatedIconButton(
-                                      icon: icon,
-                                      tooltip: 'Repetir',
-                                      scheme: scheme,
-                                      size: 24,
-                                      color: active
-                                          ? scheme.primary
-                                          : scheme.onSurfaceVariant,
-                                      stateKey: mode,
-                                      onPressed: () {
-                                        final next = switch (mode) {
-                                          PlayerRepeatMode.off =>
-                                            PlayerRepeatMode.all,
-                                          PlayerRepeatMode.all =>
-                                            PlayerRepeatMode.one,
-                                          PlayerRepeatMode.one =>
-                                            PlayerRepeatMode.off,
-                                        };
-                                        _controller.setRepeatMode(next);
-                                      },
-                                    );
-                                  },
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            // ---------- VOLUMEN ----------
-                            ValueListenableBuilder<double>(
-                              valueListenable: _controller.volume,
-                              builder: (context, streamVolume, _) {
-                                final safeStream =
-                                    streamVolume.clamp(0.0, 1.0);
-                                final volume = _isAdjustingVolume
-                                    ? _volumeValue!
-                                    : safeStream;
-                                final muted = volume <= 0.001;
-                                final icon = muted
-                                    ? Icons.volume_off_rounded
-                                    : volume < 0.5
-                                        ? Icons.volume_down_rounded
-                                        : Icons.volume_up_rounded;
-
-                                return Row(
-                                  children: [
-                                    IconButton(
-                                      icon: Icon(
-                                        icon,
-                                        color: scheme.onSurfaceVariant,
-                                      ),
-                                      tooltip: muted
-                                          ? 'Activar sonido'
-                                          : 'Silenciar',
-                                      onPressed: () {
-                                        if (muted) {
-                                          _controller.setVolume(
-                                              _lastNonZeroVolume);
-                                        } else {
-                                          _lastNonZeroVolume = volume;
-                                          _controller.setVolume(0);
-                                        }
-                                      },
-                                    ),
-                                    Expanded(
-                                      child: SliderTheme(
-                                        data:
-                                            SliderTheme.of(context).copyWith(
-                                          trackHeight: 2,
-                                          thumbShape:
-                                              const RoundSliderThumbShape(
-                                            enabledThumbRadius: 6,
-                                          ),
-                                          overlayShape:
-                                              const RoundSliderOverlayShape(
-                                            overlayRadius: 12,
-                                          ),
-                                        ),
-                                        child: Slider(
-                                          min: 0,
-                                          max: 1,
-                                          value: volume,
-                                          onChangeStart: (v) {
-                                            setState(
-                                                () => _volumeValue = v);
-                                          },
-                                          onChanged: (v) {
-                                            setState(
-                                                () => _volumeValue = v);
-                                            if (v > 0.001) {
-                                              _lastNonZeroVolume = v;
-                                            }
-                                            _controller.setVolume(v);
-                                          },
-                                          onChangeEnd: (v) {
-                                            setState(
-                                                () => _volumeValue = null);
-                                          },
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                );
-                              },
-                            ),
-                            const SizedBox(height: 16),
-                            // ---------- BOTONES CENTRALES ----------
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                // Favoritos (animado, conectado a FavoritesStore)
-                                ListenableBuilder(
-                                  listenable: FavoritesStore.instance,
-                                  builder: (context, _) {
-                                    final isFav =
-                                        FavoritesStore.instance.contains(song);
-                                    return _AnimatedRoundIconButton(
-                                      icon: isFav
-                                          ? Icons.favorite_rounded
-                                          : Icons.favorite_border_rounded,
-                                      tooltip: isFav
-                                          ? 'Quitar de favoritos'
-                                          : 'Añadir a favoritos',
-                                      scheme: scheme,
-                                      color: isFav ? scheme.error : null,
-                                      onPressed: () async {
-                                        await FavoritesStore.instance
-                                            .toggle(song);
-                                        if (!context.mounted) return;
-                                        ScaffoldMessenger.of(context);
-                                      },
-                                    );
-                                  },
-                                ),
-                                const SizedBox(width: 12),
-                                // Ver cola (funcional)
-                                _LabeledButton(
-                                  icon: Icons.playlist_play_rounded,
-                                  label: 'Ver Cola',
-                                  scheme: scheme,
-                                  onPressed: () {
-                                    QueueViewer.show(context);
-                                  },
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  );
+              return _MobileLayout(
+                song: song,
+                mediaItem: mediaSnap.data!,
+                heroTagPrefix: widget.heroTagPrefix,
+                isSeeking: _isSeeking,
+                seekValue: _seekValue,
+                isAdjustingVolume: _isAdjustingVolume,
+                volumeValue: _volumeValue,
+                lastNonZeroVolume: _lastNonZeroVolume,
+                onSeekStart: (v) => setState(() => _seekValue = v),
+                onSeekChanged: (v) => setState(() => _seekValue = v),
+                onSeekEnd: _onSeekEnd,
+                onVolumeStart: (v) =>
+                    setState(() => _volumeValue = v),
+                onVolumeChanged: (v) {
+                  setState(() => _volumeValue = v);
+                  if (v > 0.001) {
+                    _lastNonZeroVolume = v;
+                  }
+                  _controller.setVolume(v);
                 },
+                onVolumeEnd: (_) => setState(() => _volumeValue = null),
+                onVolumeUpdateLast: (v) => _lastNonZeroVolume = v,
               );
             },
           );
@@ -419,9 +148,711 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
 }
 
 // ============================================================
+// LAYOUT MÓVIL (vertical, con botón "Ver Cola")
+// ============================================================
+class _MobileLayout extends StatelessWidget {
+  final Song song;
+  final MediaItem mediaItem;
+  final String? heroTagPrefix;
+  final bool isSeeking;
+  final double? seekValue;
+  final bool isAdjustingVolume;
+  final double? volumeValue;
+  final double lastNonZeroVolume;
+  final ValueChanged<double> onSeekStart;
+  final ValueChanged<double> onSeekChanged;
+  final ValueChanged<double> onSeekEnd;
+  final ValueChanged<double> onVolumeStart;
+  final ValueChanged<double> onVolumeChanged;
+  final ValueChanged<double> onVolumeEnd;
+  final ValueChanged<double> onVolumeUpdateLast;
+
+  const _MobileLayout({
+    required this.song,
+    required this.mediaItem,
+    required this.heroTagPrefix,
+    required this.isSeeking,
+    required this.seekValue,
+    required this.isAdjustingVolume,
+    required this.volumeValue,
+    required this.lastNonZeroVolume,
+    required this.onSeekStart,
+    required this.onSeekChanged,
+    required this.onSeekEnd,
+    required this.onVolumeStart,
+    required this.onVolumeChanged,
+    required this.onVolumeEnd,
+    required this.onVolumeUpdateLast,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final controller = PlaybackController.instance;
+
+    return StreamBuilder<Duration>(
+      stream: controller.position,
+      builder: (context, posSnap) {
+        final position = posSnap.data ?? Duration.zero;
+        final duration = song.duration > Duration.zero
+            ? song.duration
+            : (mediaItem.duration ?? Duration.zero);
+        final maxMs = duration.inMilliseconds
+            .toDouble()
+            .clamp(1.0, double.infinity);
+
+        final streamMs =
+            position.inMilliseconds.toDouble().clamp(0.0, maxMs);
+        final valueMs = isSeeking ? seekValue! : streamMs;
+
+        final shownPosition = isSeeking
+            ? Duration(milliseconds: valueMs.round())
+            : position;
+
+        return StreamBuilder<bool>(
+          stream: controller.isPlaying,
+          initialData: controller.handler.isPlaying,
+          builder: (context, playingSnap) {
+            final isPlaying = playingSnap.data ?? false;
+
+            return LayoutBuilder(
+              builder: (context, constraints) {
+                final coverSize =
+                    (constraints.maxWidth * 0.72).clamp(180.0, 360.0);
+
+                final cover = _AnimatedCover(
+                  song: song,
+                  size: coverSize,
+                );
+                final heroPrefix = heroTagPrefix;
+                final heroCover = heroPrefix == null
+                    ? cover
+                    : Hero(
+                        tag: '$heroPrefix${song.path}',
+                        child: cover,
+                      );
+
+                return SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 8),
+                      heroCover,
+                      const SizedBox(height: 32),
+                      _AnimatedSongInfo(song: song, scheme: scheme),
+                      const SizedBox(height: 28),
+                      _SeekBar(
+                        duration: duration,
+                        valueMs: valueMs,
+                        shownPosition: shownPosition,
+                        onStart: onSeekStart,
+                        onChanged: onSeekChanged,
+                        onEnd: onSeekEnd,
+                      ),
+                      const SizedBox(height: 16),
+                      _ControlsRow(scheme: scheme, isPlaying: isPlaying),
+                      const SizedBox(height: 8),
+                      _VolumeRow(
+                        scheme: scheme,
+                        isAdjustingVolume: isAdjustingVolume,
+                        volumeValue: volumeValue,
+                        lastNonZeroVolume: lastNonZeroVolume,
+                        onStart: onVolumeStart,
+                        onChanged: onVolumeChanged,
+                        onEnd: onVolumeEnd,
+                        onUpdateLast: onVolumeUpdateLast,
+                      ),
+                      const SizedBox(height: 16),
+                      _BottomButtonsRow(
+                        song: song,
+                        scheme: scheme,
+                        onShowQueue: () => QueueViewer.show(context),
+                        // Móvil: favoritos sigue en la fila inferior.
+                        showFavorites: true,
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+// ============================================================
+// LAYOUT ESCRITORIO
+//  - Columna izquierda: carátula + info + controles + barra + volumen
+//  - Columna derecha: panel con la cola SIEMPRE visible (sin botón)
+// ============================================================
+class _DesktopLayout extends StatelessWidget {
+  final Song song;
+  final MediaItem mediaItem;
+  final String? heroTagPrefix;
+  final bool isSeeking;
+  final double? seekValue;
+  final bool isAdjustingVolume;
+  final double? volumeValue;
+  final double lastNonZeroVolume;
+  final ValueChanged<double> onSeekStart;
+  final ValueChanged<double> onSeekChanged;
+  final ValueChanged<double> onSeekEnd;
+  final ValueChanged<double> onVolumeStart;
+  final ValueChanged<double> onVolumeChanged;
+  final ValueChanged<double> onVolumeEnd;
+  final ValueChanged<double> onVolumeUpdateLast;
+
+  const _DesktopLayout({
+    required this.song,
+    required this.mediaItem,
+    required this.heroTagPrefix,
+    required this.isSeeking,
+    required this.seekValue,
+    required this.isAdjustingVolume,
+    required this.volumeValue,
+    required this.lastNonZeroVolume,
+    required this.onSeekStart,
+    required this.onSeekChanged,
+    required this.onSeekEnd,
+    required this.onVolumeStart,
+    required this.onVolumeChanged,
+    required this.onVolumeEnd,
+    required this.onVolumeUpdateLast,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final controller = PlaybackController.instance;
+
+    return StreamBuilder<Duration>(
+      stream: controller.position,
+      builder: (context, posSnap) {
+        final position = posSnap.data ?? Duration.zero;
+        final duration = song.duration > Duration.zero
+            ? song.duration
+            : (mediaItem.duration ?? Duration.zero);
+        final maxMs = duration.inMilliseconds
+            .toDouble()
+            .clamp(1.0, double.infinity);
+
+        final streamMs =
+            position.inMilliseconds.toDouble().clamp(0.0, maxMs);
+        final valueMs = isSeeking ? seekValue! : streamMs;
+
+        final shownPosition = isSeeking
+            ? Duration(milliseconds: valueMs.round())
+            : position;
+
+        return StreamBuilder<bool>(
+          stream: controller.isPlaying,
+          initialData: controller.handler.isPlaying,
+          builder: (context, playingSnap) {
+            final isPlaying = playingSnap.data ?? false;
+
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // -------- Columna izquierda (player) --------
+                Expanded(
+                  flex: 5,
+                  child: Center(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(48, 8, 48, 24),
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 560),
+                        child: Column(
+                          children: [
+                            const SizedBox(height: 8),
+                            _buildHeroCover(),
+                            const SizedBox(height: 32),
+                            _AnimatedSongInfo(song: song, scheme: scheme),
+                            const SizedBox(height: 28),
+                            _SeekBar(
+                              duration: duration,
+                              valueMs: valueMs,
+                              shownPosition: shownPosition,
+                              onStart: onSeekStart,
+                              onChanged: onSeekChanged,
+                              onEnd: onSeekEnd,
+                            ),
+                            const SizedBox(height: 16),
+                            _ControlsRow(
+                              scheme: scheme,
+                              isPlaying: isPlaying,
+                            ),
+                            const SizedBox(height: 8),
+                            _VolumeRow(
+                              scheme: scheme,
+                              isAdjustingVolume: isAdjustingVolume,
+                              volumeValue: volumeValue,
+                              lastNonZeroVolume: lastNonZeroVolume,
+                              onStart: onVolumeStart,
+                              onChanged: onVolumeChanged,
+                              onEnd: onVolumeEnd,
+                              onUpdateLast: onVolumeUpdateLast,
+                            ),
+                            // En escritorio ya no hay fila inferior:
+                            //  - Favoritos → sobre la carátula
+                            //  - Ver Cola → panel lateral siempre visible
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // -------- Separador vertical --------
+                Container(
+                  width: 1,
+                  color: scheme.outlineVariant.withValues(alpha: 0.4),
+                ),
+                // -------- Columna derecha (cola siempre visible) --------
+                Expanded(
+                  flex: 4,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 24, 24),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(24),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: scheme.surfaceContainerLow,
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: scheme.outlineVariant
+                                .withValues(alpha: 0.5),
+                          ),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: const QueuePanel(embedded: true),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildHeroCover() {
+    const coverSize = 320.0;
+    final cover = _AnimatedCover(song: song, size: coverSize);
+    final heroPrefix = heroTagPrefix;
+    final heroCover = heroPrefix == null
+        ? cover
+        : Hero(
+            tag: '$heroPrefix${song.path}',
+            child: cover,
+          );
+
+    // Stack: cover + botón de favoritos en la esquina superior derecha.
+    return SizedBox(
+      width: coverSize,
+      height: coverSize,
+      child: Stack(
+        children: [
+          heroCover,
+          Positioned(
+            top: 10,
+            right: 10,
+            child: _CoverFavoriteButton(song: song),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// BARRA DE PROGRESO (seek)
+// ============================================================
+class _SeekBar extends StatelessWidget {
+  final Duration duration;
+  final double valueMs;
+  final Duration shownPosition;
+  final ValueChanged<double> onStart;
+  final ValueChanged<double> onChanged;
+  final ValueChanged<double> onEnd;
+
+  const _SeekBar({
+    required this.duration,
+    required this.valueMs,
+    required this.shownPosition,
+    required this.onStart,
+    required this.onChanged,
+    required this.onEnd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final maxMs = duration.inMilliseconds
+        .toDouble()
+        .clamp(1.0, double.infinity);
+    final canSeek = duration.inMilliseconds > 0;
+
+    return Column(
+      children: [
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            trackHeight: 3,
+            thumbShape: const RoundSliderThumbShape(
+              enabledThumbRadius: 7,
+            ),
+            overlayShape: const RoundSliderOverlayShape(
+              overlayRadius: 16,
+            ),
+          ),
+          child: Slider(
+            min: 0,
+            max: maxMs,
+            value: valueMs,
+            onChangeStart: canSeek ? onStart : null,
+            onChanged: canSeek ? onChanged : null,
+            onChangeEnd: canSeek ? onEnd : null,
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                _fmt(shownPosition),
+                style: TextStyle(
+                  color: scheme.onSurfaceVariant,
+                  fontSize: 12,
+                  fontFeatures: const [
+                    FontFeature.tabularFigures()
+                  ],
+                ),
+              ),
+              Text(
+                _fmt(duration),
+                style: TextStyle(
+                  color: scheme.onSurfaceVariant,
+                  fontSize: 12,
+                  fontFeatures: const [
+                    FontFeature.tabularFigures()
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ============================================================
+// FILA DE CONTROLES (shuffle, prev, play/pause, next, repeat)
+// ============================================================
+class _ControlsRow extends StatelessWidget {
+  final ColorScheme scheme;
+  final bool isPlaying;
+
+  const _ControlsRow({required this.scheme, required this.isPlaying});
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = PlaybackController.instance;
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: [
+        // ---------- ALEATORIO (animado) ----------
+        StreamBuilder<bool>(
+          stream: controller.shuffle,
+          initialData: controller.shuffleEnabled,
+          builder: (context, snap) {
+            final on = snap.data ?? false;
+            return _AnimatedIconButton(
+              icon: Icons.shuffle_rounded,
+              tooltip: 'Aleatorio',
+              scheme: scheme,
+              size: 24,
+              color: on ? scheme.primary : scheme.onSurfaceVariant,
+              stateKey: on,
+              onPressed: () => controller.setShuffle(!on),
+            );
+          },
+        ),
+        IconButton(
+          icon: Icon(
+            Icons.skip_previous_rounded,
+            size: 40,
+            color: scheme.onSurface,
+          ),
+          tooltip: 'Anterior',
+          onPressed: controller.previous,
+        ),
+        _BigPlayButton(
+          isPlaying: isPlaying,
+          onPressed: isPlaying ? controller.pause : controller.play,
+          scheme: scheme,
+        ),
+        IconButton(
+          icon: Icon(
+            Icons.skip_next_rounded,
+            size: 40,
+            color: controller.hasNext
+                ? scheme.onSurface
+                : scheme.onSurface.withValues(alpha: 0.3),
+          ),
+          tooltip: 'Siguiente',
+          onPressed: controller.hasNext ? controller.next : null,
+        ),
+        // ---------- REPETIR (animado) ----------
+        StreamBuilder<PlayerRepeatMode>(
+          stream: controller.repeat,
+          initialData: controller.repeatModeNow,
+          builder: (context, snap) {
+            final mode = snap.data ?? PlayerRepeatMode.off;
+            final icon = switch (mode) {
+              PlayerRepeatMode.one => Icons.repeat_one_rounded,
+              _ => Icons.repeat_rounded,
+            };
+            final active = mode != PlayerRepeatMode.off;
+            return _AnimatedIconButton(
+              icon: icon,
+              tooltip: 'Repetir',
+              scheme: scheme,
+              size: 24,
+              color: active ? scheme.primary : scheme.onSurfaceVariant,
+              stateKey: mode,
+              onPressed: () {
+                final next = switch (mode) {
+                  PlayerRepeatMode.off => PlayerRepeatMode.all,
+                  PlayerRepeatMode.all => PlayerRepeatMode.one,
+                  PlayerRepeatMode.one => PlayerRepeatMode.off,
+                };
+                controller.setRepeatMode(next);
+              },
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+// ============================================================
+// FILA DE VOLUMEN
+// ============================================================
+class _VolumeRow extends StatelessWidget {
+  final ColorScheme scheme;
+  final bool isAdjustingVolume;
+  final double? volumeValue;
+  final double lastNonZeroVolume;
+  final ValueChanged<double> onStart;
+  final ValueChanged<double> onChanged;
+  final ValueChanged<double> onEnd;
+  final ValueChanged<double> onUpdateLast;
+
+  const _VolumeRow({
+    required this.scheme,
+    required this.isAdjustingVolume,
+    required this.volumeValue,
+    required this.lastNonZeroVolume,
+    required this.onStart,
+    required this.onChanged,
+    required this.onEnd,
+    required this.onUpdateLast,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = PlaybackController.instance;
+
+    return ValueListenableBuilder<double>(
+      valueListenable: controller.volume,
+      builder: (context, streamVolume, _) {
+        final safeStream = streamVolume.clamp(0.0, 1.0);
+        final volume =
+            isAdjustingVolume ? volumeValue! : safeStream;
+        final muted = volume <= 0.001;
+        final icon = muted
+            ? Icons.volume_off_rounded
+            : volume < 0.5
+                ? Icons.volume_down_rounded
+                : Icons.volume_up_rounded;
+
+        return Row(
+          children: [
+            IconButton(
+              icon: Icon(
+                icon,
+                color: scheme.onSurfaceVariant,
+              ),
+              tooltip: muted ? 'Activar sonido' : 'Silenciar',
+              onPressed: () {
+                if (muted) {
+                  controller.setVolume(lastNonZeroVolume);
+                } else {
+                  onUpdateLast(volume);
+                  controller.setVolume(0);
+                }
+              },
+            ),
+            Expanded(
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 2,
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 6,
+                  ),
+                  overlayShape: const RoundSliderOverlayShape(
+                    overlayRadius: 12,
+                  ),
+                ),
+                child: Slider(
+                  min: 0,
+                  max: 1,
+                  value: volume,
+                  onChangeStart: onStart,
+                  onChanged: onChanged,
+                  onChangeEnd: onEnd,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// ============================================================
+// FILA DE BOTONES INFERIORES (favoritos + ver cola opcional)
+// ============================================================
+class _BottomButtonsRow extends StatelessWidget {
+  final Song song;
+  final ColorScheme scheme;
+  final VoidCallback? onShowQueue;
+  final bool showFavorites;
+
+  const _BottomButtonsRow({
+    required this.song,
+    required this.scheme,
+    required this.onShowQueue,
+    this.showFavorites = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Si no hay nada que mostrar, no pintamos la fila vacía.
+    if (!showFavorites && onShowQueue == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        // Favoritos (animado, conectado a FavoritesStore)
+        if (showFavorites)
+          ListenableBuilder(
+            listenable: FavoritesStore.instance,
+            builder: (context, _) {
+              final isFav = FavoritesStore.instance.contains(song);
+              return _AnimatedRoundIconButton(
+                icon: isFav
+                    ? Icons.favorite_rounded
+                    : Icons.favorite_border_rounded,
+                tooltip: isFav
+                    ? 'Quitar de favoritos'
+                    : 'Añadir a favoritos',
+                scheme: scheme,
+                color: isFav ? scheme.error : null,
+                onPressed: () async {
+                  await FavoritesStore.instance.toggle(song);
+                },
+              );
+            },
+          ),
+        if (showFavorites && onShowQueue != null)
+          const SizedBox(width: 12),
+        if (onShowQueue != null)
+          _LabeledButton(
+            icon: Icons.playlist_play_rounded,
+            label: 'Ver Cola',
+            scheme: scheme,
+            onPressed: onShowQueue!,
+          ),
+      ],
+    );
+  }
+}
+
+// ============================================================
+// BOTÓN DE FAVORITOS SOBREPUESTO EN LA CARÁTULA
+// (se usa en el layout de escritorio)
+// ============================================================
+class _CoverFavoriteButton extends StatelessWidget {
+  final Song song;
+  const _CoverFavoriteButton({required this.song});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return ListenableBuilder(
+      listenable: FavoritesStore.instance,
+      builder: (context, _) {
+        final isFav = FavoritesStore.instance.contains(song);
+        return Material(
+          color: Colors.transparent,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () => FavoritesStore.instance.toggle(song),
+            customBorder: const CircleBorder(),
+            child: Tooltip(
+              message: isFav
+                  ? 'Quitar de favoritos'
+                  : 'Añadir a favoritos',
+              child: Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.black.withValues(alpha: 0.28),
+                ),
+                child: Center(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 180),
+                    transitionBuilder: (child, animation) =>
+                        ScaleTransition(
+                      scale: animation,
+                      child: FadeTransition(
+                        opacity: animation,
+                        child: child,
+                      ),
+                    ),
+                    child: Icon(
+                      isFav
+                          ? Icons.favorite_rounded
+                          : Icons.favorite_border_rounded,
+                      key: ValueKey(isFav),
+                      color: isFav ? scheme.error : Colors.white,
+                      size: 20,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+// ============================================================
 // CARÁTULA ANIMADA (cross-fade + scale al cambiar de canción)
-// El contenedor externo (tamaño, sombra, radio) se mantiene fijo
-// para que el layout no "salte"; solo anima el contenido interno.
 // ============================================================
 class _AnimatedCover extends StatelessWidget {
   final Song song;
@@ -553,10 +984,7 @@ class _AnimatedSongInfo extends StatelessWidget {
       child: Column(
         key: ValueKey('info_${song.path}'),
         children: [
-          _MarqueeTitle(
-            title: song.title,
-            scheme: scheme,
-          ),
+          _MarqueeTitle(title: song.title, scheme: scheme),
           const SizedBox(height: 6),
           Text(
             song.subtitle,
@@ -577,19 +1005,6 @@ class _AnimatedSongInfo extends StatelessWidget {
 
 // ============================================================
 // TÍTULO CON MARQUESINA CÍCLICA
-// - Si el texto cabe: se muestra normal, centrado.
-// - Si no cabe: scroll continuo izq→der con 2 copias + pausa
-//   de 2 s al final de cada vuelta (bucle infinito).
-//
-// Claves para que NO se corte y el bucle sea perfecto:
-//  * Se mide con TextPainter respetando MediaQuery.textScalerOf.
-//  * El Row interno mide su ancho real (2*textWidth + gap) y vive
-//    dentro de un OverflowBox; el ClipRect exterior recorta la vista
-//    pero no el layout, así no se pierde ningún píxel del texto.
-//  * Transform.translate se aplica al Row completo, no a cada Text.
-//  * dx recorre exactamente textWidth + gap por ciclo: al reiniciar,
-//    la copia 2 queda donde estaba la copia 1 → bucle invisible.
-//  * Un TweenSequence añade un tramo ConstantTween de 2 s al final.
 // ============================================================
 class _MarqueeTitle extends StatefulWidget {
   final String title;
@@ -606,9 +1021,9 @@ class _MarqueeTitle extends StatefulWidget {
 
 class _MarqueeTitleState extends State<_MarqueeTitle>
     with SingleTickerProviderStateMixin {
-  static const _gap = 64.0; // separación visual entre las 2 copias
+  static const _gap = 64.0;
   static const _pause = Duration(seconds: 2);
-  static const _speed = 40.0; // px/s (más lento = más legible)
+  static const _speed = 40.0;
 
   late final AnimationController _ctrl;
   late Animation<double> _anim;
@@ -651,8 +1066,6 @@ class _MarqueeTitleState extends State<_MarqueeTitle>
     return tp.width;
   }
 
-  /// Reconfigura el controller para un ciclo: mover + pausa.
-  /// Solo se llama desde un post-frame callback, nunca durante build.
   void _configureAnimation(double textWidth, double available) {
     final cycleDistance = textWidth + _gap;
     final moveMs = (cycleDistance / _speed * 1000).round();
@@ -761,6 +1174,7 @@ class _BigPlayButton extends StatelessWidget {
   final bool isPlaying;
   final VoidCallback onPressed;
   final ColorScheme scheme;
+
   const _BigPlayButton({
     required this.isPlaying,
     required this.onPressed,
@@ -816,10 +1230,7 @@ class _BigPlayButton extends StatelessWidget {
 }
 
 // ============================================================
-// BOTÓN DE ICONO ANIMADO (misma animación que play/pausa)
-// Usado para Aleatorio y Repetir.
-// `stateKey` fuerza el cambio visual aunque el icono sea el mismo
-// (ej. shuffle cambia solo de color; repeat off↔all comparte icono).
+// BOTÓN DE ICONO ANIMADO
 // ============================================================
 class _AnimatedIconButton extends StatelessWidget {
   final IconData icon;
@@ -864,16 +1275,13 @@ class _AnimatedIconButton extends StatelessWidget {
 }
 
 // ============================================================
-// BOTÓN REDONDO ANIMADO (solo icono) — usado para Favoritos
+// BOTÓN REDONDO ANIMADO (solo icono) — Favoritos
 // ============================================================
 class _AnimatedRoundIconButton extends StatelessWidget {
   final IconData icon;
   final String tooltip;
   final ColorScheme scheme;
-
-  /// Color opcional del icono. Si es `null`, usa `scheme.onSurface`.
   final Color? color;
-
   final VoidCallback onPressed;
 
   const _AnimatedRoundIconButton({

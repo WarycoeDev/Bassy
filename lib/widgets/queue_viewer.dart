@@ -29,21 +29,28 @@ class QueueViewer {
             maxWidth: 480,
             maxHeight: 640,
           ),
-          child: const _QueueBody(),
+          child: const QueuePanel(embedded: false),
         ),
       ),
     );
   }
 }
 
-class _QueueBody extends StatefulWidget {
-  const _QueueBody();
+/// Panel de la cola de reproducción.
+///
+/// Si [embedded] es `true` no muestra botón de cerrar (se usa dentro de
+/// la tarjeta flotante del layout de escritorio). Si es `false` muestra
+/// la cabecera con botón de cierre para usarlo dentro de un Dialog.
+class QueuePanel extends StatefulWidget {
+  final bool embedded;
+
+  const QueuePanel({super.key, this.embedded = false});
 
   @override
-  State<_QueueBody> createState() => _QueueBodyState();
+  State<QueuePanel> createState() => _QueuePanelState();
 }
 
-class _QueueBodyState extends State<_QueueBody> {
+class _QueuePanelState extends State<QueuePanel> {
   final controller = PlaybackController.instance;
   final List<StreamSubscription<dynamic>> _subs = [];
 
@@ -74,18 +81,12 @@ class _QueueBodyState extends State<_QueueBody> {
   }
 
   void _handleReorder(int oldIndex, int newIndex) {
-    // La parte síncrona de reorderQueue (hasta su primer await) ya actualiza
-    // el orden, así que el setState refleja el nuevo orden en el mismo frame
-    // del drop y el tile no salta a su posición original.
     controller.reorderQueue(oldIndex, newIndex);
     setState(() {});
   }
 
   void _handleRemove(int index) {
-    // Nunca eliminar la pista que se está reproduciendo.
     if (index == controller.currentIndex) return;
-
-    // Dismissible exige que el item ya no esté en el árbol tras onDismissed.
     controller.removeFromQueue(index);
     setState(() {});
   }
@@ -97,12 +98,19 @@ class _QueueBodyState extends State<_QueueBody> {
     final currentIndex = controller.currentIndex;
 
     return Material(
-      color: scheme.surfaceContainerLow,
+      color: widget.embedded
+          ? Colors.transparent
+          : scheme.surfaceContainerLow,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 14, 8, 12),
+            padding: EdgeInsets.fromLTRB(
+              20,
+              14,
+              widget.embedded ? 20 : 8,
+              12,
+            ),
             child: Row(
               children: [
                 Container(
@@ -129,11 +137,12 @@ class _QueueBodyState extends State<_QueueBody> {
                     ),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.close_rounded),
-                  tooltip: 'Cerrar',
-                  onPressed: () => Navigator.of(context).maybePop(),
-                ),
+                if (!widget.embedded)
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded),
+                    tooltip: 'Cerrar',
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
               ],
             ),
           ),
@@ -143,7 +152,9 @@ class _QueueBodyState extends State<_QueueBody> {
           ),
           Flexible(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 320),
+              constraints: BoxConstraints(
+                minHeight: widget.embedded ? 0 : 320,
+              ),
               child: songs.isEmpty
                   ? _EmptyState(scheme: scheme)
                   : _QueueContainer(
@@ -179,8 +190,6 @@ class _QueueContainer extends StatelessWidget {
     required this.onReorder,
   });
 
-  /// Key única por entrada: si la misma canción aparece varias veces en la
-  /// cola, se añade el número de ocurrencia para evitar colisiones.
   String _entryKey(int index) {
     final base = songs[index].path ?? songs[index].title;
     var occurrence = 0;
@@ -190,8 +199,6 @@ class _QueueContainer extends StatelessWidget {
     return '$base#$occurrence';
   }
 
-  /// Diálogo de confirmación antes de quitar una canción de la cola,
-  /// con el mismo estilo del [ActionMenu].
   Future<bool> _confirmRemove(BuildContext context, Song song) {
     return ActionMenu.confirm(
       context,
@@ -244,7 +251,6 @@ class _QueueContainer extends StatelessWidget {
                 children: [
                   Dismissible(
                     key: ValueKey('dismiss-$entryKey'),
-                    // La pista actual no se puede deslizar para eliminar.
                     direction: isCurrent
                         ? DismissDirection.none
                         : DismissDirection.horizontal,
@@ -333,7 +339,9 @@ class _QueueTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: isCurrent ? scheme.primary : scheme.onSurface,
+                        color: isCurrent
+                            ? scheme.primary
+                            : scheme.onSurface,
                         fontWeight: FontWeight.w600,
                         fontSize: 14.5,
                         letterSpacing: -0.1,
