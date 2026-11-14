@@ -1,31 +1,30 @@
 // lib/services/playback_audio_handler.dart
+//
+// Handler de reproducción sobre flutter_soloud (SoLoud + miniaudio).
+// Misma API pública que la versión con just_audio, para que
+// PlaybackController y las pantallas no cambien.
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:flutter_soloud/flutter_soloud.dart' as sl;
 
 import '../models/song.dart';
 import 'playback_queue.dart';
 import 'replay_gain_service.dart';
+import 'reverb_service.dart';
 
 enum PlayerRepeatMode { off, all, one }
 
-/// Fases de la máquina de estados del crossfade real (dos players).
-enum _XfPhase {
-  idle, // nada en curso
-  preparing, // cargando la siguiente pista en el player secundario
-  ready, // secundario cargado, esperando entrar en la ventana
-  fading, // principal baja, secundario sube
-  handoffSeek, // principal saltando a la siguiente pista (silenciado)
-  handoffRamp, // mini-ramp principal↑ / secundario↓
-}
-
 class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
-  late final AudioPlayer _player;
-  AndroidLoudnessEnhancer? _loudness;
+  sl.SoLoud get _soloud => sl.SoLoud.instance;
+  Future<void>? _engineInit;
+
+  // ----- Voz principal -----
+  sl.AudioSource? _source;
+  sl.SoundHandle? _handle;
 
   // ----- Dos colas independientes -----
   final PlaybackQueue _musicQueue = PlaybackQueue(kind: MediaKind.music);
@@ -38,38 +37,41 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   MediaKind get activeQueueKind => _activeQueue.kind;
 
-  ConcatenatingAudioSource? _queueSource;
-
   Future<void> _loadChain = Future<void>.value();
-  int _loadGeneration = 0;
+  int _loadGeneration = 0; // para setQueueOf encadenado
+  int _loadToken = 0; // para _loadAndPlay (descarta cargas obsoletas)
 
   bool _loading = false;
   bool _resumeAfterLoad = false;
   bool _handlingCompleted = false;
-  bool _reordering = false;
+  bool _playing = false;
 
-  bool _isSeeking = false;
-  int _seekGeneration = 0;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+  double _speed = 1.0;
+
   List<MediaControl>? _lastControls;
   List<int>? _lastCompactActionIndices;
   String? _lastMediaItemKey;
   String? _lastQueueKey;
 
-  DateTime _lastPositionPublish = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _positionPublishEvery = Duration(milliseconds: 250);
-  static const _rewindThreshold = Duration(seconds: 3);
+  static const Duration _tickEvery = Duration(milliseconds: 40);
+  static const Duration _positionEmitEvery = Duration(milliseconds: 100);
+  static const Duration _publishEvery = Duration(milliseconds: 250);
+  static const Duration _rewindThreshold = Duration(seconds: 3);
+  static const int _diskLoadThresholdBytes = 64 * 1024 * 1024;
+
+  Timer? _ticker;
+  DateTime _lastPositionEmit = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastPublish = DateTime.fromMillisecondsSinceEpoch(0);
 
   // Volumen + ReplayGain + Boost
   double _userVolume = 1.0;
-  double _volume = 1.0;
   final ValueNotifier<double> _volumeNotifier = ValueNotifier<double>(1.0);
   final ReplayGainService _rg = ReplayGainService.instance;
   double _replayGainDb = 0.0;
   double _volumeBoostDb = 0.0;
-
-  // just_audio multiplica por 1000 el valor, pero Android espera milibelios
-  // (1 dB = 100 mB), así que hay que pasar dB / 10.
-  static const double _kLoudnessGainScale = 10.0;
+  double _lastVol = -1;
 
   // ============================================================
   // TRANSICIONES (Fade In/Out / Crossfade)
@@ -80,139 +82,103 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   double _crossfadeSeconds = 4.0;
   double _fadeSeconds = 3.0;
 
-  /// Factor de volumen del player PRINCIPAL (0..1).
+  /// Factor de fade actual del player principal (0..1).
   double _fadeFactor = 1.0;
 
-  /// Factor de volumen del player SECUNDARIO (0..1), solo crossfade.
-  double _xfFactor = 0.0;
-
-  /// Mientras es true (modo Fade) el volumen se fuerza a 0: se usa al
-  /// cambiar de pista manualmente para que NUNCA suene nada antes del
-  /// fade-in.
-  bool _fadeSuspended = false;
-
-  /// Ticker de alta frecuencia que calcula los fades. Usa
-  /// `_player.position` (que just_audio extrapola entre eventos) en lugar
-  /// de `positionStream` (~200 ms), así la rampa es suave y llega a 0.
-  Timer? _fadeTimer;
-  static const Duration _fadeTick = Duration(milliseconds: 30);
-
-  /// Cuando quedan <= estos ms de pista, el volumen es exactamente 0.
   static const int _zeroGuardMs = 40;
 
-  // ---- Crossfade real (segundo player) ----
-  AudioPlayer? _xfPlayer;
-  AndroidLoudnessEnhancer? _xfLoudness;
-  _XfPhase _xfPhase = _XfPhase.idle;
-  int _xfGen = 0;
-  int _xfNextIndex = -1; // índice (en el source) de la pista siguiente
-  int _xfFromIndex = -1; // índice del principal al empezar el crossfade
-  int _xfBlockedFrom = -1; // índice donde falló la precarga (no reintentar)
-  final Stopwatch _xfRamp = Stopwatch();
-  static const int _xfRampMs = 120;
-  double _xfSeekLatencyMs = 120.0; // se autoajusta
-
-  // Últimos volúmenes enviados (evita llamadas redundantes al canal nativo).
-  double _lastSetPrimary = 1.0;
-  double _lastSetSecondary = 0.0;
-
-  bool get _xfAudible =>
-      _xfPhase == _XfPhase.fading ||
-      _xfPhase == _XfPhase.handoffSeek ||
-      _xfPhase == _XfPhase.handoffRamp;
+  // ---- Crossfade (segunda voz) ----
+  sl.AudioSource? _nextSource;
+  sl.SoundHandle? _nextHandle;
+  int _nextIdx = -1; // índice de canción (en q.songs) de la entrante
+  bool _crossfading = false;
+  bool _xfPreparing = false;
+  bool _xfBlocked = false;
+  int _xfToken = 0;
+  int _xfStartMs = 0;
+  int _xfSpanMs = 1;
+  static const Duration _xfPreloadLead = Duration(seconds: 10);
 
   final _shuffleCtrl = StreamController<bool>.broadcast();
   final _repeatCtrl = StreamController<PlayerRepeatMode>.broadcast();
   final _canGoPreviousCtrl = StreamController<bool>.broadcast();
   final _canGoNextCtrl = StreamController<bool>.broadcast();
   final _activeQueueCtrl = StreamController<MediaKind>.broadcast();
+  final _positionCtrl = StreamController<Duration>.broadcast();
+  final _durationCtrl = StreamController<Duration?>.broadcast();
+  final _playingCtrl = StreamController<bool>.broadcast();
 
   bool _canGoPrevious = false;
   bool _canGoNext = false;
 
-  final List<StreamSubscription<dynamic>> _subs = [];
-
   PlaybackAudioHandler() {
     _activeQueue = _musicQueue;
-
-    // Crear el player con el pipeline de audio si estamos en Android.
-    if (!kIsWeb && Platform.isAndroid) {
-      try {
-        _loudness = AndroidLoudnessEnhancer();
-        _player = AudioPlayer(
-          audioPipeline: AudioPipeline(androidAudioEffects: [_loudness!]),
-        );
-        _applyLoudness();
-      } catch (e, st) {
-        debugPrint(
-          'PlaybackAudioHandler: AudioPipeline no disponible -> $e\n$st',
-        );
-        _loudness = null;
-        _player = AudioPlayer();
-      }
-    } else {
-      _player = AudioPlayer();
-    }
-
-    _subs.add(_player.playbackEventStream.listen(
-      (_) {},
-      onError: (Object e, StackTrace st) {
-        debugPrint('PlaybackAudioHandler: playback error -> $e\n$st');
-        _publish();
-      },
-    ));
-
-    _subs.add(_player.playingStream.listen((playing) {
-      _publish();
-      // Mantener sincronizado el secundario con pausas/reanudaciones
-      // (incluye pérdida de foco de audio).
-      if (_xfAudible) _xfSetPlaying(playing);
-    }));
-
-    _subs.add(_player.processingStateStream.listen((state) {
-      _publish();
-      if (state == ProcessingState.completed) {
-        unawaited(_onCompleted());
-      }
-    }));
-
-    _subs.add(_player.currentIndexStream.listen((sourceIndex) {
-      if (_loading || _reordering) return;
-      if (sourceIndex == null) return;
-
-      // Cambio de pista que NO es nuestro traspaso: lo precargado ya no vale.
-      if (_xfPhase == _XfPhase.idle ||
-          _xfPhase == _XfPhase.preparing ||
-          _xfPhase == _XfPhase.ready) {
-        _xfBlockedFrom = -1;
-        _cancelCrossfade();
-      }
-
-      final order = _activeQueue.sourceOrder;
-      if (sourceIndex < 0 || sourceIndex >= order.length) return;
-      final songIndex = order[sourceIndex];
-      if (songIndex < 0 || songIndex >= _activeQueue.songs.length) return;
-      _activeQueue.currentIndex = songIndex;
-      _updateFactors(force: true);
-      _emitControlsState();
-    }));
-
-    _subs.add(_player.durationStream.listen((d) {
-      if (_transitionsEnabled) _updateFactors(force: true);
-      _publish();
-    }));
-    _subs.add(_player.positionDiscontinuityStream.listen((_) {
-      if (_transitionsEnabled) _updateFactors(force: true);
-      _publish();
-    }));
-    _subs.add(_player.positionStream.listen(_onPosition));
-    _subs.add(_player.speedStream.listen((_) => _publish()));
-
     _rg.activeGainDb.addListener(_onReplayGainChanged);
     _onReplayGainChanged();
-
     _publish();
   }
+
+  // ============================================================
+  // MOTOR
+  // ============================================================
+
+  Future<void> _ensureEngine() async {
+    if (_soloud.isInitialized) return;
+    await (_engineInit ??= _soloud.init().whenComplete(() {
+      _engineInit = null;
+    }));
+    ReverbService.instance.applyToEngine();
+  }
+
+  Future<void> _disposeSource(sl.AudioSource? source) async {
+    if (source == null) return;
+    try {
+      // Al liberar la fuente también se detienen sus voces.
+      await _soloud.disposeSource(source);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: error liberando fuente -> $e');
+    }
+  }
+
+  bool _isValid(sl.SoundHandle? h) {
+    if (h == null) return false;
+    try {
+      return _soloud.getIsValidVoiceHandle(h);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Duration _livePosition() {
+    final h = _handle;
+    if (h == null) return _position;
+    try {
+      return _soloud.getPosition(h);
+    } catch (_) {
+      return _position;
+    }
+  }
+
+  /// Detiene y libera la voz principal (y cualquier crossfade).
+  Future<void> _releaseVoice() async {
+    _cancelCrossfade();
+    final s = _source;
+    _source = null;
+    _handle = null;
+    _lastVol = -1;
+    _syncTicker();
+    await _disposeSource(s);
+  }
+
+  void _setPlaying(bool v) {
+    if (_playing != v) {
+      _playing = v;
+      if (!_playingCtrl.isClosed) _playingCtrl.add(v);
+    }
+    _syncTicker();
+  }
+
+  bool get _hasSource => _source != null || _loading;
 
   // ============================================================
   // STREAMS PÚBLICOS
@@ -224,6 +190,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<PlayerRepeatMode> get repeatStream => _repeatCtrl.stream;
   Stream<MediaKind> get activeQueueStream => _activeQueueCtrl.stream;
 
+  Stream<Duration> get positionStream => _positionCtrl.stream;
+  Stream<Duration?> get durationStream => _durationCtrl.stream;
+  Stream<bool> get playingStream => _playingCtrl.stream;
+
   // ============================================================
   // GETTERS
   // ============================================================
@@ -232,45 +202,32 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Song? get currentSong => _activeQueue.currentSong;
   int get currentIndex => _activeQueue.currentIndex;
 
-  bool get hasNext =>
-      _queueSource != null &&
-      (_activeQueue.shuffleEnabled ? _player.hasNext : _activeQueue.hasNext);
+  bool get hasNext => _hasSource && _nextIndexOf(_activeQueue) != null;
+  bool get hasPrevious => _hasSource && _previousIndexOf(_activeQueue) != null;
 
-  bool get hasPrevious =>
-      _queueSource != null &&
-      (_activeQueue.shuffleEnabled
-          ? _player.hasPrevious
-          : _activeQueue.hasPrevious);
-
-  Duration get position => _player.position;
+  Duration get position => _position;
 
   bool get canGoPrevious =>
-      hasPrevious ||
-      (_queueSource != null && _player.position > _rewindThreshold);
+      hasPrevious || (_hasSource && _position > _rewindThreshold);
 
   bool get canGoNext => hasNext;
-  bool get isPlaying => _player.playing;
-  double get playerSpeed => _player.speed;
+  bool get isPlaying => _playing;
+  double get playerSpeed => _speed;
 
   /// Volumen del usuario (0..1). NO incluye RG ni boost.
   double get volume => _userVolume;
   ValueListenable<double> get volumeListenable => _volumeNotifier;
 
-  /// Volumen físico real del player (incluye RG + boost + fade). Solo debug.
-  double get effectiveVolume => _player.volume;
+  /// Volumen físico real de la voz (incluye RG + boost + fade). Solo debug.
+  double get effectiveVolume => _lastVol < 0 ? _userVolume : _lastVol;
 
   /// Amplificación de volumen actual en dB (−12..+12).
   double get volumeBoost => _volumeBoostDb;
 
-  /// Factor de fade actual del player principal (0..1). Útil para debug/UI.
   double get fadeFactor => _fadeFactor;
 
   bool get shuffleEnabled => _activeQueue.shuffleEnabled;
   PlayerRepeatMode get repeatMode => _activeQueue.repeatMode;
-
-  Stream<Duration> get positionStream => _player.positionStream;
-  Stream<Duration?> get durationStream => _player.durationStream;
-  Stream<bool> get playingStream => _player.playingStream;
 
   List<Song> songsOf(MediaKind kind) =>
       List.unmodifiable(_queueFor(kind).songs);
@@ -280,414 +237,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get isActiveQueueEmpty => _activeQueue.isEmpty;
 
   // ============================================================
-  // TRANSICIONES: API PÚBLICA
-  // ============================================================
-
-  /// Actualiza la configuración de transiciones y re-aplica el volumen.
-  /// Llamar cada vez que el usuario cambie algo en SettingsScreen.
-  void setTransitionConfig({
-    required bool enabled,
-    required int mode,
-    required double crossfadeSeconds,
-    required double fadeSeconds,
-  }) {
-    _cancelCrossfade();
-
-    _transitionsEnabled = enabled;
-    _transitionMode = mode == 1 ? 1 : 0;
-    _crossfadeSeconds = crossfadeSeconds.clamp(0.0, 12.0).toDouble();
-    _fadeSeconds = fadeSeconds.clamp(0.0, 12.0).toDouble();
-
-    _fadeSuspended = false;
-    _xfBlockedFrom = -1;
-
-    if (!_transitionsEnabled) {
-      _fadeFactor = 1.0;
-      _xfFactor = 0.0;
-    }
-    _syncFadeTimer();
-    _updateFactors(force: true);
-  }
-
-  void _syncFadeTimer() {
-    if (_transitionsEnabled) {
-      _fadeTimer ??= Timer.periodic(_fadeTick, (_) => _tick());
-    } else {
-      _fadeTimer?.cancel();
-      _fadeTimer = null;
-    }
-  }
-
-  // ------------------------------------------------------------
-  // Curvas
-  // ------------------------------------------------------------
-
-  /// Curva seno: 0 → 0 exacto, 1 → 1 exacto. Para crossfade,
-  /// ease(t) y ease(1-t) dan potencia constante.
-  static double _ease(double t) =>
-      math.sin(t.clamp(0.0, 1.0).toDouble() * math.pi / 2);
-
-  /// Factor del modo Fade In/Out (función pura de posición/duración).
-  ///   - posición 0            → 0 absoluto
-  ///   - últimos _zeroGuardMs  → 0 absoluto
-  double _computeFadeFactor(Duration position, Duration? duration) {
-    if (!_transitionsEnabled || _transitionMode != 1) return 1.0;
-
-    var fadeMs = (_fadeSeconds * 1000).round();
-    if (fadeMs <= 0) return 1.0;
-
-    final hasDur = duration != null && duration > Duration.zero;
-    if (hasDur) {
-      // Si la pista es corta, el fade ocupa como máximo la mitad.
-      fadeMs = math.min(fadeMs, duration.inMilliseconds ~/ 2);
-    }
-    if (fadeMs <= 0) return 1.0;
-
-    final posMs = position.inMilliseconds;
-
-    // Fade in. Si aún no se conoce la duración, igualmente se aplica el
-    // fade-in por posición (evita un golpe de volumen al empezar).
-    var f = posMs <= 0 ? 0.0 : (posMs / fadeMs);
-
-    // Fade out.
-    if (hasDur) {
-      final rem = duration.inMilliseconds - posMs;
-      final out = rem <= _zeroGuardMs ? 0.0 : (rem / fadeMs);
-      f = math.min(f, out);
-    }
-    return _ease(f);
-  }
-
-  // ------------------------------------------------------------
-  // Ticker
-  // ------------------------------------------------------------
-
-  void _tick() {
-    if (!_transitionsEnabled) return;
-    if (_loading || _reordering || _queueSource == null) return;
-
-    if (_transitionMode == 1) {
-      _updateFactors();
-    } else {
-      _crossfadeTick();
-    }
-  }
-
-  /// Calcula los factores de ambos players según modo/fase y los aplica.
-  void _updateFactors({bool force = false}) {
-    var p = 1.0;
-    var s = 0.0;
-
-    if (_transitionsEnabled) {
-      if (_transitionMode == 1) {
-        p = _fadeSuspended
-            ? 0.0
-            : _computeFadeFactor(_player.position, _player.duration);
-      } else {
-        switch (_xfPhase) {
-          case _XfPhase.fading:
-            if (_player.currentIndex != _xfFromIndex) {
-              // El principal ya avanzó solo: silenciarlo hasta el traspaso.
-              p = 0.0;
-              s = 1.0;
-            } else {
-              final t = _xfProgress();
-              p = _ease(1 - t);
-              s = _ease(t);
-            }
-          case _XfPhase.handoffSeek:
-            p = 0.0;
-            s = 1.0;
-          case _XfPhase.handoffRamp:
-            final r = (_xfRamp.elapsedMilliseconds / _xfRampMs)
-                .clamp(0.0, 1.0)
-                .toDouble();
-            p = _ease(r);
-            s = _ease(1 - r);
-          default:
-            break;
-        }
-      }
-    }
-
-    if (!force && p == _fadeFactor && s == _xfFactor) return;
-    _fadeFactor = p;
-    _xfFactor = s;
-    _applyEffectiveVolume();
-  }
-
-  // ------------------------------------------------------------
-  // Cambio de pista manual (modo Fade): silencio ANTES de cambiar
-  // ------------------------------------------------------------
-
-  Future<void> _beginTrackChange() async {
-    if (!_transitionsEnabled || _transitionMode != 1) return;
-    _fadeSuspended = true;
-    _fadeFactor = 0.0;
-    await _applyVolumeImpl();
-  }
-
-  void _endTrackChange() {
-    if (!_fadeSuspended) return;
-    _fadeSuspended = false;
-    _updateFactors(force: true);
-  }
-
-  // ============================================================
-  // CROSSFADE REAL
-  // ============================================================
-
-  int _xfWindowMs(Duration dur) => math.min(
-        (_crossfadeSeconds * 1000).round(),
-        dur.inMilliseconds ~/ 2,
-      );
-
-  /// Progreso del crossfade (0..1) a partir de lo que le queda al principal.
-  double _xfProgress() {
-    final dur = _player.duration;
-    if (dur == null || dur <= Duration.zero) return 0.0;
-    final x = _xfWindowMs(dur);
-    if (x <= 0) return 1.0;
-    final rem = (dur - _player.position).inMilliseconds;
-    return (1 - rem / x).clamp(0.0, 1.0).toDouble();
-  }
-
-  /// Siguiente pista (índice en el source + canción), o null si no aplica.
-  ({int index, Song song})? _xfResolveNext() {
-    if (_activeQueue.repeatMode == PlayerRepeatMode.one) return null;
-    final ni = _player.nextIndex;
-    if (ni == null) return null;
-    if (ni == _player.currentIndex) return null;
-    final order = _activeQueue.sourceOrder;
-    if (ni < 0 || ni >= order.length) return null;
-    final si = order[ni];
-    if (si < 0 || si >= _activeQueue.songs.length) return null;
-    final song = _activeQueue.songs[si];
-    final path = song.path;
-    if (path == null || path.isEmpty) return null;
-    return (index: ni, song: song);
-  }
-
-  AudioPlayer _ensureXfPlayer() {
-    final existing = _xfPlayer;
-    if (existing != null) return existing;
-
-    AudioPlayer p;
-    if (!kIsWeb && Platform.isAndroid) {
-      try {
-        _xfLoudness = AndroidLoudnessEnhancer();
-        p = AudioPlayer(
-          audioPipeline: AudioPipeline(androidAudioEffects: [_xfLoudness!]),
-        );
-        _applyLoudness();
-      } catch (e, st) {
-        debugPrint('PlaybackAudioHandler: pipeline xf no disponible -> $e\n$st');
-        _xfLoudness = null;
-        p = AudioPlayer();
-      }
-    } else {
-      p = AudioPlayer();
-    }
-    _xfPlayer = p;
-    _lastSetSecondary = 1.0; // valor inicial real de un AudioPlayer nuevo
-    return p;
-  }
-
-  void _xfSetPlaying(bool playing) {
-    final xp = _xfPlayer;
-    if (xp == null) return;
-    if (playing) {
-      unawaited(xp.play().catchError((Object _) {}));
-    } else {
-      unawaited(xp.pause().catchError((Object _) {}));
-    }
-  }
-
-  void _crossfadeTick() {
-    final dur = _player.duration;
-    final pos = _player.position;
-
-    if (_xfPhase == _XfPhase.idle) {
-      if (_player.playing &&
-          dur != null &&
-          _player.currentIndex != _xfBlockedFrom) {
-        final x = _xfWindowMs(dur);
-        final rem = (dur - pos).inMilliseconds;
-        if (x >= 500 && rem > 1000 && rem <= x + 5000) {
-          final next = _xfResolveNext();
-          if (next != null) unawaited(_xfPrepare(next.index, next.song));
-        }
-      }
-    } else if (_xfPhase == _XfPhase.ready) {
-      if (dur != null && _player.playing) {
-        final next = _xfResolveNext();
-        if (next == null || next.index != _xfNextIndex) {
-          _cancelCrossfade();
-        } else {
-          final x = _xfWindowMs(dur);
-          final rem = (dur - pos).inMilliseconds;
-          if (rem <= x) _xfStart();
-        }
-      }
-    } else if (_xfPhase == _XfPhase.fading) {
-      final advanced = _player.currentIndex != _xfFromIndex;
-      if (advanced) {
-        unawaited(_xfHandoff());
-      } else if (dur != null) {
-        final rem = (dur - pos).inMilliseconds;
-        if (rem <= _zeroGuardMs) unawaited(_xfHandoff());
-      }
-    } else if (_xfPhase == _XfPhase.handoffRamp) {
-      if (_xfRamp.elapsedMilliseconds >= _xfRampMs) _xfFinish();
-    }
-
-    _updateFactors();
-  }
-
-  Future<void> _xfPrepare(int nextIndex, Song song) async {
-    final gen = ++_xfGen;
-    _xfPhase = _XfPhase.preparing;
-    _xfNextIndex = nextIndex;
-    final from = _player.currentIndex ?? -1;
-    try {
-      final xp = _ensureXfPlayer();
-      await xp.setVolume(0.0);
-      _lastSetSecondary = 0.0;
-      await xp.setAudioSource(
-        AudioSource.file(song.path!),
-        initialPosition: Duration.zero,
-      );
-      await xp.setSpeed(_player.speed);
-      if (gen != _xfGen) return;
-      _xfPhase = _XfPhase.ready;
-    } catch (e, st) {
-      debugPrint('PlaybackAudioHandler: precarga crossfade falló -> $e\n$st');
-      if (gen == _xfGen) {
-        _xfBlockedFrom = from;
-        _xfPhase = _XfPhase.idle;
-      }
-    }
-  }
-
-  void _xfStart() {
-    final xp = _xfPlayer;
-    if (xp == null) {
-      _cancelCrossfade();
-      return;
-    }
-    _xfFromIndex = _player.currentIndex ?? -1;
-    _xfPhase = _XfPhase.fading;
-    _updateFactors(force: true); // secundario a ~0 antes de play()
-    unawaited(xp.play().catchError((Object e) {
-      debugPrint('PlaybackAudioHandler: play xf falló -> $e');
-    }));
-  }
-
-  /// El principal llegó al final (volumen 0): lo movemos a la siguiente
-  /// pista en la misma posición que lleva el secundario y hacemos un
-  /// mini-ramp para que el principal tome el relevo.
-  Future<void> _xfHandoff() async {
-    if (_xfPhase != _XfPhase.fading) return;
-    final xp = _xfPlayer;
-    if (xp == null) {
-      _cancelCrossfade();
-      return;
-    }
-    final gen = _xfGen;
-    _xfPhase = _XfPhase.handoffSeek;
-    _updateFactors(force: true); // principal 0, secundario 1
-
-    try {
-      final sw = Stopwatch()..start();
-      final target =
-          xp.position + Duration(milliseconds: _xfSeekLatencyMs.round());
-      await _player.seek(target, index: _xfNextIndex);
-      sw.stop();
-      if (gen != _xfGen) return;
-
-      // Autoajuste de la latencia estimada del seek.
-      _xfSeekLatencyMs =
-          (_xfSeekLatencyMs * 0.5 + sw.elapsedMilliseconds * 0.5)
-              .clamp(30.0, 600.0)
-              .toDouble();
-
-      _xfRamp
-        ..reset()
-        ..start();
-      _xfPhase = _XfPhase.handoffRamp;
-    } catch (e, st) {
-      debugPrint('PlaybackAudioHandler: handoff crossfade falló -> $e\n$st');
-      if (gen == _xfGen) _cancelCrossfade();
-    }
-  }
-
-  void _xfFinish() {
-    _xfGen++;
-    _xfPhase = _XfPhase.idle;
-    _xfBlockedFrom = -1;
-    _xfRamp.stop();
-    unawaited(_xfPlayer?.stop().catchError((Object _) {}) ?? Future.value());
-    _fadeFactor = 1.0;
-    _xfFactor = 0.0;
-    _updateFactors(force: true);
-  }
-
-  /// Cancela cualquier crossfade en curso y restaura el principal.
-  void _cancelCrossfade() {
-    _xfGen++;
-    if (_xfPhase == _XfPhase.idle) return;
-    _xfPhase = _XfPhase.idle;
-    _xfRamp.stop();
-    unawaited(_xfPlayer?.stop().catchError((Object _) {}) ?? Future.value());
-    _fadeFactor = 1.0;
-    _xfFactor = 0.0;
-    _updateFactors(force: true);
-  }
-
-  // ============================================================
-  // DEDUPE
-  // ============================================================
-
-  String _songKey(Song s) =>
-      (s.path != null && s.path!.isNotEmpty) ? s.path! : s.title;
-
-  ({List<Song> unique, Map<int, int> indexMap}) _dedupeSongs(
-    List<Song> input,
-  ) {
-    final seen = <String>{};
-    final unique = <Song>[];
-    final map = <int, int>{};
-    for (var i = 0; i < input.length; i++) {
-      final key = _songKey(input[i]);
-      if (seen.add(key)) {
-        map[i] = unique.length;
-        unique.add(input[i]);
-      }
-    }
-    return (unique: unique, indexMap: map);
-  }
-
-  // ============================================================
-  // ORDEN FÍSICO
+  // ORDEN / SIGUIENTE / ANTERIOR
   // ============================================================
 
   void _ensureOrder(PlaybackQueue q) {
     if (q.sourceOrder.length != q.songs.length) q.resetOrder();
-  }
-
-  int _sourceIndexOf(PlaybackQueue q, int songIndex) {
-    _ensureOrder(q);
-    final i = q.sourceOrder.indexOf(songIndex);
-    return i < 0 ? 0 : i;
-  }
-
-  ConcatenatingAudioSource _buildSource(PlaybackQueue q) {
-    _ensureOrder(q);
-    return ConcatenatingAudioSource(
-      children: [
-        for (final i in q.sourceOrder) AudioSource.file(q.songs[i].path!),
-      ],
-    );
   }
 
   List<int> _buildOrder(PlaybackQueue q, int firstSong) {
@@ -707,47 +261,595 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     return v;
   }
 
-  Future<void> _applyOrder(List<int> newOrder, {required int keepSong}) async {
-    final q = _activeQueue;
-    final source = _queueSource;
-    if (source == null) {
-      q.sourceOrder = newOrder;
+  /// Índice de canción de la siguiente pista, o null si no hay.
+  int? _nextIndexOf(PlaybackQueue q) {
+    _ensureOrder(q);
+    final order = q.sourceOrder;
+    if (order.isEmpty) return null;
+    final pos = order.indexOf(q.currentIndex);
+    if (pos < 0) return null;
+    if (pos < order.length - 1) return order[pos + 1];
+    if (q.repeatMode == PlayerRepeatMode.all && order.length > 1) {
+      return order.first;
+    }
+    return null;
+  }
+
+  int? _previousIndexOf(PlaybackQueue q) {
+    _ensureOrder(q);
+    final order = q.sourceOrder;
+    if (order.isEmpty) return null;
+    final pos = order.indexOf(q.currentIndex);
+    if (pos < 0) return null;
+    if (pos > 0) return order[pos - 1];
+    if (q.repeatMode == PlayerRepeatMode.all && order.length > 1) {
+      return order.last;
+    }
+    return null;
+  }
+
+  // ============================================================
+  // TRANSICIONES: API PÚBLICA
+  // ============================================================
+
+  void setTransitionConfig({
+    required bool enabled,
+    required int mode,
+    required double crossfadeSeconds,
+    required double fadeSeconds,
+  }) {
+    _cancelCrossfade();
+
+    _transitionsEnabled = enabled;
+    _transitionMode = mode == 1 ? 1 : 0;
+    _crossfadeSeconds = crossfadeSeconds.clamp(0.0, 12.0).toDouble();
+    _fadeSeconds = fadeSeconds.clamp(0.0, 12.0).toDouble();
+
+    if (!_transitionsEnabled) _fadeFactor = 1.0;
+    _applyVolume(force: true);
+  }
+
+  static double _ease(double t) =>
+      math.sin(t.clamp(0.0, 1.0).toDouble() * math.pi / 2);
+
+  /// Factor del modo Fade In/Out (función pura de posición/duración).
+  double _computeFadeFactor(Duration position, Duration? duration) {
+    if (!_transitionsEnabled || _transitionMode != 1) return 1.0;
+
+    var fadeMs = (_fadeSeconds * 1000 * _speed).round();
+    if (fadeMs <= 0) return 1.0;
+
+    final hasDur = duration != null && duration > Duration.zero;
+    if (hasDur) {
+      fadeMs = math.min(fadeMs, duration.inMilliseconds ~/ 2);
+    }
+    if (fadeMs <= 0) return 1.0;
+
+    final posMs = position.inMilliseconds;
+    var f = posMs <= 0 ? 0.0 : (posMs / fadeMs);
+
+    if (hasDur) {
+      final rem = duration.inMilliseconds - posMs;
+      final out = rem <= _zeroGuardMs ? 0.0 : (rem / fadeMs);
+      f = math.min(f, out);
+    }
+    return _ease(f);
+  }
+
+  // ============================================================
+  // TICKER
+  // ============================================================
+
+  void _syncTicker() {
+    final needed = _handle != null && _playing;
+    if (needed) {
+      _ticker ??= Timer.periodic(_tickEvery, (_) => _onTick());
+    } else {
+      _ticker?.cancel();
+      _ticker = null;
+    }
+  }
+
+  void _onTick() {
+    final h = _handle;
+    if (h == null || !_playing || _loading || _handlingCompleted) return;
+
+    if (!_isValid(h)) {
+      _onVoiceEnded();
       return;
     }
 
+    final pos = _livePosition();
+    _position = pos;
+
+    if (_transitionsEnabled && _transitionMode == 0) {
+      _driveCrossfade(pos);
+    }
+
+    if (!_crossfading) _applyVolume();
+
+    final now = DateTime.now();
+    if (now.difference(_lastPositionEmit) >= _positionEmitEvery) {
+      _lastPositionEmit = now;
+      if (!_positionCtrl.isClosed) _positionCtrl.add(pos);
+      _emitCanGoPrevious();
+    }
+    if (now.difference(_lastPublish) >= _publishEvery) {
+      _lastPublish = now;
+      _publish();
+    }
+  }
+
+  /// La voz principal dejó de existir: fin de pista o invalidación externa.
+  void _onVoiceEnded() {
+    final nearEnd = _duration > Duration.zero &&
+        _position >= _duration - const Duration(seconds: 2);
+
+    if (!nearEnd) {
+      debugPrint('PlaybackAudioHandler: voz invalidada; se marca pausa.');
+      _handle = null;
+      _cancelCrossfade();
+      _setPlaying(false);
+      _publish();
+      return;
+    }
+
+    // Había una siguiente pista precargada: se promueve sin hueco.
+    if (_nextSource != null && (_crossfading || _startNextVoice())) {
+      _finishCrossfade();
+      return;
+    }
+
+    unawaited(_onCompleted());
+  }
+
+  // ============================================================
+  // VOLUMEN
+  // ============================================================
+
+  double _baseLinear() {
+    final rg = _replayGainDb == 0
+        ? 1.0
+        : math.pow(10, _replayGainDb / 20).toDouble();
+    final boost = _volumeBoostDb == 0
+        ? 1.0
+        : math.pow(10, _volumeBoostDb / 20).toDouble();
+    return _userVolume * rg * boost;
+  }
+
+  void _applyVolume({bool force = false}) {
+    final h = _handle;
+    if (h == null) return;
+
+    final f = _transitionsEnabled && _transitionMode == 1
+        ? _computeFadeFactor(_position, _duration)
+        : 1.0;
+    final v = (_baseLinear() * f).clamp(0.0, 4.0).toDouble();
+
+    if (!force) {
+      if (v == _lastVol) return;
+      final touchesZero = v == 0.0 || _lastVol == 0.0;
+      if (!touchesZero && (v - _lastVol).abs() < 0.002) return;
+    }
+
+    _lastVol = v;
+    _fadeFactor = f;
+    try {
+      _soloud.setVolume(h, v);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: setVolume falló -> $e');
+    }
+  }
+
+  @override
+  Future<void> setVolume(double volume) async {
+    final v = volume.clamp(0.0, 1.0).toDouble();
+    _userVolume = v;
+    _volumeNotifier.value = v;
+    if (_crossfading) {
+      _mixCrossfade(_position);
+    } else {
+      _applyVolume(force: true);
+    }
+  }
+
+  void setVolumeBoost(double db) {
+    final v = db.clamp(-12.0, 12.0).toDouble();
+    if ((v - _volumeBoostDb).abs() < 0.01) return;
+    _volumeBoostDb = v;
+    if (_crossfading) {
+      _mixCrossfade(_position);
+    } else {
+      _applyVolume(force: true);
+    }
+  }
+
+  void _onReplayGainChanged() {
+    _replayGainDb = _rg.enabled.value ? _rg.activeGainDb.value : 0.0;
+    if (_crossfading) {
+      _mixCrossfade(_position);
+    } else {
+      _applyVolume(force: true);
+    }
+  }
+
+  Future<void> setSpeed(double speed) async {
+    if (speed <= 0) return;
+    _speed = speed;
+    try {
+      final h = _handle;
+      if (h != null && _isValid(h)) _soloud.setRelativePlaySpeed(h, speed);
+      final nh = _nextHandle;
+      if (nh != null && _isValid(nh)) _soloud.setRelativePlaySpeed(nh, speed);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: setSpeed falló -> $e');
+    }
+    _publish();
+  }
+
+  // ============================================================
+  // CROSSFADE REAL (dos voces)
+  // ============================================================
+
+  int _xfWindowMs() => math.min(
+        (_crossfadeSeconds * 1000 * _speed).round(),
+        _duration.inMilliseconds ~/ 2,
+      );
+
+  void _driveCrossfade(Duration position) {
+    if (_handlingCompleted) return;
+
+    if (!_crossfading) {
+      if (_xfBlocked) return;
+      if (_activeQueue.repeatMode == PlayerRepeatMode.one) return;
+
+      final x = _xfWindowMs();
+      if (x < 500) return;
+
+      // Fase 1: precargar con antelación.
+      if (_nextSource == null) {
+        final preloadAt =
+            _duration - Duration(milliseconds: x) - _xfPreloadLead;
+        if (!_xfPreparing && position >= preloadAt) {
+          final next = _nextIndexOf(_activeQueue);
+          if (next == null) return;
+          unawaited(_prepareCrossfade(next));
+        }
+        return;
+      }
+
+      // Fase 2: arrancar al entrar en la ventana.
+      if (position.inMilliseconds < _xfStartMs) return;
+
+      if (!_startNextVoice(lateMs: position.inMilliseconds - _xfStartMs)) {
+        _cancelCrossfade();
+        _xfBlocked = true;
+        return;
+      }
+    }
+
+    // Fase 3: mezclar. Fase 4: terminar.
+    final t = _mixCrossfade(position);
+    if (t >= 1.0) _finishCrossfade();
+  }
+
+  Future<void> _prepareCrossfade(int nextIdx) async {
+    final token = _xfToken;
+    _xfPreparing = true;
+    sl.AudioSource? source;
+
+    try {
+      final songs = _activeQueue.songs;
+      if (nextIdx < 0 || nextIdx >= songs.length) {
+        _xfBlocked = true;
+        return;
+      }
+      final path = songs[nextIdx].path;
+      if (path == null || path.isEmpty || !await File(path).exists()) {
+        if (token == _xfToken) _xfBlocked = true;
+        return;
+      }
+      if (token != _xfToken) return;
+
+      await _ensureEngine();
+      final size = await File(path).length();
+      source = await _soloud.loadFile(
+        path,
+        mode: size > _diskLoadThresholdBytes
+            ? sl.LoadMode.disk
+            : sl.LoadMode.memory,
+      );
+
+      if (token != _xfToken) {
+        await _disposeSource(source);
+        return;
+      }
+
+      final len = _soloud.getLength(source);
+      final span = math.min(_xfWindowMs(), len.inMilliseconds ~/ 2);
+      if (span < 300) {
+        await _disposeSource(source);
+        _xfBlocked = true;
+        return;
+      }
+
+      _nextSource = source;
+      _nextIdx = nextIdx;
+      _xfSpanMs = span;
+      _xfStartMs = _duration.inMilliseconds - span;
+    } catch (e, st) {
+      debugPrint('PlaybackAudioHandler: precarga crossfade falló -> $e\n$st');
+      unawaited(_disposeSource(source));
+      if (token == _xfToken) _xfBlocked = true;
+    } finally {
+      if (token == _xfToken) _xfPreparing = false;
+    }
+  }
+
+  bool _startNextVoice({int lateMs = 0}) {
+    final source = _nextSource;
+    if (source == null) return false;
+    if (_crossfading) return true;
+
+    try {
+      final h = _soloud.play(source, volume: 0.0, paused: true);
+      if ((_speed - 1.0).abs() > 0.0005) {
+        _soloud.setRelativePlaySpeed(h, _speed);
+      }
+      final offsetMs = math.min(lateMs, _xfSpanMs);
+      if (offsetMs > 150) {
+        try {
+          _soloud.seek(h, Duration(milliseconds: offsetMs));
+        } catch (_) {}
+      }
+      _soloud.setPause(h, false);
+      _nextHandle = h;
+      _crossfading = true;
+      return true;
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: no se pudo iniciar voz entrante -> $e');
+      return false;
+    }
+  }
+
+  /// Aplica volúmenes de ambas voces según el progreso de la mezcla.
+  double _mixCrossfade(Duration position) {
+    final span = math.max(1, _xfSpanMs);
+    final t = ((position.inMilliseconds - _xfStartMs) / span)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final angle = t * math.pi / 2;
+    final base = _baseLinear();
+
+    final outV = (base * math.cos(angle)).clamp(0.0, 4.0).toDouble();
+    final inV = (base * math.sin(angle)).clamp(0.0, 4.0).toDouble();
+
+    try {
+      final h = _handle;
+      final nh = _nextHandle;
+      if (h != null) _soloud.setVolume(h, outV);
+      if (nh != null) _soloud.setVolume(nh, inV);
+    } catch (_) {}
+
+    _lastVol = outV;
+    _fadeFactor = math.cos(angle);
+    return t;
+  }
+
+  /// La voz entrante pasa a ser la principal (nunca se hace play() de
+  /// nuevo sobre la misma fuente).
+  void _finishCrossfade() {
+    final ns = _nextSource;
+    final nh = _nextHandle;
+    final ni = _nextIdx;
+    if (ns == null || nh == null || ni < 0) {
+      _cancelCrossfade();
+      return;
+    }
+
+    final oldSource = _source;
+
+    _source = ns;
+    _handle = nh;
+    _nextSource = null;
+    _nextHandle = null;
+    _nextIdx = -1;
+    _crossfading = false;
+    _xfPreparing = false;
+    _xfBlocked = false;
+    _xfToken++;
+
+    _activeQueue.currentIndex = ni;
+    _duration = _soloud.getLength(ns);
+    _position = _livePosition();
+    _lastVol = -1;
+
+    unawaited(_disposeSource(oldSource));
+    _applyVolume(force: true);
+
+    if (!_durationCtrl.isClosed) _durationCtrl.add(_duration);
+    _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
+    _emitControlsState();
+  }
+
+  /// Cancela cualquier crossfade (en curso o precargado).
+  void _cancelCrossfade() {
+    _xfToken++;
+    _xfPreparing = false;
+    _xfBlocked = false;
+
+    final ns = _nextSource;
+    final wasCrossfading = _crossfading;
+    _nextSource = null;
+    _nextHandle = null;
+    _nextIdx = -1;
+    _crossfading = false;
+
+    if (ns != null) unawaited(_disposeSource(ns));
+    if (wasCrossfading) _applyVolume(force: true);
+  }
+
+  // ============================================================
+  // CARGA Y REPRODUCCIÓN DE UNA PISTA
+  // ============================================================
+
+  Future<void> _loadAndPlay(
+    int songIndex, {
+    required bool autoPlay,
+    Duration start = Duration.zero,
+  }) async {
+    final q = _activeQueue;
+    if (songIndex < 0 || songIndex >= q.songs.length) return;
+
+    final song = q.songs[songIndex];
+    final path = song.path;
+    if (path == null || path.isEmpty || !File(path).existsSync()) {
+      debugPrint('PlaybackAudioHandler: archivo no disponible -> $path');
+      return;
+    }
+
+    final token = ++_loadToken;
+    _loading = true;
+    _resumeAfterLoad = autoPlay;
     _cancelCrossfade();
 
-    final cur = q.sourceOrder.indexOf(keepSong);
-    final p = newOrder.indexOf(keepSong);
-    if (cur < 0 || p < 0) return;
-
-    _reordering = true;
-    try {
-      if (cur < source.length - 1) {
-        await source.removeRange(cur + 1, source.length);
-      }
-      if (cur > 0) {
-        await source.removeRange(0, cur);
-      }
-      q.sourceOrder = newOrder;
-
-      final before = [
-        for (final i in newOrder.sublist(0, p))
-          AudioSource.file(q.songs[i].path!),
-      ];
-      final after = [
-        for (final i in newOrder.sublist(p + 1))
-          AudioSource.file(q.songs[i].path!),
-      ];
-      if (before.isNotEmpty) await source.insertAll(0, before);
-      if (after.isNotEmpty) await source.addAll(after);
-    } catch (e, st) {
-      debugPrint('PlaybackAudioHandler: _applyOrder falló -> $e\n$st');
-    } finally {
-      _reordering = false;
+    // Silencia la pista anterior mientras se carga la nueva.
+    final oldHandle = _handle;
+    if (oldHandle != null && _isValid(oldHandle)) {
+      try {
+        _soloud.setPause(oldHandle, true);
+      } catch (_) {}
     }
-    q.currentIndex = keepSong;
+
+    q.currentIndex = songIndex;
+    _publish();
+
+    try {
+      await _ensureEngine();
+
+      final size = await File(path).length();
+      final source = await _soloud.loadFile(
+        path,
+        mode: size > _diskLoadThresholdBytes
+            ? sl.LoadMode.disk
+            : sl.LoadMode.memory,
+      );
+
+      if (token != _loadToken) {
+        await _disposeSource(source);
+        return;
+      }
+
+      await _releaseVoice();
+
+      _source = source;
+      _duration = _soloud.getLength(source);
+      if (!_durationCtrl.isClosed) _durationCtrl.add(_duration);
+
+      // La voz nace en pausa y a volumen 0: seek, velocidad y volumen se
+      // dejan listos ANTES de que suene el primer sample.
+      final handle = _soloud.play(
+        source,
+        volume: 0.0,
+        paused: true,
+        looping: q.repeatMode == PlayerRepeatMode.one,
+      );
+      _handle = handle;
+      _lastVol = -1;
+
+      var startAt = start;
+      if (_duration > Duration.zero &&
+          startAt >= _duration - const Duration(seconds: 2)) {
+        startAt = Duration.zero;
+      }
+      _position = Duration.zero;
+      if (startAt > Duration.zero) {
+        try {
+          _soloud.seek(handle, startAt);
+          _position = startAt;
+        } catch (e) {
+          debugPrint('PlaybackAudioHandler: seek inicial falló -> $e');
+        }
+      }
+
+      if ((_speed - 1.0).abs() > 0.0005) {
+        _soloud.setRelativePlaySpeed(handle, _speed);
+      }
+
+      _applyVolume(force: true);
+
+      if (autoPlay) {
+        _soloud.setPause(handle, false);
+        _setPlaying(true);
+      } else {
+        _setPlaying(false);
+      }
+
+      _lastPositionEmit = DateTime.fromMillisecondsSinceEpoch(0);
+      if (!_positionCtrl.isClosed) _positionCtrl.add(_position);
+    } catch (e, st) {
+      debugPrint('PlaybackAudioHandler: carga falló -> $e\n$st');
+      _setPlaying(false);
+    } finally {
+      if (token == _loadToken) _loading = false;
+    }
+
+    _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
     _emitControlsState();
+  }
+
+  Future<void> _onCompleted() async {
+    if (_handlingCompleted || _loading || _activeQueue.songs.isEmpty) return;
+    _handlingCompleted = true;
+    try {
+      final q = _activeQueue;
+
+      if (q.repeatMode == PlayerRepeatMode.one) {
+        await _loadAndPlay(q.currentIndex, autoPlay: true);
+        return;
+      }
+
+      final next = _nextIndexOf(q);
+      if (next != null) {
+        await _loadAndPlay(next, autoPlay: true);
+      } else {
+        // Fin de la cola: se deja lista la primera pista, en pausa.
+        _ensureOrder(q);
+        final first = q.sourceOrder.isEmpty ? 0 : q.sourceOrder.first;
+        await _loadAndPlay(first, autoPlay: false);
+      }
+    } catch (e, st) {
+      debugPrint('PlaybackAudioHandler: completed falló -> $e\n$st');
+    } finally {
+      _handlingCompleted = false;
+      _emitControlsState();
+    }
+  }
+
+  // ============================================================
+  // DEDUPE
+  // ============================================================
+
+  String _songKey(Song s) =>
+      (s.path != null && s.path!.isNotEmpty) ? s.path! : s.title;
+
+  List<Song> _dedupeSongs(List<Song> input) {
+    final seen = <String>{};
+    final unique = <Song>[];
+    for (final s in input) {
+      if (seen.add(_songKey(s))) unique.add(s);
+    }
+    return unique;
+  }
+
+  bool _isPlayable(Song s) {
+    final p = s.path;
+    if (p == null || p.isEmpty) return false;
+    if (!File(p).existsSync()) {
+      debugPrint('PlaybackAudioHandler: path no existe -> $p');
+      return false;
+    }
+    return true;
   }
 
   // ============================================================
@@ -757,22 +859,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get _effectivePlaying {
     if (_activeQueue.songs.isEmpty) return false;
     if (_loading) return _resumeAfterLoad;
-    if (_player.processingState == ProcessingState.completed) return false;
-    return _player.playing;
+    return _playing;
   }
 
   AudioProcessingState get _effectiveProcessingState {
     if (_activeQueue.songs.isEmpty) return AudioProcessingState.idle;
     if (_loading) return AudioProcessingState.loading;
-    if (_handlingCompleted) return AudioProcessingState.ready;
-
-    return switch (_player.processingState) {
-      ProcessingState.idle => AudioProcessingState.idle,
-      ProcessingState.loading => AudioProcessingState.loading,
-      ProcessingState.buffering => AudioProcessingState.buffering,
-      ProcessingState.ready => AudioProcessingState.ready,
-      ProcessingState.completed => AudioProcessingState.ready,
-    };
+    return AudioProcessingState.ready;
   }
 
   AudioServiceRepeatMode get _systemRepeatMode =>
@@ -788,11 +881,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
           : AudioServiceShuffleMode.none;
 
   void _publish({bool updateControls = true, bool updateQueue = true}) {
-    if (_isSeeking) {
-      updateControls = false;
-      updateQueue = false;
-    }
-
     final song = currentSong;
     final playing = _effectivePlaying;
 
@@ -803,11 +891,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
           _lastMediaItemKey = null;
         }
       } else {
-        final d = _loading ? null : _player.duration;
-        final liveDuration = (d != null && d > Duration.zero) ? d : null;
+        final liveDuration = (!_loading && _duration > Duration.zero)
+            ? _duration
+            : null;
         final key =
             '${_activeQueue.kind.name}|${song.path ?? song.title}|${liveDuration?.inMilliseconds}';
-
         if (key != _lastMediaItemKey) {
           mediaItem.add(_toMediaItem(song, liveDuration));
           _lastMediaItemKey = key;
@@ -864,9 +952,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
             _lastCompactActionIndices ?? const <int>[],
         processingState: _effectiveProcessingState,
         playing: playing,
-        updatePosition: _loading ? Duration.zero : _player.position,
-        bufferedPosition: _loading ? Duration.zero : _player.bufferedPosition,
-        speed: _player.speed,
+        updatePosition: _loading ? Duration.zero : _position,
+        bufferedPosition: _loading ? Duration.zero : _duration,
+        speed: _speed,
         queueIndex:
             _activeQueue.currentIndex >= 0 ? _activeQueue.currentIndex : null,
         repeatMode: _systemRepeatMode,
@@ -893,45 +981,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       playable: song.path != null && song.path!.isNotEmpty,
     );
   }
-
-  // ============================================================
-  // POSICIÓN / COMPLETED
-  // ============================================================
-
-  void _onPosition(Duration position) {
-    // Los fades ya NO se calculan aquí (lo hace el ticker de 30 ms).
-    _emitCanGoPrevious();
-    if (!_player.playing) return;
-    final now = DateTime.now();
-    if (now.difference(_lastPositionPublish) < _positionPublishEvery) return;
-    _lastPositionPublish = now;
-    _publish();
-  }
-
-  Future<void> _onCompleted() async {
-    if (_handlingCompleted || _loading || _activeQueue.songs.isEmpty) return;
-    _handlingCompleted = true;
-    _cancelCrossfade();
-    try {
-      if (_activeQueue.repeatMode == PlayerRepeatMode.one) return;
-      await _player.pause();
-      await _player.seek(Duration.zero, index: 0);
-    } catch (e, st) {
-      debugPrint('PlaybackAudioHandler: normalizar completed falló -> $e\n$st');
-    } finally {
-      _handlingCompleted = false;
-      _activeQueue.currentIndex = _activeQueue.songs.isEmpty
-          ? -1
-          : (_activeQueue.sourceOrder.isEmpty
-              ? 0
-              : _activeQueue.sourceOrder.first);
-      _emitControlsState();
-    }
-  }
-
-  // ============================================================
-  // EMISIÓN DE CONTROLES
-  // ============================================================
 
   void _emitCanGoPrevious() {
     final next = canGoPrevious;
@@ -966,8 +1015,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (q.songs.isNotEmpty) {
       _ensureOrder(q);
       final keep = q.currentIndex >= 0 ? q.currentIndex : 0;
-      await _applyOrder(_buildOrder(q, keep), keepSong: keep);
+      q.sourceOrder = _buildOrder(q, keep);
     }
+    _cancelCrossfade();
     _emitControlsState();
   }
 
@@ -975,9 +1025,19 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (_activeQueue.repeatMode == mode) return;
     _activeQueue.repeatMode = mode;
     _cancelCrossfade();
-    await _applyLoopMode();
+    _applyLooping();
     if (!_repeatCtrl.isClosed) _repeatCtrl.add(mode);
     _emitControlsState();
+  }
+
+  void _applyLooping() {
+    final h = _handle;
+    if (h == null || !_isValid(h)) return;
+    try {
+      _soloud.setLooping(h, _activeQueue.repeatMode == PlayerRepeatMode.one);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: setLooping falló -> $e');
+    }
   }
 
   @override
@@ -1001,27 +1061,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     await setShuffle(enable);
   }
 
-  Future<void> _applyLoopMode() async {
-    switch (_activeQueue.repeatMode) {
-      case PlayerRepeatMode.off:
-        await _player.setLoopMode(LoopMode.off);
-      case PlayerRepeatMode.all:
-        await _player.setLoopMode(LoopMode.all);
-      case PlayerRepeatMode.one:
-        await _player.setLoopMode(LoopMode.one);
-    }
-  }
-
-  bool _isPlayable(Song s) {
-    final p = s.path;
-    if (p == null || p.isEmpty) return false;
-    if (!File(p).existsSync()) {
-      debugPrint('PlaybackAudioHandler: path no existe -> $p');
-      return false;
-    }
-    return true;
-  }
-
   // ============================================================
   // SET QUEUE
   // ============================================================
@@ -1037,8 +1076,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
                 MediaKind.podcast
             ? MediaKind.podcast
             : MediaKind.music);
-    return setQueueOf(kind, songs,
-        startIndex: startIndex, autoPlay: autoPlay);
+    return setQueueOf(kind, songs, startIndex: startIndex, autoPlay: autoPlay);
   }
 
   Future<void> setQueueOf(
@@ -1075,16 +1113,14 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (startIndex < 0 || startIndex >= songs.length) startIndex = 0;
 
     final target = songs[startIndex];
-
-    final dedup = _dedupeSongs(songs);
-    songs = dedup.unique;
-
-    final playable = songs.where(_isPlayable).toList();
+    final unique = _dedupeSongs(songs);
+    final playable = unique.where(_isPlayable).toList();
     if (playable.isEmpty) {
       debugPrint('PlaybackAudioHandler: no hay fuentes válidas en la cola');
       await _clearQueueOf(kind);
       return;
     }
+
     final targetKey = _songKey(target);
     var newStart = playable.indexWhere((s) => _songKey(s) == targetKey);
     if (newStart < 0) newStart = 0;
@@ -1105,56 +1141,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _activeQueue.shuffleEnabled = false;
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
 
-    _loading = true;
-    _resumeAfterLoad = autoPlay;
-
-    try {
-      await _player.pause();
-      // Modo Fade: silencio absoluto antes de cargar la nueva pista.
-      await _beginTrackChange();
-
-      _activeQueue.songs = playable;
-      _activeQueue.resetOrder();
-      _activeQueue.currentIndex = newStart;
-      _publish();
-
-      final concat = _buildSource(_activeQueue);
-      _queueSource = concat;
-
-      try {
-        await _player.setAudioSource(
-          concat,
-          initialIndex: newStart,
-          initialPosition: Duration.zero,
-        );
-      } catch (e, st) {
-        debugPrint('PlaybackAudioHandler: setAudioSource falló -> $e\n$st');
-        _queueSource = null;
-        _activeQueue.reset();
-        _resumeAfterLoad = false;
-        _loading = false;
-        await _player.stop();
-        _emitControlsState();
-        rethrow;
-      }
-    } finally {
-      _loading = false;
-      _endTrackChange();
-    }
-
+    _activeQueue.songs = playable;
+    _activeQueue.resetOrder();
     _activeQueue.currentIndex = newStart;
-    _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
 
-    await _applyLoopMode();
-    _updateFactors(force: true);
-
-    if (autoPlay) {
-      unawaited(_player.play().catchError((Object e, StackTrace st) {
-        debugPrint('PlaybackAudioHandler: play falló -> $e\n$st');
-      }));
-    }
-
-    _emitControlsState();
+    await _loadAndPlay(newStart, autoPlay: autoPlay);
   }
 
   // ============================================================
@@ -1166,23 +1157,22 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     int? startIndex,
     bool? autoPlay,
   }) async {
-    if (kind == _activeQueue.kind && _queueSource != null) {
+    if (kind == _activeQueue.kind && _source != null) {
       if (startIndex != null) await skipToQueueItem(startIndex);
       return;
     }
 
     _cancelCrossfade();
 
-    final oldKind = _activeQueue.kind;
+    _activeQueue.saveLiveState(position: _position, playing: _playing);
 
-    _activeQueue.saveLiveState(
-      position: _player.position,
-      playing: _player.playing,
-    );
-
-    try {
-      await _player.pause();
-    } catch (_) {}
+    final h = _handle;
+    if (h != null && _isValid(h)) {
+      try {
+        _soloud.setPause(h, true);
+      } catch (_) {}
+    }
+    _setPlaying(false);
 
     final target = _queueFor(kind);
     if (startIndex != null &&
@@ -1200,63 +1190,29 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastQueueKey = null;
 
     if (!_activeQueueCtrl.isClosed) _activeQueueCtrl.add(kind);
-
     _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
 
     if (_activeQueue.songs.isEmpty) {
-      try {
-        await _player.stop();
-      } catch (_) {}
-      _queueSource = null;
+      await _releaseVoice();
+      _position = Duration.zero;
+      _duration = Duration.zero;
       if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(_activeQueue.shuffleEnabled);
       if (!_repeatCtrl.isClosed) _repeatCtrl.add(_activeQueue.repeatMode);
       _emitControlsState();
       return;
     }
 
-    _loading = true;
-    _resumeAfterLoad = _activeQueue.savedPlaying;
-    final restorePos = _activeQueue.savedPosition;
-
-    try {
-      await _beginTrackChange();
-
-      final concat = _buildSource(_activeQueue);
-      _queueSource = concat;
-
-      await _player.setAudioSource(
-        concat,
-        initialIndex: _sourceIndexOf(
-          _activeQueue,
-          _activeQueue.currentIndex >= 0 ? _activeQueue.currentIndex : 0,
-        ),
-        initialPosition: restorePos,
-      );
-    } catch (e, st) {
-      debugPrint('PlaybackAudioHandler: switchToQueue falló -> $e\n$st');
-    } finally {
-      _loading = false;
-      _endTrackChange();
-    }
-
-    await _applyLoopMode();
-    _updateFactors(force: true);
-
-    if (_resumeAfterLoad) {
-      unawaited(_player.play().catchError((Object e, StackTrace st) {
-        debugPrint('PlaybackAudioHandler: play falló -> $e\n$st');
-      }));
-    }
+    _ensureOrder(_activeQueue);
+    final idx = _activeQueue.currentIndex >= 0 ? _activeQueue.currentIndex : 0;
 
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(_activeQueue.shuffleEnabled);
     if (!_repeatCtrl.isClosed) _repeatCtrl.add(_activeQueue.repeatMode);
 
-    debugPrint(
-      'PlaybackAudioHandler: switchToQueue $oldKind -> $kind '
-      '(songs=${_activeQueue.songs.length}, idx=${_activeQueue.currentIndex})',
+    await _loadAndPlay(
+      idx,
+      autoPlay: _activeQueue.savedPlaying,
+      start: _activeQueue.savedPosition,
     );
-
-    _emitControlsState();
   }
 
   // ============================================================
@@ -1268,10 +1224,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     q.reset();
 
     if (kind == _activeQueue.kind) {
-      _cancelCrossfade();
-      _queueSource = null;
+      _loadToken++;
+      _loading = false;
       _resumeAfterLoad = false;
-      await _player.stop();
+      await _releaseVoice();
+      _setPlaying(false);
+      _position = Duration.zero;
+      _duration = Duration.zero;
       if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
     }
     _rg.notifyCurrentSong(null);
@@ -1290,31 +1249,23 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   Future<void> clearAllQueues() async {
     _loadGeneration++;
-    _cancelCrossfade();
+    _loadToken++;
+    _loading = false;
 
-    _activeQueue.saveLiveState(
-      position: _player.position,
-      playing: false,
-    );
+    _activeQueue.saveLiveState(position: _position, playing: false);
 
     _musicQueue.reset();
     _chaptersQueue.reset();
 
-    _queueSource = null;
     _resumeAfterLoad = false;
-    try {
-      await _player.stop();
-    } catch (e, st) {
-      debugPrint(
-        'PlaybackAudioHandler: stop en clearAllQueues falló -> $e\n$st',
-      );
-    }
+    await _releaseVoice();
+    _setPlaying(false);
+    _position = Duration.zero;
+    _duration = Duration.zero;
 
     _activeQueue = _musicQueue;
 
-    if (!_activeQueueCtrl.isClosed) {
-      _activeQueueCtrl.add(MediaKind.music);
-    }
+    if (!_activeQueueCtrl.isClosed) _activeQueueCtrl.add(MediaKind.music);
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
     if (!_repeatCtrl.isClosed) _repeatCtrl.add(PlayerRepeatMode.off);
 
@@ -1351,8 +1302,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    final source = _queueSource;
-    if (source == null) {
+    if (_source == null && !_loading) {
       final newSongs = [...q.songs, song];
       await setQueueOf(
         kind,
@@ -1367,7 +1317,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _ensureOrder(q);
     q.songs = [...q.songs, song];
     q.sourceOrder = [...q.sourceOrder, q.songs.length - 1];
-    await source.add(AudioSource.file(song.path!));
     _emitControlsState();
   }
 
@@ -1378,12 +1327,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     final q = _queueFor(kind);
     if (index < 0 || index >= q.songs.length) return;
 
-    if (kind == _activeQueue.kind) _cancelCrossfade();
+    final isActive = kind == _activeQueue.kind;
+    if (isActive) _cancelCrossfade();
 
     _ensureOrder(q);
-    final sourcePos = q.sourceOrder.indexOf(index);
 
     final wasCurrent = index == q.currentIndex;
+    final wasPlaying = _playing;
     final newSongs = List<Song>.from(q.songs)..removeAt(index);
 
     if (newSongs.isEmpty) {
@@ -1405,15 +1355,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     ];
     q.currentIndex = newIndex;
 
-    if (kind == _activeQueue.kind) {
-      final source = _queueSource;
-      if (source != null && sourcePos >= 0) {
-        try {
-          await source.removeAt(sourcePos);
-        } catch (e, st) {
-          debugPrint('PlaybackAudioHandler: removeAt falló -> $e\n$st');
-        }
-      }
+    if (isActive && wasCurrent) {
+      // Se quitó la pista que sonaba: se carga la que ocupa su lugar.
+      await _loadAndPlay(newIndex, autoPlay: wasPlaying);
+      return;
     }
 
     _emitControlsState();
@@ -1451,26 +1396,15 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     _ensureOrder(q);
-    final shuffled = q.shuffleEnabled;
-    if (shuffled) {
+    if (q.shuffleEnabled) {
       q.sourceOrder = [
-        for (final v in q.sourceOrder)
-          _remapAfterMove(v, oldIndex, targetIndex),
+        for (final v in q.sourceOrder) _remapAfterMove(v, oldIndex, targetIndex),
       ];
+    } else {
+      q.resetOrder();
     }
 
     _emitControlsState();
-
-    if (kind == _activeQueue.kind && !shuffled) {
-      final source = _queueSource;
-      if (source != null) {
-        try {
-          await source.move(oldIndex, targetIndex);
-        } catch (e, st) {
-          debugPrint('PlaybackAudioHandler: move falló -> $e\n$st');
-        }
-      }
-    }
   }
 
   // ============================================================
@@ -1478,7 +1412,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // ============================================================
 
   Future<void> playFromQueueOf(MediaKind kind, int index) async {
-    if (kind == _activeQueue.kind && _queueSource != null) {
+    if (kind == _activeQueue.kind && _source != null) {
       await skipToQueueItem(index);
     } else {
       await switchToQueue(kind, startIndex: index, autoPlay: true);
@@ -1489,7 +1423,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     final q = _queueFor(song.kind);
     final idx = q.songs.indexWhere((s) => s.path == song.path);
     if (idx >= 0) {
-      if (_activeQueue.kind != song.kind || _queueSource == null) {
+      if (_activeQueue.kind != song.kind || _source == null) {
         await switchToQueue(song.kind, startIndex: idx, autoPlay: true);
       } else {
         await skipToQueueItem(idx);
@@ -1501,148 +1435,46 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   Future<void> playFromQueue(int index) => skipToQueueItem(index);
 
-  Future<void> setSpeed(double speed) async {
-    if (speed <= 0) return;
-    await _player.setSpeed(speed);
-    final xp = _xfPlayer;
-    if (xp != null && _xfPhase != _XfPhase.idle) {
-      unawaited(xp.setSpeed(speed).catchError((Object _) {}));
-    }
-    _publish();
-  }
-
-  // ============================================================
-  // VOLUMEN + REPLAYGAIN + VOLUME BOOST + TRANSICIONES
-  // ============================================================
-
-  @override
-  Future<void> setVolume(double volume) async {
-    final v = volume.clamp(0.0, 1.0).toDouble();
-    _userVolume = v;
-    _volume = v;
-    _volumeNotifier.value = v;
-    _applyEffectiveVolume();
-  }
-
-  void setVolumeBoost(double db) {
-    final v = db.clamp(-12.0, 12.0).toDouble();
-    if ((v - _volumeBoostDb).abs() < 0.01) return;
-    _volumeBoostDb = v;
-    _applyLoudness();
-    _applyEffectiveVolume();
-  }
-
-  /// Solo amplifica (dB > 0) con el LoudnessEnhancer de Android.
-  /// Las atenuaciones (dB < 0) se hacen con el volumen lineal.
-  /// Se configura tanto el enhancer del player principal como el del
-  /// secundario (crossfade) para que el boost sea consistente.
-  void _applyLoudness() {
-    final positiveDb = _volumeBoostDb > 0 ? _volumeBoostDb : 0.0;
-    _configureEnhancer(_loudness, positiveDb);
-    _configureEnhancer(_xfLoudness, positiveDb);
-  }
-
-  void _configureEnhancer(AndroidLoudnessEnhancer? l, double positiveDb) {
-    if (l == null) return;
-    unawaited(() async {
-      try {
-        await l.setEnabled(positiveDb > 0);
-        await l.setTargetGain(positiveDb / _kLoudnessGainScale);
-        debugPrint(
-          'Boost: enhancer enabled=${positiveDb > 0} '
-          'gain=${positiveDb / _kLoudnessGainScale} ($positiveDb dB)',
-        );
-      } catch (e, st) {
-        debugPrint('PlaybackAudioHandler: loudness falló -> $e\n$st');
-      }
-    }());
-  }
-
-  void _onReplayGainChanged() {
-    _replayGainDb = _rg.enabled.value ? _rg.activeGainDb.value : 0.0;
-    _applyEffectiveVolume();
-  }
-
-  /// userVolume × linear(RG) × linear(boost) — SIN fade.
-  /// Android: el boost positivo va por LoudnessEnhancer, solo el negativo
-  /// se aplica aquí. Otras plataformas: multiplicador clásico.
-  double _baseLinear() {
-    final rgLinear = _replayGainDb == 0
-        ? 1.0
-        : math.pow(10, _replayGainDb / 20).toDouble();
-
-    final boostLinear = _volumeBoostDb == 0
-        ? 1.0
-        : (_loudness != null
-            ? (_volumeBoostDb < 0
-                ? math.pow(10, _volumeBoostDb / 20).toDouble()
-                : 1.0)
-            : math.pow(10, _volumeBoostDb / 20).toDouble());
-
-    return _userVolume * rgLinear * boostLinear;
-  }
-
-  /// Evita llamadas redundantes al canal nativo, pero SIEMPRE deja pasar
-  /// el paso hacia/desde 0 exacto.
-  bool _needsSet(double next, double last) {
-    if (next == last) return false;
-    if (next == 0.0 || last == 0.0) return true;
-    return (next - last).abs() >= 0.002;
-  }
-
-  void _applyEffectiveVolume() => unawaited(_applyVolumeImpl());
-
-  Future<void> _applyVolumeImpl() async {
-    final base = _baseLinear();
-    final fp = _transitionsEnabled ? _fadeFactor : 1.0;
-    final fs = _transitionsEnabled ? _xfFactor : 0.0;
-
-    final p = (base * fp).clamp(0.0, 1.0).toDouble();
-    final s = (base * fs).clamp(0.0, 1.0).toDouble();
-
-    final futures = <Future<void>>[];
-
-    if (_needsSet(p, _lastSetPrimary)) {
-      _lastSetPrimary = p;
-      futures.add(_player.setVolume(p));
-    }
-
-    final xp = _xfPlayer;
-    if (xp != null && _needsSet(s, _lastSetSecondary)) {
-      _lastSetSecondary = s;
-      futures.add(xp.setVolume(s));
-    }
-
-    if (futures.isNotEmpty) {
-      try {
-        await Future.wait(futures);
-      } catch (e) {
-        debugPrint('PlaybackAudioHandler: setVolume falló -> $e');
-      }
-    }
-  }
-
   // ============================================================
   // PLAY / PAUSE / STOP / SEEK
   // ============================================================
 
   @override
   Future<void> play() async {
-    if (_queueSource == null) {
-      debugPrint('PlaybackAudioHandler: play() sin fuente cargada');
+    final q = _activeQueue;
+    if (q.songs.isEmpty || q.currentIndex < 0) {
+      debugPrint('PlaybackAudioHandler: play() sin cola cargada');
       return;
     }
-    unawaited(_player.play().catchError((Object e, StackTrace st) {
-      debugPrint('PlaybackAudioHandler: play falló -> $e\n$st');
-    }));
-    if (_xfAudible) _xfSetPlaying(true);
+
+    final h = _handle;
+    if (h != null && _isValid(h)) {
+      try {
+        _soloud.setPause(h, false);
+        final nh = _nextHandle;
+        if (nh != null && _isValid(nh)) _soloud.setPause(nh, false);
+      } catch (e) {
+        debugPrint('PlaybackAudioHandler: play falló -> $e');
+      }
+      _setPlaying(true);
+    } else {
+      // Voz invalidada (p. ej. por el sistema): se recarga donde iba.
+      await _loadAndPlay(q.currentIndex, autoPlay: true, start: _position);
+    }
     _publish();
   }
 
   @override
   Future<void> pause() async {
-    await _player.pause();
-    if (_xfAudible) _xfSetPlaying(false);
+    final h = _handle;
+    try {
+      if (h != null && _isValid(h)) _soloud.setPause(h, true);
+      final nh = _nextHandle;
+      if (nh != null && _isValid(nh)) _soloud.setPause(nh, true);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: pause falló -> $e');
+    }
+    _setPlaying(false);
     _publish();
   }
 
@@ -1650,72 +1482,56 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> stop() async {
     _loadGeneration++;
     _cancelCrossfade();
-    _activeQueue.saveLiveState(
-      position: _player.position,
-      playing: false,
-    );
+    _activeQueue.saveLiveState(position: _position, playing: false);
     await _clearQueueOf(_activeQueue.kind);
     await super.stop();
   }
 
   @override
   Future<void> seek(Duration position) async {
-    final generation = ++_seekGeneration;
-    _isSeeking = true;
-    _publish(updateControls: false, updateQueue: false);
+    final h = _handle;
+    if (h == null || !_isValid(h)) return;
+
+    var target = position;
+    if (target < Duration.zero) target = Duration.zero;
+    if (_duration > Duration.zero && target > _duration) target = _duration;
 
     _cancelCrossfade();
 
-    // Modo Fade: si se salta al inicio de la pista, silencio antes del seek.
-    final guardFade = _transitionsEnabled &&
-        _transitionMode == 1 &&
-        position.inMilliseconds < (_fadeSeconds * 1000).round();
-    if (guardFade) await _beginTrackChange();
-
     try {
-      await _player.seek(position);
-    } finally {
-      if (guardFade) _endTrackChange();
-      if (generation == _seekGeneration) {
-        _isSeeking = false;
-        _updateFactors(force: true);
-        _emitCanGoPrevious();
-        _publish();
-      }
+      _soloud.seek(h, target);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: seek falló -> $e');
+      return;
     }
+
+    _position = target;
+    _applyVolume(force: true);
+    if (!_positionCtrl.isClosed) _positionCtrl.add(target);
+    _emitCanGoPrevious();
+    _publish();
   }
 
   @override
   Future<void> skipToNext() async {
-    if (!hasNext || _queueSource == null) return;
-    _cancelCrossfade();
-    await _beginTrackChange();
-    try {
-      await _player.seekToNext();
-    } finally {
-      _endTrackChange();
-    }
-    _emitControlsState();
+    if (!_hasSource) return;
+    final next = _nextIndexOf(_activeQueue);
+    if (next == null) return;
+    await _loadAndPlay(next, autoPlay: _playing || _resumeAfterLoad);
   }
 
   @override
   Future<void> skipToPrevious() async {
-    if (_queueSource == null) return;
+    if (!_hasSource) return;
 
-    if (_player.position > _rewindThreshold) {
+    if (_position > _rewindThreshold) {
       await seek(Duration.zero);
       return;
     }
 
-    if (hasPrevious) {
-      _cancelCrossfade();
-      await _beginTrackChange();
-      try {
-        await _player.seekToPrevious();
-      } finally {
-        _endTrackChange();
-      }
-      _emitControlsState();
+    final prev = _previousIndexOf(_activeQueue);
+    if (prev != null) {
+      await _loadAndPlay(prev, autoPlay: _playing || _resumeAfterLoad);
       return;
     }
 
@@ -1727,61 +1543,38 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     final q = _activeQueue;
     if (index < 0 || index >= q.songs.length) return;
 
-    if (_queueSource == null) {
-      await setQueueOf(
-        q.kind,
-        q.songs,
-        startIndex: index,
-        autoPlay: true,
-      );
-      return;
-    }
-
-    _cancelCrossfade();
-    await _beginTrackChange();
-
-    q.currentIndex = index;
-    try {
-      await _player.seek(Duration.zero, index: _sourceIndexOf(q, index));
-    } catch (e, st) {
-      debugPrint('PlaybackAudioHandler: seek falló -> $e\n$st');
-      _endTrackChange();
+    if (_source == null && !_loading) {
+      await setQueueOf(q.kind, q.songs, startIndex: index, autoPlay: true);
       return;
     }
 
     if (q.shuffleEnabled) {
-      await _applyOrder(_buildOrder(q, index), keepSong: index);
+      _ensureOrder(q);
+      q.sourceOrder = _buildOrder(q, index);
     }
 
-    _endTrackChange();
-
-    unawaited(_player.play().catchError((Object e, StackTrace st) {
-      debugPrint('PlaybackAudioHandler: play falló -> $e\n$st');
-    }));
-    _emitControlsState();
+    await _loadAndPlay(index, autoPlay: true);
   }
 
   @override
   Future<void> onTaskRemoved() async {}
 
   Future<void> dispose() async {
-    _fadeTimer?.cancel();
-    _fadeTimer = null;
+    _ticker?.cancel();
+    _ticker = null;
     _rg.activeGainDb.removeListener(_onReplayGainChanged);
-    for (final s in _subs) {
-      await s.cancel();
-    }
-    _subs.clear();
     await _canGoPreviousCtrl.close();
     await _canGoNextCtrl.close();
     await _shuffleCtrl.close();
     await _repeatCtrl.close();
     await _activeQueueCtrl.close();
+    await _positionCtrl.close();
+    await _durationCtrl.close();
+    await _playingCtrl.close();
     _volumeNotifier.dispose();
+    await _releaseVoice();
     try {
-      await _xfPlayer?.dispose();
+      _soloud.deinit();
     } catch (_) {}
-    _xfPlayer = null;
-    await _player.dispose();
   }
 }

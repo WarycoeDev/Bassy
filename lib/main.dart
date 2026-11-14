@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:bassy/services/reverb_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
@@ -39,6 +40,10 @@ void main() async {
       windows: true,
     );
   }
+
+  // después de JustAudioMediaKit.ensureInitialized(...) (si lo usas):
+await ReverbService.instance.load();
+await PlaybackController.instance.init();
 
   // 1) Configuración de sesión de audio (foco, bluetooth, etc.)
   final session = await AudioSession.instance;

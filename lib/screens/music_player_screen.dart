@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui' show FontFeature, ImageFilter;
 
 import 'package:audio_service/audio_service.dart';
+import 'package:bassy/services/reverb_service.dart';
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
@@ -61,41 +62,13 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
   /// Menú de efectos de sonido (placeholder) usando el estilo global
   /// de [ActionMenu].
   Future<void> _showEffectsMenu(BuildContext context) async {
-    final song = _controller.currentSong;
-    await ActionMenu.show(
-      context,
-      title: 'Efectos de sonido',
-      subtitle: song?.title ?? 'Ajustes de audio',
-      coverPath: song?.coverPath,
-      fallbackIcon: Icons.headphones_rounded,
-      actions: [
-        ActionMenuItem(
-          icon: Icons.graphic_eq_rounded,
-          label: 'Ecualizador',
-          enabled: false,
-          onTap: () {
-            // TODO: abrir ecualizador
-          },
-        ),
-        ActionMenuItem(
-          icon: Icons.waves_rounded,
-          label: 'Reverb',
-          enabled: false,
-          onTap: () {
-            // TODO: abrir reverb
-          },
-        ),
-        ActionMenuItem(
-          icon: Icons.surround_sound_rounded,
-          label: 'Bass Boost',
-          enabled: false,
-          onTap: () {
-            // TODO: abrir bass boost
-          },
-        ),
-      ],
-    );
-  }
+  await showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (_) => const _EffectsSheet(),
+  );
+}
 
   @override
   Widget build(BuildContext context) {
@@ -1502,6 +1475,81 @@ class _LabeledButton extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EffectsSheet extends StatelessWidget {
+  const _EffectsSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final reverb = ReverbService.instance;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Efectos de sonido',
+                style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 20),
+            ValueListenableBuilder<double>(
+              valueListenable: reverb.level,
+              builder: (context, v, _) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.waves_rounded, color: scheme.primary),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text('Reverb',
+                              style: TextStyle(
+                                  fontSize: 16, fontWeight: FontWeight.w600)),
+                        ),
+                        Text(
+                          v <= 0.001 ? 'Apagado' : '${(v * 100).round()}%',
+                          style: TextStyle(color: scheme.onSurfaceVariant),
+                        ),
+                      ],
+                    ),
+                    Slider(
+                      value: v,
+                      min: 0,
+                      max: 1,
+                      divisions: 100,
+                      onChanged: reverb.isSupported ? reverb.setLevel : null,
+                      onChangeEnd: (_) => reverb.persist(),
+                    ),
+                    if (!reverb.isSupported)
+                      Text('No disponible en esta plataforma',
+                          style: TextStyle(
+                              color: scheme.onSurfaceVariant, fontSize: 12)),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 8),
+            const ListTile(
+              contentPadding: EdgeInsets.zero,
+              enabled: false,
+              leading: Icon(Icons.graphic_eq_rounded),
+              title: Text('Ecualizador'),
+            ),
+            const ListTile(
+              contentPadding: EdgeInsets.zero,
+              enabled: false,
+              leading: Icon(Icons.surround_sound_rounded),
+              title: Text('Bass Boost'),
+            ),
+          ],
         ),
       ),
     );
