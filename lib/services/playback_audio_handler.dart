@@ -52,13 +52,29 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   static const _rewindThreshold = Duration(seconds: 3);
 
+  // ============================================================
+  // VOLUMEN + REPLAYGAIN
+  // ============================================================
+  //
+  // Tres conceptos separados:
+  //   - _userVolume   : lo que el usuario elige con el slider (0..1).
+  //                     Es lo que ve la UI. No incluye ReplayGain.
+  //   - _replayGainDb : ganancia calculada del track actual (dB).
+  //                     Solo la usa _applyEffectiveVolume.
+  //   - _player.volume: volumen físico real = user × linear(RG).
+  //
+  // El slider de la UI está ligado a _volumeNotifier, que refleja
+  // EXCLUSIVAMENTE _userVolume. ReplayGain nunca lo modifica.
+  //
+  // `_volume` se mantiene como alias de compatibilidad por si algún
+  // código antiguo lee `handler.volume` o `_volume`.
+
+  double _userVolume = 1.0;
   double _volume = 1.0;
   final ValueNotifier<double> _volumeNotifier = ValueNotifier<double>(1.0);
 
-  // -------- ReplayGain --------
   final ReplayGainService _rg = ReplayGainService.instance;
   double _replayGainDb = 0.0;
-  double _userVolume = 1.0;
 
   final _shuffleCtrl = StreamController<bool>.broadcast();
   final _repeatCtrl = StreamController<PlayerRepeatMode>.broadcast();
@@ -113,10 +129,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     _subs.add(_player.speedStream.listen((_) => _publish()));
 
-    _subs.add(_player.volumeStream.listen((v) {
-      _volume = v;
-      _volumeNotifier.value = v;
-    }));
+    // IMPORTANTE: NO escuchamos _player.volumeStream para actualizar el
+    // notifier. El slider de la UI refleja el volumen elegido por el
+    // usuario (_userVolume), no el volumen efectivo del player (que
+    // incluye ReplayGain). Si escucháramos volumeStream, el slider se
+    // movería solo cuando ReplayGain cambiara el volumen físico.
 
     _rg.activeGainDb.addListener(_onReplayGainChanged);
     _onReplayGainChanged();
@@ -168,8 +185,14 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   double get playerSpeed => _player.speed;
 
-  double get volume => _volume;
+  /// Volumen elegido por el usuario (0..1). NO incluye ReplayGain.
+  /// Es lo que debe mostrar el slider.
+  double get volume => _userVolume;
   ValueListenable<double> get volumeListenable => _volumeNotifier;
+
+  /// Volumen físico real aplicado al player. Solo para debug/diagnóstico.
+  /// = _userVolume × linear(_replayGainDb)
+  double get effectiveVolume => _player.volume;
 
   bool get shuffleEnabled => _activeQueue.shuffleEnabled;
   PlayerRepeatMode get repeatMode => _activeQueue.repeatMode;
@@ -1086,13 +1109,20 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // ============================================================
   // VOLUMEN + REPLAYGAIN
   // ============================================================
+  //
+  // El slider de la UI refleja SIEMPRE el volumen de usuario
+  // (_userVolume a través de _volumeNotifier), NUNCA el volumen
+  // efectivo del player. ReplayGain se aplica por debajo como un
+  // multiplicador transparente que no toca el notifier.
 
   @override
   Future<void> setVolume(double volume) async {
     final v = volume.clamp(0.0, 1.0);
-    _volume = v;
     _userVolume = v;
+    _volume = v; // alias de compatibilidad
+    // El slider refleja el volumen de usuario, NO el efectivo.
     _volumeNotifier.value = v;
+    // Aplica al player el efectivo = user * linear(RG).
     _applyEffectiveVolume();
   }
 
@@ -1101,7 +1131,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _applyEffectiveVolume();
   }
 
-  /// Volumen efectivo = volumen usuario * ganancia lineal de ReplayGain.
+  /// Volumen efectivo = volumen usuario × ganancia lineal de ReplayGain.
+  /// NO toca _userVolume ni _volumeNotifier.
   void _applyEffectiveVolume() {
     final linear = _replayGainDb == 0
         ? 1.0
