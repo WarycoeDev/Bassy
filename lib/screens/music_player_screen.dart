@@ -1663,29 +1663,26 @@ class _EffectsSheet extends StatelessWidget {
                                       ],
                                     ),
                                     SliderTheme(
-                                      data:
-                                          SliderTheme.of(context).copyWith(
-                                        trackHeight: 2,
-                                        thumbShape:
-                                            const RoundSliderThumbShape(
-                                          enabledThumbRadius: 6,
-                                        ),
-                                        overlayShape:
-                                            const RoundSliderOverlayShape(
-                                          overlayRadius: 12,
-                                        ),
-                                      ),
-                                      child: Slider(
-                                        value: v,
-                                        min: 0,
-                                        max: 1,
-                                        divisions: 100,
-                                        onChanged: reverb.isSupported
-                                            ? reverb.setLevel
-                                            : null,
-                                        onChangeEnd: (_) => reverb.persist(),
-                                      ),
-                                    ),
+  data: SliderTheme.of(context).copyWith(
+    trackHeight: 2,
+    thumbShape: const RoundSliderThumbShape(
+      enabledThumbRadius: 6,
+    ),
+    overlayShape: const RoundSliderOverlayShape(
+      overlayRadius: 12,
+    ),
+  ),
+  child: Slider(
+    value: v.clamp(0.0, 0.6),   // <-- clamp visual
+    min: 0,
+    max: 0.6,                   // <-- máximo 60%
+    divisions: 60,              // <-- 60 divisiones (1% c/u)
+    onChanged: reverb.isSupported
+        ? (value) => reverb.setLevel(value)
+        : null,
+    onChangeEnd: (_) => reverb.persist(),
+  ),
+),
                                     if (!reverb.isSupported)
                                       Padding(
                                         padding: const EdgeInsets.only(
