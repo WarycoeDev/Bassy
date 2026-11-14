@@ -1,5 +1,6 @@
 // lib/screens/settings_screen.dart
 import 'dart:async';
+import 'dart:ui' show FontFeature;
 
 import 'package:bassy/widgets/directory_picker_dialog.dart';
 import 'package:flutter/material.dart';
@@ -24,6 +25,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loaded = false;
   Timer? _saveDebounce;
 
+  /// Total de canciones en la biblioteca. Se refresca al cargar settings
+  /// y cuando el análisis cambia el contador (por si la biblioteca creció
+  /// en background mientras Settings estaba abierto).
+  int _libraryTotal = 0;
+
   @override
   void initState() {
     super.initState();
@@ -39,7 +45,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _onRgUpdate() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    _refreshLibraryTotal();
   }
 
   Future<void> _loadSettings() async {
@@ -51,6 +59,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _settings = loaded;
       _loaded = true;
     });
+    _refreshLibraryTotal();
+  }
+
+  void _refreshLibraryTotal() {
+    final total = _allSongsForAnalysis().length;
+    if (total != _libraryTotal) {
+      if (mounted) {
+        setState(() => _libraryTotal = total);
+      } else {
+        _libraryTotal = total;
+      }
+    }
   }
 
   void _persist() {
@@ -84,7 +104,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   /// Devuelve la biblioteca completa para analizar.
-  /// Ajusta a tu fuente real (MediaScanner / LibraryService).
+  /// Usa `MediaScanner.instance.allSongs` (música + podcasts).
   List<Song> _allSongsForAnalysis() {
     try {
       return List<Song>.from(MediaScanner.instance.allSongs);
@@ -99,6 +119,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _showSnack('Escaneando carpeta de música…');
     await MediaScanner.instance.onDirectoryAdded(path, MediaKind.music);
     _showSnack('Carpeta agregada');
+    _refreshLibraryTotal();
   }
 
   Future<void> _removeMusicDir(String path) async {
@@ -106,6 +127,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _persistNow();
     await MediaScanner.instance.onDirectoryRemoved(path);
     _showSnack('Carpeta eliminada');
+    _refreshLibraryTotal();
   }
 
   Future<void> _addPodcastDir(String path) async {
@@ -114,6 +136,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _showSnack('Escaneando carpeta de podcasts…');
     await MediaScanner.instance.onDirectoryAdded(path, MediaKind.podcast);
     _showSnack('Carpeta agregada');
+    _refreshLibraryTotal();
   }
 
   Future<void> _removePodcastDir(String path) async {
@@ -121,7 +144,62 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _persistNow();
     await MediaScanner.instance.onDirectoryRemoved(path);
     _showSnack('Carpeta eliminada');
+    _refreshLibraryTotal();
   }
+
+  // ---------------------------------------------------------------------------
+  // Popup modal de progreso ReplayGain (no cancelable)
+  // ---------------------------------------------------------------------------
+
+  /// Muestra un diálogo modal sin cierre posible mientras corre la tarea
+  /// de ReplayGain. Se cierra solo cuando `_rg.task` vuelve a idle.
+  Future<void> _showRgProgressDialog({required bool isClearing}) async {
+    if (!mounted) return;
+
+    final scheme = Theme.of(context).colorScheme;
+    final navigator = Navigator.of(context, rootNavigator: true);
+
+    final route = DialogRoute<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black54,
+      builder: (_) => _RgBlockingProgressDialog(
+        isClearing: isClearing,
+        color: isClearing ? scheme.error : scheme.primary,
+      ),
+    );
+
+    final closed = navigator.push(route);
+
+    await _waitForTaskIdle();
+
+    if (mounted) {
+      navigator.removeRoute(route);
+      unawaited(closed.catchError((_) {}));
+    }
+  }
+
+  /// Completa cuando `_rg.task.value == ReplayGainTask.idle`.
+  Future<void> _waitForTaskIdle() async {
+    if (_rg.task.value == ReplayGainTask.idle) return;
+    final completer = Completer<void>();
+    void listener() {
+      if (_rg.task.value == ReplayGainTask.idle && !completer.isCompleted) {
+        completer.complete();
+      }
+    }
+
+    _rg.task.addListener(listener);
+    try {
+      await completer.future;
+    } finally {
+      _rg.task.removeListener(listener);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Build
+  // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -275,121 +353,268 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // ReplayGain
+  // ---------------------------------------------------------------------------
+
   Widget _buildReplayGainGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final enabled = _settings.replayGainEnabled;
-    final analyzing = _rg.task.value == ReplayGainTask.analyzing;
+    final task = _rg.task.value;
+    final analyzing = task == ReplayGainTask.analyzing;
+    final clearing = task == ReplayGainTask.clearing;
+    final count = _rg.analyzedCount.value;
+    final total = _libraryTotal;
+    final analyzedDisplay = total > 0 ? '$count / $total' : '$count';
+    final progress = _rg.progress.value.clamp(0.0, 1.0);
 
     return Container(
       decoration: BoxDecoration(
         color: scheme.surfaceContainer,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: scheme.outlineVariant.withOpacity(0.35),
+        ),
       ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _SettingItem(
-            icon: Icons.volume_up,
-            title: 'ReplayGain',
-            subtitle: enabled
-                ? 'Pistas analizadas: ${_rg.analyzedCount.value}'
-                : 'Normalizar el volumen entre pistas',
-            trailing: Switch(
-              value: enabled,
-              onChanged: (v) {
-                _update((s) => s.replayGainEnabled = v);
-                _rg.setEnabled(v);
-              },
-            ),
-          ),
-          if (enabled) ...[
-            _divider(context),
-            if (analyzing)
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    LinearProgressIndicator(value: _rg.progress.value),
-                    const SizedBox(height: 6),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Analizando… '
-                            '${(_rg.progress.value * 100).toStringAsFixed(0)}%',
-                            style: TextStyle(
-                              color: scheme.onSurfaceVariant,
-                              fontSize: 12,
-                            ),
+          // -------- Cabecera: icono + título + switch --------
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 12, 12),
+            child: Row(
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: enabled
+                        ? scheme.primary.withOpacity(0.12)
+                        : scheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.graphic_eq_rounded,
+                    color: enabled ? scheme.primary : scheme.onSurfaceVariant,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'ReplayGain',
+                        style: TextStyle(
+                          color: scheme.onSurface,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 180),
+                        child: Text(
+                          enabled
+                              ? (count > 0
+                                  ? '$count pista${count == 1 ? '' : 's'} analizada${count == 1 ? '' : 's'}'
+                                  : 'Activado · sin pistas analizadas')
+                              : 'Normaliza el volumen entre pistas',
+                          key: ValueKey('$enabled-$count'),
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 12,
                           ),
                         ),
-                        TextButton(
-                          onPressed: _rg.cancelAnalysis,
-                          child: const Text('Cancelar'),
-                        ),
-                      ],
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
-              )
-            else ...[
-              _ActionButton(
-                icon: Icons.playlist_add_check,
-                title: 'Analizar canciones',
-                subtitle: 'Calcular ReplayGain de pistas sin analizar',
-                onTap: () async {
-                  final songs = _allSongsForAnalysis();
-                  if (songs.isEmpty) {
-                    _showSnack('No hay canciones en la biblioteca');
-                    return;
-                  }
-                  await _rg.analyzeMissing(songs);
-                  if (!mounted) return;
-                  _showSnack(
-                    'Análisis completado '
-                    '(${_rg.analyzedCount.value} pistas)',
-                  );
-                },
+                Switch(
+                  value: enabled,
+                  onChanged: (v) {
+                    _update((s) => s.replayGainEnabled = v);
+                    _rg.setEnabled(v);
+                  },
+                ),
+              ],
+            ),
+          ),
+
+          // -------- Stat chips --------
+          if (enabled)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+              child: Row(
+                children: [
+                  _RgStatChip(
+                    icon: Icons.library_music_outlined,
+                    label: 'Analizadas',
+                    value: analyzedDisplay,
+                    highlighted: count > 0,
+                  ),
+                  const SizedBox(width: 8),
+                  _RgStatChip(
+                    icon: task == ReplayGainTask.analyzing
+                        ? Icons.hourglass_top
+                        : task == ReplayGainTask.clearing
+                            ? Icons.delete_sweep_outlined
+                            : Icons.check_circle_outline,
+                    label: 'Estado',
+                    value: switch (task) {
+                      ReplayGainTask.analyzing =>
+                        '${(progress * 100).toStringAsFixed(0)}%',
+                      ReplayGainTask.clearing => 'Borrando',
+                      ReplayGainTask.idle => count > 0 ? 'Listo' : 'Sin datos',
+                    },
+                    highlighted: task == ReplayGainTask.analyzing,
+                  ),
+                ],
               ),
-              _divider(context),
-              _ActionButton(
-                icon: Icons.refresh,
-                title: 'Recalcular todo',
-                subtitle: 'Volver a analizar la biblioteca completa',
-                onTap: () async {
-                  final songs = _allSongsForAnalysis();
-                  if (songs.isEmpty) {
-                    _showSnack('No hay canciones en la biblioteca');
-                    return;
-                  }
-                  await _rg.analyzeAll(songs);
-                  if (!mounted) return;
-                  _showSnack(
-                    'Recálculo completado '
-                    '(${_rg.analyzedCount.value} pistas)',
-                  );
-                },
+            ),
+
+          // -------- Fila única de acciones --------
+          if (enabled) ...[
+            _divider(context),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
+              child: Row(
+                children: [
+                  // Acción principal: Analizar
+                  Expanded(
+                    child: InkWell(
+                      onTap: (analyzing || clearing)
+                          ? null
+                          : () async {
+                              final songs = _allSongsForAnalysis();
+                              if (songs.isEmpty) {
+                                _showSnack(
+                                  'No hay canciones en la biblioteca',
+                                );
+                                return;
+                              }
+                              unawaited(
+                                _showRgProgressDialog(isClearing: false),
+                              );
+                              await _rg.analyzeMissing(songs);
+                              if (!mounted) return;
+                              _showSnack(
+                                'Análisis completado '
+                                '(${_rg.analyzedCount.value} pistas)',
+                              );
+                            },
+                      borderRadius: BorderRadius.circular(12),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 8,
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 40,
+                              height: 40,
+                              decoration: BoxDecoration(
+                                color: scheme.primary.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Icon(
+                                Icons.playlist_add_check_rounded,
+                                color: scheme.primary,
+                                size: 20,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Analizar canciones',
+                                    style: TextStyle(
+                                      color: scheme.onSurface,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 14,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    'Pistas sin analizar',
+                                    style: TextStyle(
+                                      color: scheme.onSurfaceVariant,
+                                      fontSize: 12,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(width: 4),
+
+                  // IconButton: Recalcular todo (solo si hay registros)
+                  _RgIconButton(
+                    icon: Icons.refresh_rounded,
+                    tooltip: count == 0
+                        ? 'Primero analiza algunas pistas'
+                        : 'Recalcular todo',
+                    color: scheme.tertiary,
+                    enabled: !(analyzing || clearing) && count > 0,
+                    onTap: () async {
+                      final songs = _allSongsForAnalysis();
+                      if (songs.isEmpty) {
+                        _showSnack('No hay canciones en la biblioteca');
+                        return;
+                      }
+                      unawaited(
+                        _showRgProgressDialog(isClearing: false),
+                      );
+                      await _rg.analyzeAll(songs);
+                      if (!mounted) return;
+                      _showSnack(
+                        'Recálculo completado '
+                        '(${_rg.analyzedCount.value} pistas)',
+                      );
+                    },
+                  ),
+
+                  const SizedBox(width: 4),
+
+                  // IconButton: Borrar registros
+                  _RgIconButton(
+                    icon: Icons.delete_outline_rounded,
+                    tooltip: 'Borrar registros',
+                    color: scheme.error,
+                    enabled: !(analyzing || clearing) && count > 0,
+                    onTap: () async {
+                      unawaited(
+                        _showRgProgressDialog(isClearing: true),
+                      );
+                      await _rg.clearAll();
+                      if (!mounted) return;
+                      _showSnack('Registros borrados');
+                    },
+                  ),
+                ],
               ),
-              _divider(context),
-              _ActionButton(
-                icon: Icons.delete_outline,
-                title: 'Borrar registros',
-                subtitle:
-                    'Eliminar ${_rg.analyzedCount.value} registros guardados',
-                destructive: true,
-                onTap: () async {
-                  await _rg.clearAll();
-                  if (!mounted) return;
-                  _showSnack('Registros borrados');
-                },
-              ),
-            ],
+            ),
           ],
         ],
       ),
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Reproducción
+  // ---------------------------------------------------------------------------
 
   Widget _buildPlaybackGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -565,6 +790,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Almacenamiento
+  // ---------------------------------------------------------------------------
+
   Widget _buildStorageGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
@@ -716,8 +945,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Expanded(
                       child: Text(
                         dir,
-                        style:
-                            TextStyle(color: scheme.onSurface, fontSize: 12),
+                        style: TextStyle(
+                          color: scheme.onSurface,
+                          fontSize: 12,
+                        ),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -763,6 +994,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ],
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Diálogos / helpers
+  // ---------------------------------------------------------------------------
 
   Future<void> _pickDirectory(
     BuildContext context, {
@@ -913,6 +1148,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Widgets auxiliares
+// ---------------------------------------------------------------------------
 
 class _SettingItem extends StatelessWidget {
   final IconData icon;
@@ -1095,71 +1334,251 @@ class _TransitionChip extends StatelessWidget {
   }
 }
 
-class _ActionButton extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool destructive;
-  final VoidCallback onTap;
+// ---------------------------------------------------------------------------
+// ReplayGain widgets
+// ---------------------------------------------------------------------------
 
-  const _ActionButton({
+class _RgStatChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final bool highlighted;
+
+  const _RgStatChip({
     required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-    this.destructive = false,
+    required this.label,
+    required this.value,
+    this.highlighted = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final iconColor = destructive ? scheme.error : scheme.primary;
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    final accent = highlighted ? scheme.primary : scheme.onSurfaceVariant;
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(10),
+        ),
         child: Row(
           children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(icon, color: iconColor, size: 20),
-            ),
-            const SizedBox(width: 12),
+            Icon(icon, size: 16, color: accent),
+            const SizedBox(width: 8),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    title,
+                    label,
                     style: TextStyle(
-                      color: destructive ? scheme.error : scheme.onSurface,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.2,
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 2),
                   Text(
-                    subtitle,
+                    value,
                     style: TextStyle(
-                      color: scheme.onSurfaceVariant,
-                      fontSize: 12,
+                      color: scheme.onSurface,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
             ),
-            Icon(Icons.chevron_right, color: scheme.onSurfaceVariant, size: 20),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _RgIconButton extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final Color color;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _RgIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.color,
+    required this.onTap,
+    this.enabled = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final effectiveColor = enabled ? color : scheme.onSurfaceVariant;
+
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          borderRadius: BorderRadius.circular(12),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: enabled
+                  ? effectiveColor.withOpacity(0.10)
+                  : scheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              icon,
+              size: 20,
+              color: enabled
+                  ? effectiveColor
+                  : scheme.onSurfaceVariant.withOpacity(0.5),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RgBlockingProgressDialog extends StatelessWidget {
+  final bool isClearing;
+  final Color color;
+
+  const _RgBlockingProgressDialog({
+    required this.isClearing,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return PopScope(
+      canPop: false,
+      child: AnimatedBuilder(
+        animation: ReplayGainService.instance,
+        builder: (context, _) {
+          final rg = ReplayGainService.instance;
+          final progress = rg.progress.value.clamp(0.0, 1.0);
+          final pct = isClearing ? null : (progress * 100).toStringAsFixed(0);
+
+          return Dialog(
+            backgroundColor: scheme.surfaceContainerHigh,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            insetPadding: const EdgeInsets.symmetric(
+              horizontal: 32,
+              vertical: 24,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: color.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(
+                          isClearing
+                              ? Icons.delete_sweep_outlined
+                              : Icons.auto_awesome,
+                          color: color,
+                          size: 22,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              isClearing
+                                  ? 'Borrando registros'
+                                  : 'Analizando ReplayGain',
+                              style: TextStyle(
+                                color: scheme.onSurface,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              isClearing
+                                  ? 'Eliminando datos guardados…'
+                                  : 'No cierres la app. Esto puede tardar…',
+                              style: TextStyle(
+                                color: scheme.onSurfaceVariant,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      value: isClearing ? null : progress,
+                      minHeight: 8,
+                      backgroundColor: color.withOpacity(0.15),
+                      valueColor: AlwaysStoppedAnimation<Color>(color),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        isClearing
+                            ? 'Eliminando…'
+                            : (progress < 1.0
+                                ? 'Procesando pistas…'
+                                : 'Finalizando…'),
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 12,
+                        ),
+                      ),
+                      if (pct != null)
+                        Text(
+                          '$pct%',
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
