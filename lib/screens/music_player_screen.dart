@@ -61,12 +61,30 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
 
   /// Menú de efectos de sonido (placeholder) usando el estilo global
   /// de [ActionMenu].
-  Future<void> _showEffectsMenu(BuildContext context) async {
-  await showModalBottomSheet<void>(
+ /// Menú de efectos de sonido flotante centrado en pantalla,
+/// con el estilo visual de [ActionMenu].
+Future<void> _showEffectsMenu(BuildContext context) async {
+  await showGeneralDialog<void>(
     context: context,
-    showDragHandle: true,
-    isScrollControlled: true,
-    builder: (_) => const _EffectsSheet(),
+    barrierDismissible: true,
+    barrierLabel: 'Efectos de sonido',
+    barrierColor: Colors.black.withValues(alpha: 0.5),
+    transitionDuration: const Duration(milliseconds: 220),
+    pageBuilder: (_, __, ___) => const SizedBox.shrink(),
+    transitionBuilder: (ctx, animation, _, __) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      );
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.92, end: 1.0).animate(curved),
+          child: const Center(child: _EffectsSheet()),
+        ),
+      );
+    },
   );
 }
 
@@ -1488,68 +1506,290 @@ class _EffectsSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final reverb = ReverbService.instance;
+    final screenHeight = MediaQuery.of(context).size.height;
 
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Efectos de sonido',
-                style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 20),
-            ValueListenableBuilder<double>(
-              valueListenable: reverb.level,
-              builder: (context, v, _) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    return Padding(
+      // Margen para que la tarjeta no toque los bordes en pantallas chicas.
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: 420,                    // ancho máximo tipo "tarjeta"
+          maxHeight: screenHeight * 0.6,    // ~media pantalla
+        ),
+        child: Material(
+          color: scheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(20),
+          clipBehavior: Clip.antiAlias,
+          elevation: 6,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ---------- Header (igual que ActionMenu) ----------
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 8, 8, 0),
+                child: Row(
                   children: [
-                    Row(
-                      children: [
-                        Icon(Icons.waves_rounded, color: scheme.primary),
-                        const SizedBox(width: 12),
-                        const Expanded(
-                          child: Text('Reverb',
-                              style: TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.w600)),
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 48,
+                              height: 48,
+                              decoration: BoxDecoration(
+                                color: scheme.surfaceContainerHigh,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Icon(
+                                Icons.headphones_rounded,
+                                color: scheme.onSurfaceVariant,
+                                size: 24,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    'Efectos de sonido',
+                                    style: TextStyle(
+                                      color: scheme.onSurface,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 16,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    'Ajustá el procesamiento de audio',
+                                    style: TextStyle(
+                                      color: scheme.onSurfaceVariant,
+                                      fontSize: 13,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
-                        Text(
-                          v <= 0.001 ? 'Apagado' : '${(v * 100).round()}%',
-                          style: TextStyle(color: scheme.onSurfaceVariant),
-                        ),
-                      ],
+                      ),
                     ),
-                    Slider(
-                      value: v,
-                      min: 0,
-                      max: 1,
-                      divisions: 100,
-                      onChanged: reverb.isSupported ? reverb.setLevel : null,
-                      onChangeEnd: (_) => reverb.persist(),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      iconSize: 20,
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Cerrar',
+                      onPressed: () => Navigator.pop(context),
                     ),
-                    if (!reverb.isSupported)
-                      Text('No disponible en esta plataforma',
-                          style: TextStyle(
-                              color: scheme.onSurfaceVariant, fontSize: 12)),
                   ],
-                );
-              },
-            ),
-            const SizedBox(height: 8),
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              enabled: false,
-              leading: Icon(Icons.graphic_eq_rounded),
-              title: Text('Ecualizador'),
-            ),
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              enabled: false,
-              leading: Icon(Icons.surround_sound_rounded),
-              title: Text('Bass Boost'),
-            ),
-          ],
+                ),
+              ),
+              const SizedBox(height: 4),
+              // ---------- Bloque de acciones (scrollable) ----------
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 8),
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainer,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Material(
+                      color: Colors.transparent,
+                      clipBehavior: Clip.antiAlias,
+                      borderRadius: BorderRadius.circular(16),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // ---- Reverb (activo) ----
+                          ValueListenableBuilder<double>(
+                            valueListenable: reverb.level,
+                            builder: (context, v, _) {
+                              return Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  12,
+                                  12,
+                                  12,
+                                  4,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Icon(
+                                          Icons.waves_rounded,
+                                          color: reverb.isSupported
+                                              ? scheme.onSurface
+                                              : scheme.onSurface.withValues(
+                                                  alpha: 0.38,
+                                                ),
+                                          size: 22,
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Text(
+                                            'Reverb',
+                                            style: TextStyle(
+                                              color: reverb.isSupported
+                                                  ? scheme.onSurface
+                                                  : scheme.onSurface
+                                                      .withValues(alpha: 0.38),
+                                              fontSize: 15,
+                                            ),
+                                          ),
+                                        ),
+                                        Text(
+                                          v <= 0.001
+                                              ? 'Apagado'
+                                              : '${(v * 100).round()}%',
+                                          style: TextStyle(
+                                            color: scheme.onSurfaceVariant,
+                                            fontSize: 13,
+                                            fontFeatures: const [
+                                              FontFeature.tabularFigures(),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    SliderTheme(
+                                      data:
+                                          SliderTheme.of(context).copyWith(
+                                        trackHeight: 2,
+                                        thumbShape:
+                                            const RoundSliderThumbShape(
+                                          enabledThumbRadius: 6,
+                                        ),
+                                        overlayShape:
+                                            const RoundSliderOverlayShape(
+                                          overlayRadius: 12,
+                                        ),
+                                      ),
+                                      child: Slider(
+                                        value: v,
+                                        min: 0,
+                                        max: 1,
+                                        divisions: 100,
+                                        onChanged: reverb.isSupported
+                                            ? reverb.setLevel
+                                            : null,
+                                        onChangeEnd: (_) => reverb.persist(),
+                                      ),
+                                    ),
+                                    if (!reverb.isSupported)
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          left: 34,
+                                          top: 2,
+                                        ),
+                                        child: Text(
+                                          'No disponible en esta plataforma',
+                                          style: TextStyle(
+                                            color: scheme.onSurfaceVariant,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                          Divider(
+                            height: 1,
+                            indent: 52,
+                            color: scheme.outlineVariant
+                                .withValues(alpha: 0.5),
+                          ),
+                          // ---- Ecualizador (deshabilitado) ----
+                          ListTile(
+                            enabled: false,
+                            leading: Icon(
+                              Icons.graphic_eq_rounded,
+                              color: scheme.onSurface.withValues(alpha: 0.38),
+                            ),
+                            title: Text(
+                              'Ecualizador',
+                              style: TextStyle(
+                                color:
+                                    scheme.onSurface.withValues(alpha: 0.38),
+                                fontSize: 15,
+                              ),
+                            ),
+                            contentPadding:
+                                const EdgeInsets.symmetric(horizontal: 12),
+                            visualDensity: VisualDensity.standard,
+                          ),
+                          Divider(
+                            height: 1,
+                            indent: 52,
+                            color: scheme.outlineVariant
+                                .withValues(alpha: 0.5),
+                          ),
+                          // ---- Bass Boost (deshabilitado) ----
+                          ListTile(
+                            enabled: false,
+                            leading: Icon(
+                              Icons.surround_sound_rounded,
+                              color: scheme.onSurface.withValues(alpha: 0.38),
+                            ),
+                            title: Text(
+                              'Bass Boost',
+                              style: TextStyle(
+                                color:
+                                    scheme.onSurface.withValues(alpha: 0.38),
+                                fontSize: 15,
+                              ),
+                            ),
+                            contentPadding:
+                                const EdgeInsets.symmetric(horizontal: 12),
+                            visualDensity: VisualDensity.standard,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              // ---------- Botón inferior ("Listo") ----------
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                child: Material(
+                  color: scheme.surfaceContainer,
+                  borderRadius: BorderRadius.circular(16),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () => Navigator.pop(context),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      child: Center(
+                        child: Text(
+                          'Listo',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: scheme.primary,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 15,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
