@@ -9,6 +9,7 @@ import '../models/song.dart';
 import '../services/favorites_store.dart';
 import '../services/playback_audio_handler.dart' show PlayerRepeatMode;
 import '../services/playback_controller.dart';
+import '../widgets/action_menu.dart';
 import '../widgets/queue_viewer.dart';
 
 String _fmt(Duration d) {
@@ -57,6 +58,45 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
     setState(() => _seekValue = null);
   }
 
+  /// Menú de efectos de sonido (placeholder) usando el estilo global
+  /// de [ActionMenu].
+  Future<void> _showEffectsMenu(BuildContext context) async {
+    final song = _controller.currentSong;
+    await ActionMenu.show(
+      context,
+      title: 'Efectos de sonido',
+      subtitle: song?.title ?? 'Ajustes de audio',
+      coverPath: song?.coverPath,
+      fallbackIcon: Icons.headphones_rounded,
+      actions: [
+        ActionMenuItem(
+          icon: Icons.graphic_eq_rounded,
+          label: 'Ecualizador',
+          enabled: false,
+          onTap: () {
+            // TODO: abrir ecualizador
+          },
+        ),
+        ActionMenuItem(
+          icon: Icons.waves_rounded,
+          label: 'Reverb',
+          enabled: false,
+          onTap: () {
+            // TODO: abrir reverb
+          },
+        ),
+        ActionMenuItem(
+          icon: Icons.surround_sound_rounded,
+          label: 'Bass Boost',
+          enabled: false,
+          onTap: () {
+            // TODO: abrir bass boost
+          },
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -99,8 +139,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                   onSeekStart: (v) => setState(() => _seekValue = v),
                   onSeekChanged: (v) => setState(() => _seekValue = v),
                   onSeekEnd: _onSeekEnd,
-                  onVolumeStart: (v) =>
-                      setState(() => _volumeValue = v),
+                  onVolumeStart: (v) => setState(() => _volumeValue = v),
                   onVolumeChanged: (v) {
                     setState(() => _volumeValue = v);
                     if (v > 0.001) {
@@ -108,10 +147,9 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                     }
                     _controller.setVolume(v);
                   },
-                  onVolumeEnd: (_) =>
-                      setState(() => _volumeValue = null),
-                  onVolumeUpdateLast: (v) =>
-                      _lastNonZeroVolume = v,
+                  onVolumeEnd: (_) => setState(() => _volumeValue = null),
+                  onVolumeUpdateLast: (v) => _lastNonZeroVolume = v,
+                  onShowEffects: () => _showEffectsMenu(context),
                 );
               }
 
@@ -127,8 +165,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                 onSeekStart: (v) => setState(() => _seekValue = v),
                 onSeekChanged: (v) => setState(() => _seekValue = v),
                 onSeekEnd: _onSeekEnd,
-                onVolumeStart: (v) =>
-                    setState(() => _volumeValue = v),
+                onVolumeStart: (v) => setState(() => _volumeValue = v),
                 onVolumeChanged: (v) {
                   setState(() => _volumeValue = v);
                   if (v > 0.001) {
@@ -138,6 +175,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                 },
                 onVolumeEnd: (_) => setState(() => _volumeValue = null),
                 onVolumeUpdateLast: (v) => _lastNonZeroVolume = v,
+                onShowEffects: () => _showEffectsMenu(context),
               );
             },
           );
@@ -166,6 +204,7 @@ class _MobileLayout extends StatelessWidget {
   final ValueChanged<double> onVolumeChanged;
   final ValueChanged<double> onVolumeEnd;
   final ValueChanged<double> onVolumeUpdateLast;
+  final VoidCallback onShowEffects;
 
   const _MobileLayout({
     required this.song,
@@ -183,6 +222,7 @@ class _MobileLayout extends StatelessWidget {
     required this.onVolumeChanged,
     required this.onVolumeEnd,
     required this.onVolumeUpdateLast,
+    required this.onShowEffects,
   });
 
   @override
@@ -267,6 +307,7 @@ class _MobileLayout extends StatelessWidget {
                         song: song,
                         scheme: scheme,
                         onShowQueue: () => QueueViewer.show(context),
+                        onShowEffects: onShowEffects,
                         // Móvil: favoritos sigue en la fila inferior.
                         showFavorites: true,
                       ),
@@ -303,6 +344,7 @@ class _DesktopLayout extends StatelessWidget {
   final ValueChanged<double> onVolumeChanged;
   final ValueChanged<double> onVolumeEnd;
   final ValueChanged<double> onVolumeUpdateLast;
+  final VoidCallback onShowEffects;
 
   const _DesktopLayout({
     required this.song,
@@ -320,6 +362,7 @@ class _DesktopLayout extends StatelessWidget {
     required this.onVolumeChanged,
     required this.onVolumeEnd,
     required this.onVolumeUpdateLast,
+    required this.onShowEffects,
   });
 
   @override
@@ -395,7 +438,7 @@ class _DesktopLayout extends StatelessWidget {
                               onUpdateLast: onVolumeUpdateLast,
                             ),
                             // En escritorio ya no hay fila inferior:
-                            //  - Favoritos → sobre la carátula
+                            //  - Favoritos y Efectos → sobre la carátula
                             //  - Ver Cola → panel lateral siempre visible
                           ],
                         ),
@@ -449,7 +492,7 @@ class _DesktopLayout extends StatelessWidget {
             child: cover,
           );
 
-    // Stack: cover + botón de favoritos en la esquina superior derecha.
+    // Stack: cover + favoritos (arriba-derecha) + efectos (arriba-izquierda).
     return SizedBox(
       width: coverSize,
       height: coverSize,
@@ -460,6 +503,15 @@ class _DesktopLayout extends StatelessWidget {
             top: 10,
             right: 10,
             child: _CoverFavoriteButton(song: song),
+          ),
+          Positioned(
+            top: 10,
+            left: 10,
+            child: _CoverOverlayIconButton(
+              icon: Icons.headphones_rounded,
+              tooltip: 'Efectos de sonido',
+              onPressed: onShowEffects,
+            ),
           ),
         ],
       ),
@@ -673,8 +725,7 @@ class _VolumeRow extends StatelessWidget {
       valueListenable: controller.volume,
       builder: (context, streamVolume, _) {
         final safeStream = streamVolume.clamp(0.0, 1.0);
-        final volume =
-            isAdjustingVolume ? volumeValue! : safeStream;
+        final volume = isAdjustingVolume ? volumeValue! : safeStream;
         final muted = volume <= 0.001;
         final icon = muted
             ? Icons.volume_off_rounded
@@ -728,25 +779,27 @@ class _VolumeRow extends StatelessWidget {
 }
 
 // ============================================================
-// FILA DE BOTONES INFERIORES (favoritos + ver cola opcional)
+// FILA DE BOTONES INFERIORES (favoritos + ver cola + efectos)
 // ============================================================
 class _BottomButtonsRow extends StatelessWidget {
   final Song song;
   final ColorScheme scheme;
   final VoidCallback? onShowQueue;
+  final VoidCallback? onShowEffects;
   final bool showFavorites;
 
   const _BottomButtonsRow({
     required this.song,
     required this.scheme,
     required this.onShowQueue,
+    this.onShowEffects,
     this.showFavorites = true,
   });
 
   @override
   Widget build(BuildContext context) {
     // Si no hay nada que mostrar, no pintamos la fila vacía.
-    if (!showFavorites && onShowQueue == null) {
+    if (!showFavorites && onShowQueue == null && onShowEffects == null) {
       return const SizedBox.shrink();
     }
 
@@ -774,7 +827,7 @@ class _BottomButtonsRow extends StatelessWidget {
               );
             },
           ),
-        if (showFavorites && onShowQueue != null)
+        if (showFavorites && (onShowQueue != null || onShowEffects != null))
           const SizedBox(width: 12),
         if (onShowQueue != null)
           _LabeledButton(
@@ -783,6 +836,16 @@ class _BottomButtonsRow extends StatelessWidget {
             scheme: scheme,
             onPressed: onShowQueue!,
           ),
+        // Efectos de sonido (a la derecha de "Ver Cola")
+        if (onShowEffects != null) ...[
+          if (onShowQueue != null) const SizedBox(width: 12),
+          _AnimatedRoundIconButton(
+            icon: Icons.headphones_rounded,
+            tooltip: 'Efectos de sonido',
+            scheme: scheme,
+            onPressed: onShowEffects!,
+          ),
+        ],
       ],
     );
   }
@@ -851,6 +914,52 @@ class _CoverFavoriteButton extends StatelessWidget {
     );
   }
 }
+
+// ============================================================
+// BOTÓN DE ICONO SOBREPUESTO EN LA CARÁTULA
+// (efectos de sonido en escritorio)
+// ============================================================
+class _CoverOverlayIconButton extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  const _CoverOverlayIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onPressed,
+        customBorder: const CircleBorder(),
+        child: Tooltip(
+          message: tooltip,
+          child: Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.black.withValues(alpha: 0.28),
+            ),
+            child: Icon(
+              icon,
+              color: Colors.white,
+              size: 20,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ============================================================
 // CARÁTULA ANIMADA (cross-fade + scale al cambiar de canción)
 // ============================================================
@@ -1275,7 +1384,7 @@ class _AnimatedIconButton extends StatelessWidget {
 }
 
 // ============================================================
-// BOTÓN REDONDO ANIMADO (solo icono) — Favoritos
+// BOTÓN REDONDO ANIMADO (solo icono) — Favoritos / Efectos
 // ============================================================
 class _AnimatedRoundIconButton extends StatelessWidget {
   final IconData icon;
