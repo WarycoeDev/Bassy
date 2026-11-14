@@ -50,6 +50,16 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Duration _duration = Duration.zero;
   double _speed = 1.0;
 
+  // ----- Slowed (ralentiza + baja el tono, como un disco frenado) -----
+  /// Factor de velocidad del efecto: 1.0 = apagado, 0.6 = más lento y grave.
+  double _slowed = 1.0;
+  final ValueNotifier<double> _slowedNotifier = ValueNotifier<double>(1.0);
+
+  static const double kMinSlowed = 0.6;
+
+  /// Velocidad real aplicada a las voces (velocidad normal × slowed).
+  double get _effectiveSpeed => _speed * _slowed;
+
   List<MediaControl>? _lastControls;
   List<int>? _lastCompactActionIndices;
   String? _lastMediaItemKey;
@@ -214,6 +224,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get isPlaying => _playing;
   double get playerSpeed => _speed;
 
+  /// Factor de Slowed actual (1.0 = apagado).
+  double get slowed => _slowed;
+  ValueListenable<double> get slowedListenable => _slowedNotifier;
+
   /// Volumen del usuario (0..1). NO incluye RG ni boost.
   double get volume => _userVolume;
   ValueListenable<double> get volumeListenable => _volumeNotifier;
@@ -316,7 +330,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   double _computeFadeFactor(Duration position, Duration? duration) {
     if (!_transitionsEnabled || _transitionMode != 1) return 1.0;
 
-    var fadeMs = (_fadeSeconds * 1000 * _speed).round();
+    var fadeMs = (_fadeSeconds * 1000 * _effectiveSpeed).round();
     if (fadeMs <= 0) return 1.0;
 
     final hasDur = duration != null && duration > Duration.zero;
@@ -473,17 +487,36 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  /// Aplica la velocidad efectiva (velocidad × slowed) a las voces activas.
+  void _applySpeedToVoices() {
+    final s = _effectiveSpeed;
+    try {
+      final h = _handle;
+      if (h != null && _isValid(h)) _soloud.setRelativePlaySpeed(h, s);
+      final nh = _nextHandle;
+      if (nh != null && _isValid(nh)) _soloud.setRelativePlaySpeed(nh, s);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: setRelativePlaySpeed falló -> $e');
+    }
+  }
+
   Future<void> setSpeed(double speed) async {
     if (speed <= 0) return;
     _speed = speed;
-    try {
-      final h = _handle;
-      if (h != null && _isValid(h)) _soloud.setRelativePlaySpeed(h, speed);
-      final nh = _nextHandle;
-      if (nh != null && _isValid(nh)) _soloud.setRelativePlaySpeed(nh, speed);
-    } catch (e) {
-      debugPrint('PlaybackAudioHandler: setSpeed falló -> $e');
-    }
+    _applySpeedToVoices();
+    _publish();
+  }
+
+  /// Efecto Slowed: [factor] 1.0 = apagado, [kMinSlowed]..1.0 = más lento
+  /// y más grave (velocidad y tono van juntos).
+  Future<void> setSlowed(double factor) async {
+    final v = factor.clamp(kMinSlowed, 1.0).toDouble();
+    if ((v - _slowed).abs() < 0.0005) return;
+    _slowed = v;
+    _slowedNotifier.value = v;
+    // La ventana de crossfade depende de la velocidad: se recalcula.
+    _cancelCrossfade();
+    _applySpeedToVoices();
     _publish();
   }
 
@@ -492,7 +525,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // ============================================================
 
   int _xfWindowMs() => math.min(
-        (_crossfadeSeconds * 1000 * _speed).round(),
+        (_crossfadeSeconds * 1000 * _effectiveSpeed).round(),
         _duration.inMilliseconds ~/ 2,
       );
 
@@ -593,8 +626,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     try {
       final h = _soloud.play(source, volume: 0.0, paused: true);
-      if ((_speed - 1.0).abs() > 0.0005) {
-        _soloud.setRelativePlaySpeed(h, _speed);
+      if ((_effectiveSpeed - 1.0).abs() > 0.0005) {
+        _soloud.setRelativePlaySpeed(h, _effectiveSpeed);
       }
       final offsetMs = math.min(lateMs, _xfSpanMs);
       if (offsetMs > 150) {
@@ -772,8 +805,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         }
       }
 
-      if ((_speed - 1.0).abs() > 0.0005) {
-        _soloud.setRelativePlaySpeed(handle, _speed);
+      if ((_effectiveSpeed - 1.0).abs() > 0.0005) {
+        _soloud.setRelativePlaySpeed(handle, _effectiveSpeed);
       }
 
       _applyVolume(force: true);
@@ -954,7 +987,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         playing: playing,
         updatePosition: _loading ? Duration.zero : _position,
         bufferedPosition: _loading ? Duration.zero : _duration,
-        speed: _speed,
+        speed: _effectiveSpeed,
         queueIndex:
             _activeQueue.currentIndex >= 0 ? _activeQueue.currentIndex : null,
         repeatMode: _systemRepeatMode,
@@ -1572,6 +1605,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     await _durationCtrl.close();
     await _playingCtrl.close();
     _volumeNotifier.dispose();
+    _slowedNotifier.dispose();
     await _releaseVoice();
     try {
       _soloud.deinit();

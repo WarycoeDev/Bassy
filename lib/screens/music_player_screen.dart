@@ -8,7 +8,8 @@ import 'package:flutter/material.dart';
 
 import '../models/song.dart';
 import '../services/favorites_store.dart';
-import '../services/playback_audio_handler.dart' show PlayerRepeatMode;
+import '../services/playback_audio_handler.dart'
+    show PlayerRepeatMode, PlaybackAudioHandler;
 import '../services/playback_controller.dart';
 import '../widgets/action_menu.dart';
 import '../widgets/queue_viewer.dart';
@@ -1506,15 +1507,21 @@ class _EffectsSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final reverb = ReverbService.instance;
+    final handler = PlaybackController.instance.handler;
     final screenHeight = MediaQuery.of(context).size.height;
 
+    SliderThemeData sliderTheme() => SliderTheme.of(context).copyWith(
+          trackHeight: 2,
+          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+          overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+        );
+
     return Padding(
-      // Margen para que la tarjeta no toque los bordes en pantallas chicas.
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: 420,                    // ancho máximo tipo "tarjeta"
-          maxHeight: screenHeight * 0.6,    // ~media pantalla
+          maxWidth: 420,
+          maxHeight: screenHeight * 0.6,
         ),
         child: Material(
           color: scheme.surfaceContainerLow,
@@ -1525,7 +1532,7 @@ class _EffectsSheet extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ---------- Header (igual que ActionMenu) ----------
+              // ---------- Header ----------
               Padding(
                 padding: const EdgeInsets.fromLTRB(4, 8, 8, 0),
                 child: Row(
@@ -1592,7 +1599,7 @@ class _EffectsSheet extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 4),
-              // ---------- Bloque de acciones (scrollable) ----------
+              // ---------- Bloque de efectos (scrollable) ----------
               Flexible(
                 child: SingleChildScrollView(
                   child: Container(
@@ -1609,41 +1616,29 @@ class _EffectsSheet extends StatelessWidget {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          // ---- Reverb (activo) ----
+                          // ---- Reverb ----
                           ValueListenableBuilder<double>(
                             valueListenable: reverb.level,
                             builder: (context, v, _) {
+                              final textColor = reverb.isSupported
+                                  ? scheme.onSurface
+                                  : scheme.onSurface.withValues(alpha: 0.38);
                               return Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  12,
-                                  12,
-                                  12,
-                                  4,
-                                ),
+                                padding:
+                                    const EdgeInsets.fromLTRB(12, 12, 12, 4),
                                 child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Row(
                                       children: [
-                                        Icon(
-                                          Icons.waves_rounded,
-                                          color: reverb.isSupported
-                                              ? scheme.onSurface
-                                              : scheme.onSurface.withValues(
-                                                  alpha: 0.38,
-                                                ),
-                                          size: 22,
-                                        ),
+                                        Icon(Icons.waves_rounded,
+                                            color: textColor, size: 22),
                                         const SizedBox(width: 12),
                                         Expanded(
                                           child: Text(
                                             'Reverb',
                                             style: TextStyle(
-                                              color: reverb.isSupported
-                                                  ? scheme.onSurface
-                                                  : scheme.onSurface
-                                                      .withValues(alpha: 0.38),
+                                              color: textColor,
                                               fontSize: 15,
                                             ),
                                           ),
@@ -1663,26 +1658,18 @@ class _EffectsSheet extends StatelessWidget {
                                       ],
                                     ),
                                     SliderTheme(
-  data: SliderTheme.of(context).copyWith(
-    trackHeight: 2,
-    thumbShape: const RoundSliderThumbShape(
-      enabledThumbRadius: 6,
-    ),
-    overlayShape: const RoundSliderOverlayShape(
-      overlayRadius: 12,
-    ),
-  ),
-  child: Slider(
-    value: v.clamp(0.0, 0.6),   // <-- clamp visual
-    min: 0,
-    max: 0.6,                   // <-- máximo 60%
-    divisions: 60,              // <-- 60 divisiones (1% c/u)
-    onChanged: reverb.isSupported
-        ? (value) => reverb.setLevel(value)
-        : null,
-    onChangeEnd: (_) => reverb.persist(),
-  ),
-),
+                                      data: sliderTheme(),
+                                      child: Slider(
+                                        value: v.clamp(0.0, 0.6),
+                                        min: 0,
+                                        max: 0.6,
+                                        divisions: 60,
+                                        onChanged: reverb.isSupported
+                                            ? (value) => reverb.setLevel(value)
+                                            : null,
+                                        onChangeEnd: (_) => reverb.persist(),
+                                      ),
+                                    ),
                                     if (!reverb.isSupported)
                                       Padding(
                                         padding: const EdgeInsets.only(
@@ -1705,52 +1692,71 @@ class _EffectsSheet extends StatelessWidget {
                           Divider(
                             height: 1,
                             indent: 52,
-                            color: scheme.outlineVariant
-                                .withValues(alpha: 0.5),
+                            color: scheme.outlineVariant.withValues(alpha: 0.5),
                           ),
-                          // ---- Ecualizador (deshabilitado) ----
-                          ListTile(
-                            enabled: false,
-                            leading: Icon(
-                              Icons.graphic_eq_rounded,
-                              color: scheme.onSurface.withValues(alpha: 0.38),
-                            ),
-                            title: Text(
-                              'Ecualizador',
-                              style: TextStyle(
-                                color:
-                                    scheme.onSurface.withValues(alpha: 0.38),
-                                fontSize: 15,
-                              ),
-                            ),
-                            contentPadding:
-                                const EdgeInsets.symmetric(horizontal: 12),
-                            visualDensity: VisualDensity.standard,
-                          ),
-                          Divider(
-                            height: 1,
-                            indent: 52,
-                            color: scheme.outlineVariant
-                                .withValues(alpha: 0.5),
-                          ),
-                          // ---- Bass Boost (deshabilitado) ----
-                          ListTile(
-                            enabled: false,
-                            leading: Icon(
-                              Icons.surround_sound_rounded,
-                              color: scheme.onSurface.withValues(alpha: 0.38),
-                            ),
-                            title: Text(
-                              'Bass Boost',
-                              style: TextStyle(
-                                color:
-                                    scheme.onSurface.withValues(alpha: 0.38),
-                                fontSize: 15,
-                              ),
-                            ),
-                            contentPadding:
-                                const EdgeInsets.symmetric(horizontal: 12),
-                            visualDensity: VisualDensity.standard,
+                          // ---- Slowed (ralentiza + baja el tono) ----
+                          ValueListenableBuilder<double>(
+                            valueListenable: handler.slowedListenable,
+                            builder: (context, factor, _) {
+                              // Slider en "intensidad": 0 = apagado,
+                              // máx = 1 - kMinSlowed (40% más lento).
+                              const maxAmount =
+                                  1.0 - PlaybackAudioHandler.kMinSlowed;
+                              final amount =
+                                  (1.0 - factor).clamp(0.0, maxAmount);
+                              return Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Icon(
+                                          Icons.slow_motion_video_rounded,
+                                          color: scheme.onSurface,
+                                          size: 22,
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Text(
+                                            'Slowed',
+                                            style: TextStyle(
+                                              color: scheme.onSurface,
+                                              fontSize: 15,
+                                            ),
+                                          ),
+                                        ),
+                                        Text(
+                                          amount <= 0.001
+                                              ? 'Apagado'
+                                              : '${factor.toStringAsFixed(2)}x',
+                                          style: TextStyle(
+                                            color: scheme.onSurfaceVariant,
+                                            fontSize: 13,
+                                            fontFeatures: const [
+                                              FontFeature.tabularFigures(),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    SliderTheme(
+                                      data: sliderTheme(),
+                                      child: Slider(
+                                        value: amount,
+                                        min: 0,
+                                        max: maxAmount,
+                                        divisions: 40,
+                                        onChanged: (value) =>
+                                            handler.setSlowed(1.0 - value),
+                                      ),
+                                    ),
+                                    
+                                  ],
+                                ),
+                              );
+                            },
                           ),
                         ],
                       ),
