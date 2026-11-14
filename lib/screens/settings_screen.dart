@@ -1,11 +1,12 @@
+// lib/screens/settings_screen.dart
 import 'dart:async';
 
 import 'package:bassy/widgets/directory_picker_dialog.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../models/song.dart';
 import '../services/media_scanner.dart';
+import '../services/replay_gain_service.dart';
 import '../services/settings_service.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -17,6 +18,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final _service = SettingsService.instance;
+  final _rg = ReplayGainService.instance;
 
   AppSettings _settings = AppSettings();
   bool _loaded = false;
@@ -25,17 +27,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
+    _rg.addListener(_onRgUpdate);
     _loadSettings();
   }
 
   @override
   void dispose() {
+    _rg.removeListener(_onRgUpdate);
     _saveDebounce?.cancel();
     super.dispose();
   }
 
+  void _onRgUpdate() {
+    if (mounted) setState(() {});
+  }
+
   Future<void> _loadSettings() async {
     final loaded = await _service.load();
+    if (!mounted) return;
+    await _rg.init(enabledInitially: loaded.replayGainEnabled);
     if (!mounted) return;
     setState(() {
       _settings = loaded;
@@ -71,6 +81,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+  }
+
+  /// Devuelve la biblioteca completa para analizar.
+  /// Ajusta a tu fuente real (MediaScanner / LibraryService).
+  List<Song> _allSongsForAnalysis() {
+    try {
+      return List<Song>.from(MediaScanner.instance.allSongs);
+    } catch (_) {
+      return const <Song>[];
+    }
   }
 
   Future<void> _addMusicDir(String path) async {
@@ -258,6 +278,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildReplayGainGroup(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final enabled = _settings.replayGainEnabled;
+    final analyzing = _rg.task.value == ReplayGainTask.analyzing;
 
     return Container(
       decoration: BoxDecoration(
@@ -269,35 +290,101 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _SettingItem(
             icon: Icons.volume_up,
             title: 'ReplayGain',
-            subtitle: 'Normalizar el volumen entre pistas',
+            subtitle: enabled
+                ? 'Pistas analizadas: ${_rg.analyzedCount.value}'
+                : 'Normalizar el volumen entre pistas',
             trailing: Switch(
               value: enabled,
-              onChanged: (v) => _update((s) => s.replayGainEnabled = v),
+              onChanged: (v) {
+                _update((s) => s.replayGainEnabled = v);
+                _rg.setEnabled(v);
+              },
             ),
           ),
           if (enabled) ...[
             _divider(context),
-            _ActionButton(
-              icon: Icons.playlist_add_check,
-              title: 'Analizar canciones',
-              subtitle: 'Calcular ReplayGain de pistas sin analizar',
-              onTap: () {},
-            ),
-            _divider(context),
-            _ActionButton(
-              icon: Icons.refresh,
-              title: 'Recalcular todo',
-              subtitle: 'Volver a analizar la biblioteca completa',
-              onTap: () {},
-            ),
-            _divider(context),
-            _ActionButton(
-              icon: Icons.delete_outline,
-              title: 'Borrar registros',
-              subtitle: 'Eliminar datos de ReplayGain guardados',
-              destructive: true,
-              onTap: () {},
-            ),
+            if (analyzing)
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    LinearProgressIndicator(value: _rg.progress.value),
+                    const SizedBox(height: 6),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Analizando… '
+                            '${(_rg.progress.value * 100).toStringAsFixed(0)}%',
+                            style: TextStyle(
+                              color: scheme.onSurfaceVariant,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: _rg.cancelAnalysis,
+                          child: const Text('Cancelar'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              )
+            else ...[
+              _ActionButton(
+                icon: Icons.playlist_add_check,
+                title: 'Analizar canciones',
+                subtitle: 'Calcular ReplayGain de pistas sin analizar',
+                onTap: () async {
+                  final songs = _allSongsForAnalysis();
+                  if (songs.isEmpty) {
+                    _showSnack('No hay canciones en la biblioteca');
+                    return;
+                  }
+                  await _rg.analyzeMissing(songs);
+                  if (!mounted) return;
+                  _showSnack(
+                    'Análisis completado '
+                    '(${_rg.analyzedCount.value} pistas)',
+                  );
+                },
+              ),
+              _divider(context),
+              _ActionButton(
+                icon: Icons.refresh,
+                title: 'Recalcular todo',
+                subtitle: 'Volver a analizar la biblioteca completa',
+                onTap: () async {
+                  final songs = _allSongsForAnalysis();
+                  if (songs.isEmpty) {
+                    _showSnack('No hay canciones en la biblioteca');
+                    return;
+                  }
+                  await _rg.analyzeAll(songs);
+                  if (!mounted) return;
+                  _showSnack(
+                    'Recálculo completado '
+                    '(${_rg.analyzedCount.value} pistas)',
+                  );
+                },
+              ),
+              _divider(context),
+              _ActionButton(
+                icon: Icons.delete_outline,
+                title: 'Borrar registros',
+                subtitle:
+                    'Eliminar ${_rg.analyzedCount.value} registros guardados',
+                destructive: true,
+                onTap: () async {
+                  await _rg.clearAll();
+                  if (!mounted) return;
+                  _showSnack('Registros borrados');
+                },
+              ),
+            ],
           ],
         ],
       ),
@@ -453,7 +540,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     min: 0,
                     max: 12,
                     divisions: 24,
-                    label: '${_settings.crossfadeSeconds.toStringAsFixed(1)} s',
+                    label:
+                        '${_settings.crossfadeSeconds.toStringAsFixed(1)} s',
                     onChanged: enabled
                         ? (v) => _update((s) => s.crossfadeSeconds = v)
                         : null,
@@ -574,7 +662,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: scheme.surfaceContainerHigh,
                   borderRadius: BorderRadius.circular(10),
@@ -627,7 +716,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Expanded(
                       child: Text(
                         dir,
-                        style: TextStyle(color: scheme.onSurface, fontSize: 12),
+                        style:
+                            TextStyle(color: scheme.onSurface, fontSize: 12),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -675,50 +765,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _pickDirectory(
-  BuildContext context, {
-  required String title,
-  required Future<void> Function(String) onAdded,
-  required List<String> existing,
-}) async {
-  try {
-    final selected = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => DirectoryPickerDialog(
-        title: title,
-        initialPath: existing.isNotEmpty ? existing.first : null,
-      ),
-    );
+    BuildContext context, {
+    required String title,
+    required Future<void> Function(String) onAdded,
+    required List<String> existing,
+  }) async {
+    try {
+      final selected = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => DirectoryPickerDialog(
+          title: title,
+          initialPath: existing.isNotEmpty ? existing.first : null,
+        ),
+      );
 
-    if (selected == null || selected.trim().isEmpty) return;
+      if (selected == null || selected.trim().isEmpty) return;
 
-    final normalized = selected.trim().replaceAll(RegExp(r'/+$'), '');
-    final alreadyExists = existing.any(
-      (d) => d.replaceAll(RegExp(r'/+$'), '') == normalized,
-    );
+      final normalized = selected.trim().replaceAll(RegExp(r'/+$'), '');
+      final alreadyExists = existing.any(
+        (d) => d.replaceAll(RegExp(r'/+$'), '') == normalized,
+      );
 
-    if (alreadyExists) {
+      if (alreadyExists) {
+        if (context.mounted) {
+          await _showInfoDialog(
+            context,
+            title: 'Directorio duplicado',
+            message: 'Esa carpeta ya está en la lista.',
+          );
+        }
+        return;
+      }
+
+      await onAdded(normalized);
+    } catch (e) {
       if (context.mounted) {
         await _showInfoDialog(
           context,
-          title: 'Directorio duplicado',
-          message: 'Esa carpeta ya está en la lista.',
+          title: 'Error',
+          message: 'No se pudo abrir el selector de carpetas:\n$e',
         );
       }
-      return;
-    }
-
-    await onAdded(normalized);
-  } catch (e) {
-    if (context.mounted) {
-      await _showInfoDialog(
-        context,
-        title: 'Error',
-        message: 'No se pudo abrir el selector de carpetas:\n$e',
-      );
     }
   }
-}
 
   Future<void> _showInfoDialog(
     BuildContext context, {

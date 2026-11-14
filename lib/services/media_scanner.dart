@@ -1,3 +1,4 @@
+// lib/services/media_scanner.dart
 import 'dart:async';
 import 'dart:io';
 
@@ -112,6 +113,30 @@ class MediaScanner {
   final List<_FsEvent> _pending = [];
   bool _draining = false;
   bool _watcherStarting = false;
+
+  // ---------------------------------------------------------------------------
+  // API pública de acceso a la biblioteca
+  // ---------------------------------------------------------------------------
+
+  /// Todas las canciones de música, ordenadas.
+  List<Song> get musicSongs => List.unmodifiable(_liveSongs);
+
+  /// Todos los podcasts, ordenados.
+  List<Song> get podcastSongs => List.unmodifiable(_livePodcasts);
+
+  /// Toda la biblioteca (música + podcasts).
+  List<Song> get allSongs => List.unmodifiable(<Song>[
+        ..._liveSongs,
+        ..._livePodcasts,
+      ]);
+
+  /// Biblioteca filtrada por tipo.
+  List<Song> songsOf(MediaKind kind) => List.unmodifiable(
+        kind == MediaKind.music ? _liveSongs : _livePodcasts,
+      );
+
+  /// Errores acumulados del último escaneo.
+  List<String> get errors => List.unmodifiable(_liveErrors);
 
   // ---------------------------------------------------------------------------
   // Orden estable (inserción con búsqueda binaria)

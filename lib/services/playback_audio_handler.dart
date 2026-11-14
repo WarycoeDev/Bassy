@@ -1,6 +1,7 @@
 // lib/services/playback_audio_handler.dart
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
@@ -8,6 +9,7 @@ import 'package:just_audio/just_audio.dart';
 
 import '../models/song.dart';
 import 'playback_queue.dart';
+import 'replay_gain_service.dart';
 
 enum PlayerRepeatMode { off, all, one }
 
@@ -52,6 +54,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   double _volume = 1.0;
   final ValueNotifier<double> _volumeNotifier = ValueNotifier<double>(1.0);
+
+  // -------- ReplayGain --------
+  final ReplayGainService _rg = ReplayGainService.instance;
+  double _replayGainDb = 0.0;
+  double _userVolume = 1.0;
 
   final _shuffleCtrl = StreamController<bool>.broadcast();
   final _repeatCtrl = StreamController<PlayerRepeatMode>.broadcast();
@@ -110,6 +117,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       _volume = v;
       _volumeNotifier.value = v;
     }));
+
+    _rg.activeGainDb.addListener(_onReplayGainChanged);
+    _onReplayGainChanged();
 
     _publish();
   }
@@ -361,6 +371,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         );
         _lastQueueKey = queueKey;
       }
+
+      // Notifica al servicio de ReplayGain la pista actual.
+      _rg.notifyCurrentSong(song?.path);
     }
 
     if (updateControls) {
@@ -683,9 +696,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     _activeQueue.currentIndex = newStart;
+    _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
 
     await _applyLoopMode();
-    await _player.setVolume(_volume);
+    _applyEffectiveVolume();
 
     if (autoPlay) {
       unawaited(_player.play().catchError((Object e, StackTrace st) {
@@ -753,6 +767,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     if (!_activeQueueCtrl.isClosed) _activeQueueCtrl.add(kind);
 
+    _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
+
     // 4) Si la nueva cola está vacía, dejamos el player parado/vacío.
     if (_activeQueue.songs.isEmpty) {
       try {
@@ -790,7 +806,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     await _applyLoopMode();
-    await _player.setVolume(_volume);
+    _applyEffectiveVolume();
 
     if (_resumeAfterLoad) {
       unawaited(_player.play().catchError((Object e, StackTrace st) {
@@ -823,6 +839,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       await _player.stop();
       if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
     }
+    _rg.notifyCurrentSong(null);
     _emitControlsState();
   }
 
@@ -876,6 +893,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastMediaItemKey = null;
     _lastQueueKey = null;
 
+    _rg.notifyCurrentSong(null);
     _emitControlsState();
   }
 
@@ -1065,14 +1083,37 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _publish();
   }
 
+  // ============================================================
+  // VOLUMEN + REPLAYGAIN
+  // ============================================================
+
+  @override
   Future<void> setVolume(double volume) async {
     final v = volume.clamp(0.0, 1.0);
     _volume = v;
+    _userVolume = v;
     _volumeNotifier.value = v;
-
-    if ((v - _player.volume).abs() < 0.001) return;
-    await _player.setVolume(v);
+    _applyEffectiveVolume();
   }
+
+  void _onReplayGainChanged() {
+    _replayGainDb = _rg.enabled.value ? _rg.activeGainDb.value : 0.0;
+    _applyEffectiveVolume();
+  }
+
+  /// Volumen efectivo = volumen usuario * ganancia lineal de ReplayGain.
+  void _applyEffectiveVolume() {
+    final linear = _replayGainDb == 0
+        ? 1.0
+        : math.pow(10, _replayGainDb / 20).toDouble();
+    final effective = (_userVolume * linear).clamp(0.0, 1.0);
+    if ((effective - _player.volume).abs() < 0.001) return;
+    unawaited(_player.setVolume(effective));
+  }
+
+  // ============================================================
+  // PLAY / PAUSE / STOP / SEEK
+  // ============================================================
 
   @override
   Future<void> play() async {
@@ -1186,6 +1227,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> onTaskRemoved() async {}
 
   Future<void> dispose() async {
+    _rg.activeGainDb.removeListener(_onReplayGainChanged);
     for (final s in _subs) {
       await s.cancel();
     }
