@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../models/song.dart';
 import 'playback_audio_handler.dart';
 import 'playback_queue.dart';
+import 'settings_service.dart';
 
 const Duration kRewindThreshold = Duration(seconds: 3);
 
@@ -40,6 +41,17 @@ class PlaybackController {
         androidNotificationIcon: 'mipmap/ic_launcher',
       ),
     );
+
+    // Carga el boost guardado y aplícalo al handler recién creado.
+    // Es independiente de ReplayGain y del volumen del usuario.
+    try {
+      final settings = await SettingsService.instance.load();
+      _handler!.setVolumeBoost(settings.volumeBoost);
+    } catch (e) {
+      debugPrint(
+        'PlaybackController.init: no se pudo cargar volumeBoost: $e',
+      );
+    }
   }
 
   // ============================================================
@@ -86,6 +98,15 @@ class PlaybackController {
   Future<void> setSpeed(double speed) => handler.setSpeed(speed);
   Future<void> setVolume(double volume) => handler.setVolume(volume);
 
+  /// Aplica la amplificación de volumen (dB, −12..+12).
+  /// Independiente de ReplayGain y del volumen del usuario.
+  ///
+  /// En Android usa `AndroidLoudnessEnhancer` (boost real, puede pasar de
+  /// 1.0). En desktop/iOS/web cae al multiplicador clásico con clamp.
+  Future<void> setVolumeBoost(double db) async {
+    handler.setVolumeBoost(db);
+  }
+
   Future<void> setShuffle(bool enabled) => handler.setShuffle(enabled);
   Future<void> setRepeatMode(PlayerRepeatMode mode) =>
       handler.setRepeatModeForUI(mode);
@@ -94,8 +115,6 @@ class PlaybackController {
 
   Future<void> clearQueueOf(MediaKind kind) => handler.clearQueueOf(kind);
 
-  /// Limpia música **y** capítulos y deja el player parado.
-  /// La cola activa vuelve a ser la de música por defecto.
   Future<void> clearAllQueues() => handler.clearAllQueues();
 
   // ============================================================
@@ -218,6 +237,11 @@ class PlaybackController {
 
   double get speedNow => _handler?.playerSpeed ?? 1.0;
   double get volumeNow => _handler?.volume ?? 1.0;
+  double get volumeBoostNow => _handler?.volumeBoost ?? 0.0;
+
+  /// Volumen físico real aplicado al player (incluye RG y boost).
+  /// Solo para debug. NO lo uses para el slider del reproductor.
+  double get effectiveVolumeNow => _handler?.effectiveVolume ?? 1.0;
 
   bool get shuffleEnabled => _handler?.shuffleEnabled ?? false;
   PlayerRepeatMode get repeatModeNow =>

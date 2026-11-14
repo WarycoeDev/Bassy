@@ -1,7 +1,7 @@
 // lib/screens/settings_screen.dart
 import 'dart:async';
 import 'dart:ui' show FontFeature;
-
+import '../services/playback_controller.dart';
 import 'package:bassy/widgets/directory_picker_dialog.dart';
 import 'package:flutter/material.dart';
 
@@ -616,37 +616,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Reproducción
   // ---------------------------------------------------------------------------
 
-  Widget _buildPlaybackGroup(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    Widget _buildPlaybackGroup(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        children: [
-          _SliderItem(
-            icon: Icons.graphic_eq,
-            title: 'Amplificación de volumen',
-            subtitle: _formatDb(_settings.volumeBoost),
-            enabled: true,
-            child: Slider(
-              value: _settings.volumeBoost,
-              min: -12,
-              max: 12,
-              divisions: 48,
-              label: _formatDb(_settings.volumeBoost),
-              onChanged: (v) => _update((s) => s.volumeBoost = v),
-            ),
+  return Container(
+    decoration: BoxDecoration(
+      color: scheme.surfaceContainer,
+      borderRadius: BorderRadius.circular(12),
+    ),
+    child: Column(
+      children: [
+        _SliderItem(
+          icon: Icons.graphic_eq,
+          title: 'Amplificación de volumen',
+          subtitle: _formatDb(_settings.volumeBoost),
+          enabled: true,
+          child: Slider(
+            value: _settings.volumeBoost,
+            min: -12,
+            max: 12,
+            divisions: 48,
+            label: _formatDb(_settings.volumeBoost),
+            onChanged: (v) {
+              _update((s) => s.volumeBoost = v);
+              if (PlaybackController.instance.isReady) {
+                PlaybackController.instance.setVolumeBoost(v);
+              }
+            },
           ),
-          _divider(context),
-          _buildTransitionBlock(context),
-        ],
-      ),
-    );
-  }
-
+        ),
+        _divider(context),
+        _buildTransitionBlock(context),
+      ],
+    ),
+  );
+}
   Widget _buildTransitionBlock(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final enabled = _settings.transitionsEnabled;

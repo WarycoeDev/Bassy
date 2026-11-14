@@ -14,7 +14,8 @@ import 'replay_gain_service.dart';
 enum PlayerRepeatMode { off, all, one }
 
 class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
-  final AudioPlayer _player = AudioPlayer();
+  late final AudioPlayer _player;
+  AndroidLoudnessEnhancer? _loudness;
 
   // ----- Dos colas independientes -----
   final PlaybackQueue _musicQueue = PlaybackQueue(kind: MediaKind.music);
@@ -35,9 +36,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _loading = false;
   bool _resumeAfterLoad = false;
   bool _handlingCompleted = false;
-
-  /// true mientras se reordenan físicamente los hijos de la fuente
-  /// (aleatorio). Ignora los índices intermedios que reporta el player.
   bool _reordering = false;
 
   bool _isSeeking = false;
@@ -49,32 +47,19 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   DateTime _lastPositionPublish = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _positionPublishEvery = Duration(milliseconds: 250);
-
   static const _rewindThreshold = Duration(seconds: 3);
 
-  // ============================================================
-  // VOLUMEN + REPLAYGAIN
-  // ============================================================
-  //
-  // Tres conceptos separados:
-  //   - _userVolume   : lo que el usuario elige con el slider (0..1).
-  //                     Es lo que ve la UI. No incluye ReplayGain.
-  //   - _replayGainDb : ganancia calculada del track actual (dB).
-  //                     Solo la usa _applyEffectiveVolume.
-  //   - _player.volume: volumen físico real = user × linear(RG).
-  //
-  // El slider de la UI está ligado a _volumeNotifier, que refleja
-  // EXCLUSIVAMENTE _userVolume. ReplayGain nunca lo modifica.
-  //
-  // `_volume` se mantiene como alias de compatibilidad por si algún
-  // código antiguo lee `handler.volume` o `_volume`.
-
+  // Volumen + ReplayGain + Boost
   double _userVolume = 1.0;
   double _volume = 1.0;
   final ValueNotifier<double> _volumeNotifier = ValueNotifier<double>(1.0);
-
   final ReplayGainService _rg = ReplayGainService.instance;
   double _replayGainDb = 0.0;
+  double _volumeBoostDb = 0.0;
+
+  // just_audio multiplica por 1000 el valor, pero Android espera milibelios
+  // (1 dB = 100 mB), así que hay que pasar dB / 10.
+  static const double _kLoudnessGainScale = 10.0;
 
   final _shuffleCtrl = StreamController<bool>.broadcast();
   final _repeatCtrl = StreamController<PlayerRepeatMode>.broadcast();
@@ -88,8 +73,26 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   final List<StreamSubscription<dynamic>> _subs = [];
 
   PlaybackAudioHandler() {
-    // Inicializamos la activa con la cola de música.
     _activeQueue = _musicQueue;
+
+    // Crear el player con el pipeline de audio si estamos en Android.
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        _loudness = AndroidLoudnessEnhancer();
+        _player = AudioPlayer(
+          audioPipeline: AudioPipeline(androidAudioEffects: [_loudness!]),
+        );
+        _applyLoudness();
+      } catch (e, st) {
+        debugPrint(
+          'PlaybackAudioHandler: AudioPipeline no disponible -> $e\n$st',
+        );
+        _loudness = null;
+        _player = AudioPlayer();
+      }
+    } else {
+      _player = AudioPlayer();
+    }
 
     _subs.add(_player.playbackEventStream.listen(
       (_) {},
@@ -108,10 +111,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       }
     }));
 
-    // El shuffle lo hacemos nosotros reordenando la fuente, así que el
-    // índice del player es el índice FÍSICO dentro de la fuente. Se
-    // traduce a índice de `songs` con `sourceOrder`. Esto funciona igual
-    // en todas las plataformas.
     _subs.add(_player.currentIndexStream.listen((sourceIndex) {
       if (_loading || _reordering) return;
       if (sourceIndex == null) return;
@@ -126,14 +125,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _subs.add(_player.durationStream.listen((_) => _publish()));
     _subs.add(_player.positionDiscontinuityStream.listen((_) => _publish()));
     _subs.add(_player.positionStream.listen(_onPosition));
-
     _subs.add(_player.speedStream.listen((_) => _publish()));
-
-    // IMPORTANTE: NO escuchamos _player.volumeStream para actualizar el
-    // notifier. El slider de la UI refleja el volumen elegido por el
-    // usuario (_userVolume), no el volumen efectivo del player (que
-    // incluye ReplayGain). Si escucháramos volumeStream, el slider se
-    // movería solo cuando ReplayGain cambiara el volumen físico.
 
     _rg.activeGainDb.addListener(_onReplayGainChanged);
     _onReplayGainChanged();
@@ -152,17 +144,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<MediaKind> get activeQueueStream => _activeQueueCtrl.stream;
 
   // ============================================================
-  // GETTERS SOBRE LA COLA ACTIVA (compatibilidad)
+  // GETTERS
   // ============================================================
 
   List<Song> get songs => List.unmodifiable(_activeQueue.songs);
-
   Song? get currentSong => _activeQueue.currentSong;
-
   int get currentIndex => _activeQueue.currentIndex;
 
-  /// Con aleatorio activo el "siguiente" es el siguiente hijo de la
-  /// fuente (ya mezclada); sin aleatorio es simplemente index + 1.
   bool get hasNext =>
       _queueSource != null &&
       (_activeQueue.shuffleEnabled ? _player.hasNext : _activeQueue.hasNext);
@@ -180,19 +168,18 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       (_queueSource != null && _player.position > _rewindThreshold);
 
   bool get canGoNext => hasNext;
-
   bool get isPlaying => _player.playing;
-
   double get playerSpeed => _player.speed;
 
-  /// Volumen elegido por el usuario (0..1). NO incluye ReplayGain.
-  /// Es lo que debe mostrar el slider.
+  /// Volumen del usuario (0..1). NO incluye RG ni boost.
   double get volume => _userVolume;
   ValueListenable<double> get volumeListenable => _volumeNotifier;
 
-  /// Volumen físico real aplicado al player. Solo para debug/diagnóstico.
-  /// = _userVolume × linear(_replayGainDb)
+  /// Volumen físico real del player (incluye RG + boost). Solo debug.
   double get effectiveVolume => _player.volume;
+
+  /// Amplificación de volumen actual en dB (−12..+12).
+  double get volumeBoost => _volumeBoostDb;
 
   bool get shuffleEnabled => _activeQueue.shuffleEnabled;
   PlayerRepeatMode get repeatMode => _activeQueue.repeatMode;
@@ -200,10 +187,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<Duration> get positionStream => _player.positionStream;
   Stream<Duration?> get durationStream => _player.durationStream;
   Stream<bool> get playingStream => _player.playingStream;
-
-  // ============================================================
-  // GETTERS POR COLA EXPLÍCITA
-  // ============================================================
 
   List<Song> songsOf(MediaKind kind) =>
       List.unmodifiable(_queueFor(kind).songs);
@@ -213,14 +196,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get isActiveQueueEmpty => _activeQueue.isEmpty;
 
   // ============================================================
-  // DEDUPE (clave = path o title)
+  // DEDUPE
   // ============================================================
 
   String _songKey(Song s) =>
       (s.path != null && s.path!.isNotEmpty) ? s.path! : s.title;
 
-  /// Deduplica por `path` (o `title` como fallback), preservando el orden.
-  /// Devuelve la lista limpia y el mapa oldIndex -> newIndex.
   ({List<Song> unique, Map<int, int> indexMap}) _dedupeSongs(
     List<Song> input,
   ) {
@@ -238,14 +219,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // ============================================================
-  // ORDEN FÍSICO DE LA FUENTE (shuffle propio)
+  // ORDEN FÍSICO
   // ============================================================
 
   void _ensureOrder(PlaybackQueue q) {
     if (q.sourceOrder.length != q.songs.length) q.resetOrder();
   }
 
-  /// Índice físico (en la fuente) de la canción [songIndex] de `songs`.
   int _sourceIndexOf(PlaybackQueue q, int songIndex) {
     _ensureOrder(q);
     final i = q.sourceOrder.indexOf(songIndex);
@@ -261,7 +241,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
-  /// Con shuffle: [firstSong, ...resto mezclado]. Sin shuffle: original.
   List<int> _buildOrder(PlaybackQueue q, int firstSong) {
     final n = q.songs.length;
     if (!q.shuffleEnabled) return List<int>.generate(n, (i) => i);
@@ -279,8 +258,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     return v;
   }
 
-  /// Reordena los hijos de la fuente SIN interrumpir la canción actual:
-  /// deja solo la actual y reinserta el resto en el nuevo orden.
   Future<void> _applyOrder(List<int> newOrder, {required int keepSong}) async {
     final q = _activeQueue;
     final source = _queueSource;
@@ -323,7 +300,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // ============================================================
-  // PUBLICACIÓN DE ESTADO
+  // PUBLICACIÓN
   // ============================================================
 
   bool get _effectivePlaying {
@@ -395,7 +372,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         _lastQueueKey = queueKey;
       }
 
-      // Notifica al servicio de ReplayGain la pista actual.
       _rg.notifyCurrentSong(song?.path);
     }
 
@@ -489,7 +465,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       debugPrint('PlaybackAudioHandler: normalizar completed falló -> $e\n$st');
     } finally {
       _handlingCompleted = false;
-      // El hijo 0 de la fuente es la canción sourceOrder.first.
       _activeQueue.currentIndex = _activeQueue.songs.isEmpty
           ? -1
           : (_activeQueue.sourceOrder.isEmpty
@@ -500,7 +475,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // ============================================================
-  // EMISIÓN DE ESTADO DE CONTROLES
+  // EMISIÓN DE CONTROLES
   // ============================================================
 
   void _emitCanGoPrevious() {
@@ -524,12 +499,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // ============================================================
-  // SHUFFLE / REPEAT (por cola activa)
+  // SHUFFLE / REPEAT
   // ============================================================
 
-  /// Activa/desactiva el aleatorio. La lista visible (`songs`) NO cambia;
-  /// solo se reordenan los hijos de la fuente del player. El player
-  /// nunca mezcla por sí mismo.
   Future<void> setShuffle(bool enabled) async {
     final q = _activeQueue;
     if (q.shuffleEnabled == enabled) return;
@@ -595,11 +567,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // ============================================================
-  // SET QUEUE (activa + por kind)
+  // SET QUEUE
   // ============================================================
 
-  /// API compatible: usa la cola del `kind` de la primera canción,
-  /// pero activándola si no lo está.
   Future<void> setQueue(
     List<Song> songs, {
     int startIndex = 0,
@@ -614,9 +584,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     return setQueueOf(kind, songs, startIndex: startIndex, autoPlay: autoPlay);
   }
 
-  /// Reemplaza la cola de [kind]. Si [kind] es la activa, recarga el
-  /// reproductor; si no, solo guarda datos y NO interrumpe la reproducción.
-  /// La lista entrante se deduplica (primera aparición gana).
   Future<void> setQueueOf(
     MediaKind kind,
     List<Song> songs, {
@@ -650,7 +617,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     final target = songs[startIndex];
 
-    // --- Dedupe preservando orden (primera aparición gana) ---
     final dedup = _dedupeSongs(songs);
     songs = dedup.unique;
 
@@ -660,14 +626,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       await _clearQueueOf(kind);
       return;
     }
-    // Buscar la canción objetivo en la lista limpia por su clave.
     final targetKey = _songKey(target);
     var newStart = playable.indexWhere((s) => _songKey(s) == targetKey);
     if (newStart < 0) newStart = 0;
 
     final targetQueue = _queueFor(kind);
 
-    // Si NO es la activa: solo guardamos datos y no tocamos el player.
     if (kind != _activeQueue.kind) {
       targetQueue.songs = playable;
       targetQueue.resetOrder();
@@ -679,7 +643,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    // Es la activa: recarga real. Una cola nueva empieza sin aleatorio.
     _activeQueue.shuffleEnabled = false;
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
 
@@ -698,7 +661,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       _queueSource = concat;
 
       try {
-        // El orden es identidad, así que newStart es también el índice físico.
         await _player.setAudioSource(
           concat,
           initialIndex: newStart,
@@ -737,39 +699,27 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // CAMBIO DE COLA ACTIVA
   // ============================================================
 
-  /// Guarda posición/playing de la activa, pausa, carga [kind] y
-  /// restaura posición/playing/aleatorio de la nueva.
-  ///
-  /// Si [startIndex] se indica, la cola destino arranca en ese índice
-  /// (ignorando la posición guardada), sin reproducir antes la canción
-  /// que tenía guardada. Si [autoPlay] se indica, sobreescribe el estado
-  /// de reproducción guardado de la cola destino.
   Future<void> switchToQueue(
     MediaKind kind, {
     int? startIndex,
     bool? autoPlay,
   }) async {
     if (kind == _activeQueue.kind && _queueSource != null) {
-      // Ya activa con fuente cargada.
       if (startIndex != null) await skipToQueueItem(startIndex);
       return;
     }
 
     final oldKind = _activeQueue.kind;
 
-    // 1) Guardar estado de la activa.
     _activeQueue.saveLiveState(
       position: _player.position,
       playing: _player.playing,
     );
 
-    // 2) Pausar siempre.
     try {
       await _player.pause();
     } catch (_) {}
 
-    // 2.5) Si el usuario eligió una canción concreta, la cola destino
-    // arranca directamente ahí (sin pasar por la que sonaba antes).
     final target = _queueFor(kind);
     if (startIndex != null &&
         startIndex >= 0 &&
@@ -778,12 +728,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       target.savedPosition = Duration.zero;
       target.savedPlaying = autoPlay ?? true;
     } else if (autoPlay != null) {
-      // Sin startIndex pero con autoPlay explícito: solo sobreescribe
-      // el flag de reproducción.
       target.savedPlaying = autoPlay;
     }
 
-    // 3) Cambiar activa.
     _activeQueue = target;
     _lastMediaItemKey = null;
     _lastQueueKey = null;
@@ -792,7 +739,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
 
-    // 4) Si la nueva cola está vacía, dejamos el player parado/vacío.
     if (_activeQueue.songs.isEmpty) {
       try {
         await _player.stop();
@@ -804,8 +750,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    // 5) Reconstruir la fuente (respetando el orden mezclado de la cola)
-    //    con la posición guardada.
     _loading = true;
     _resumeAfterLoad = _activeQueue.savedPlaying;
     final restorePos = _activeQueue.savedPosition;
@@ -876,22 +820,17 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     await _clearQueueOf(kind);
   }
 
-  /// Limpia **ambas** colas (música y capítulos) y deja el reproductor
-  /// parado. La cola activa vuelve a ser la de música por defecto.
   Future<void> clearAllQueues() async {
     _loadGeneration++;
 
-    // Guarda estado actual antes de limpiar.
     _activeQueue.saveLiveState(
       position: _player.position,
       playing: false,
     );
 
-    // Limpia datos de ambas colas.
     _musicQueue.reset();
     _chaptersQueue.reset();
 
-    // Detiene y vacía el player.
     _queueSource = null;
     _resumeAfterLoad = false;
     try {
@@ -902,17 +841,14 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       );
     }
 
-    // Cola activa por defecto: música.
     _activeQueue = _musicQueue;
 
-    // Notifica a la UI del cambio de cola activa.
     if (!_activeQueueCtrl.isClosed) {
       _activeQueueCtrl.add(MediaKind.music);
     }
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
     if (!_repeatCtrl.isClosed) _repeatCtrl.add(PlayerRepeatMode.off);
 
-    // Fuerza republicación de mediaItem/queue vacíos.
     _lastMediaItemKey = null;
     _lastQueueKey = null;
 
@@ -921,10 +857,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // ============================================================
-  // ADD / REMOVE / REORDER (activa + por kind)
+  // ADD / REMOVE / REORDER
   // ============================================================
 
-  /// Smart: elige la cola por `song.kind`.
   Future<void> addToQueue(Song song) => addToQueueOf(song.kind, song);
 
   Future<void> addToQueueOf(MediaKind kind, Song song) async {
@@ -932,14 +867,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     final q = _queueFor(kind);
 
-    // --- No duplicar: ignorar si ya existe en esta cola ---
     final key = _songKey(song);
     if (q.songs.any((s) => _songKey(s) == key)) {
       debugPrint('PlaybackAudioHandler: canción ya en la cola ($key)');
       return;
     }
 
-    // Si la cola no está activa: solo datos.
     if (kind != _activeQueue.kind) {
       _ensureOrder(q);
       q.songs = [...q.songs, song];
@@ -949,7 +882,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    // Activa sin fuente → setQueue.
     final source = _queueSource;
     if (source == null) {
       final newSongs = [...q.songs, song];
@@ -962,7 +894,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    // La canción nueva va al final de la lista y al final de la fuente.
     _ensureOrder(q);
     q.songs = [...q.songs, song];
     q.sourceOrder = [...q.sourceOrder, q.songs.length - 1];
@@ -978,7 +909,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (index < 0 || index >= q.songs.length) return;
 
     _ensureOrder(q);
-    // Posición física del hijo a quitar (con aleatorio != index).
     final sourcePos = q.sourceOrder.indexOf(index);
 
     final wasCurrent = index == q.currentIndex;
@@ -1049,8 +979,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _ensureOrder(q);
     final shuffled = q.shuffleEnabled;
     if (shuffled) {
-      // Con aleatorio solo se re-mapean los índices: la fuente física
-      // (orden mezclado) no se mueve.
       q.sourceOrder = [
         for (final v in q.sourceOrder) _remapAfterMove(v, oldIndex, targetIndex),
       ];
@@ -1074,8 +1002,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // REPRODUCCIÓN
   // ============================================================
 
-  /// Reproduce el elemento [index] de la cola [kind], activándola si hace
-  /// falta, sin reproducir antes la canción que tenía guardada.
   Future<void> playFromQueueOf(MediaKind kind, int index) async {
     if (kind == _activeQueue.kind && _queueSource != null) {
       await skipToQueueItem(index);
@@ -1107,23 +1033,47 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // ============================================================
-  // VOLUMEN + REPLAYGAIN
+  // VOLUMEN + REPLAYGAIN + VOLUME BOOST
   // ============================================================
-  //
-  // El slider de la UI refleja SIEMPRE el volumen de usuario
-  // (_userVolume a través de _volumeNotifier), NUNCA el volumen
-  // efectivo del player. ReplayGain se aplica por debajo como un
-  // multiplicador transparente que no toca el notifier.
 
   @override
   Future<void> setVolume(double volume) async {
     final v = volume.clamp(0.0, 1.0);
     _userVolume = v;
-    _volume = v; // alias de compatibilidad
-    // El slider refleja el volumen de usuario, NO el efectivo.
+    _volume = v;
     _volumeNotifier.value = v;
-    // Aplica al player el efectivo = user * linear(RG).
     _applyEffectiveVolume();
+  }
+
+  void setVolumeBoost(double db) {
+    final v = db.clamp(-12.0, 12.0);
+    if ((v - _volumeBoostDb).abs() < 0.01) return;
+    _volumeBoostDb = v;
+    _applyLoudness();
+    _applyEffectiveVolume();
+  }
+
+  /// Solo amplifica (dB > 0) con el LoudnessEnhancer de Android.
+  /// Las atenuaciones (dB < 0) se hacen con el volumen lineal en
+  /// [_applyEffectiveVolume].
+  void _applyLoudness() {
+    final l = _loudness;
+    if (l == null) return;
+
+    final positiveDb = _volumeBoostDb > 0 ? _volumeBoostDb : 0.0;
+
+    unawaited(() async {
+      try {
+        await l.setEnabled(positiveDb > 0);
+        await l.setTargetGain(positiveDb / _kLoudnessGainScale);
+        debugPrint(
+          'Boost: enhancer enabled=${positiveDb > 0} '
+          'gain=${positiveDb / _kLoudnessGainScale} ($positiveDb dB)',
+        );
+      } catch (e, st) {
+        debugPrint('PlaybackAudioHandler: loudness falló -> $e\n$st');
+      }
+    }());
   }
 
   void _onReplayGainChanged() {
@@ -1131,13 +1081,26 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _applyEffectiveVolume();
   }
 
-  /// Volumen efectivo = volumen usuario × ganancia lineal de ReplayGain.
-  /// NO toca _userVolume ni _volumeNotifier.
+  /// Android: userVolume × linear(RG) × linear(boost negativo)
+  ///          (el boost positivo va por LoudnessEnhancer)
+  /// Desktop: userVolume × linear(RG) × linear(boost)  (clamp 1.0)
   void _applyEffectiveVolume() {
-    final linear = _replayGainDb == 0
+    final rgLinear = _replayGainDb == 0
         ? 1.0
         : math.pow(10, _replayGainDb / 20).toDouble();
-    final effective = (_userVolume * linear).clamp(0.0, 1.0);
+
+    final boostLinear = _volumeBoostDb == 0
+        ? 1.0
+        : (_loudness != null
+            // Android: lo positivo va por el enhancer, lo negativo aquí
+            ? (_volumeBoostDb < 0
+                ? math.pow(10, _volumeBoostDb / 20).toDouble()
+                : 1.0)
+            // Otras plataformas: multiplicador clásico
+            : math.pow(10, _volumeBoostDb / 20).toDouble());
+
+    final effective =
+        (_userVolume * rgLinear * boostLinear).clamp(0.0, 1.0);
     if ((effective - _player.volume).abs() < 0.001) return;
     unawaited(_player.setVolume(effective));
   }
@@ -1167,7 +1130,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> stop() async {
     _loadGeneration++;
-    // Guarda estado de la activa antes de limpiar.
     _activeQueue.saveLiveState(
       position: _player.position,
       playing: false,
@@ -1235,15 +1197,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     q.currentIndex = index;
     try {
-      // `index` es de `songs`; el player necesita el índice físico.
       await _player.seek(Duration.zero, index: _sourceIndexOf(q, index));
     } catch (e, st) {
       debugPrint('PlaybackAudioHandler: seek falló -> $e\n$st');
       return;
     }
 
-    // Con aleatorio: la canción elegida inicia una ronda nueva, así no se
-    // saltan las que quedaban antes de ella en el orden aleatorio.
     if (q.shuffleEnabled) {
       await _applyOrder(_buildOrder(q, index), keepSong: index);
     }
@@ -1263,6 +1222,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       await s.cancel();
     }
     _subs.clear();
+    // No hace falta release() en AndroidLoudnessEnhancer:
+    // _player.dispose() libera los efectos de audio asociados.
     await _canGoPreviousCtrl.close();
     await _canGoNextCtrl.close();
     await _shuffleCtrl.close();
