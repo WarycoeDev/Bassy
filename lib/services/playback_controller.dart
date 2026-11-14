@@ -42,14 +42,21 @@ class PlaybackController {
       ),
     );
 
-    // Carga el boost guardado y aplícalo al handler recién creado.
-    // Es independiente de ReplayGain y del volumen del usuario.
+    // Carga el boost y las transiciones guardadas y aplícalos al handler
+    // recién creado. Son independientes de ReplayGain y del volumen del
+    // usuario.
     try {
       final settings = await SettingsService.instance.load();
       _handler!.setVolumeBoost(settings.volumeBoost);
+      _handler!.setTransitionConfig(
+        enabled: settings.transitionsEnabled,
+        mode: settings.transitionMode,
+        crossfadeSeconds: settings.crossfadeSeconds,
+        fadeSeconds: settings.fadeSeconds,
+      );
     } catch (e) {
       debugPrint(
-        'PlaybackController.init: no se pudo cargar volumeBoost: $e',
+        'PlaybackController.init: no se pudo cargar settings: $e',
       );
     }
   }
@@ -105,6 +112,24 @@ class PlaybackController {
   /// 1.0). En desktop/iOS/web cae al multiplicador clásico con clamp.
   Future<void> setVolumeBoost(double db) async {
     handler.setVolumeBoost(db);
+  }
+
+  /// Aplica la configuración de transiciones al handler.
+  /// Llamar desde SettingsScreen cada vez que el usuario cambie
+  /// `transitionsEnabled`, `transitionMode`, `crossfadeSeconds` o
+  /// `fadeSeconds`.
+  Future<void> setTransitionConfig({
+    required bool enabled,
+    required int mode,
+    required double crossfadeSeconds,
+    required double fadeSeconds,
+  }) async {
+    handler.setTransitionConfig(
+      enabled: enabled,
+      mode: mode,
+      crossfadeSeconds: crossfadeSeconds,
+      fadeSeconds: fadeSeconds,
+    );
   }
 
   Future<void> setShuffle(bool enabled) => handler.setShuffle(enabled);
@@ -242,6 +267,9 @@ class PlaybackController {
   /// Volumen físico real aplicado al player (incluye RG y boost).
   /// Solo para debug. NO lo uses para el slider del reproductor.
   double get effectiveVolumeNow => _handler?.effectiveVolume ?? 1.0;
+
+  /// Factor de fade actual (0..1). Útil para debug.
+  double get fadeFactorNow => _handler?.fadeFactor ?? 1.0;
 
   bool get shuffleEnabled => _handler?.shuffleEnabled ?? false;
   PlayerRepeatMode get repeatModeNow =>

@@ -60,6 +60,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _loaded = true;
     });
     _refreshLibraryTotal();
+    // NUEVO: empujar la config de transiciones al player en cuanto cargue.
+    _applyTransitionsToPlayer();
   }
 
   void _refreshLibraryTotal() {
@@ -88,6 +90,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _update(void Function(AppSettings s) mutate) {
     setState(() => mutate(_settings));
     _persist();
+  }
+
+  // NUEVO: aplica la config de transiciones al reproductor en vivo.
+  void _applyTransitionsToPlayer() {
+    if (!PlaybackController.instance.isReady) return;
+    unawaited(
+      PlaybackController.instance.setTransitionConfig(
+        enabled: _settings.transitionsEnabled,
+        mode: _settings.transitionMode,
+        crossfadeSeconds: _settings.crossfadeSeconds,
+        fadeSeconds: _settings.fadeSeconds,
+      ),
+    );
   }
 
   void _showSnack(String msg) {
@@ -616,41 +631,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Reproducción
   // ---------------------------------------------------------------------------
 
-    Widget _buildPlaybackGroup(BuildContext context) {
-  final scheme = Theme.of(context).colorScheme;
+  Widget _buildPlaybackGroup(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
 
-  return Container(
-    decoration: BoxDecoration(
-      color: scheme.surfaceContainer,
-      borderRadius: BorderRadius.circular(12),
-    ),
-    child: Column(
-      children: [
-        _SliderItem(
-          icon: Icons.graphic_eq,
-          title: 'Amplificación de volumen',
-          subtitle: _formatDb(_settings.volumeBoost),
-          enabled: true,
-          child: Slider(
-            value: _settings.volumeBoost,
-            min: -12,
-            max: 12,
-            divisions: 48,
-            label: _formatDb(_settings.volumeBoost),
-            onChanged: (v) {
-              _update((s) => s.volumeBoost = v);
-              if (PlaybackController.instance.isReady) {
-                PlaybackController.instance.setVolumeBoost(v);
-              }
-            },
+    return Container(
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        children: [
+          _SliderItem(
+            icon: Icons.graphic_eq,
+            title: 'Amplificación de volumen',
+            subtitle: _formatDb(_settings.volumeBoost),
+            enabled: true,
+            child: Slider(
+              value: _settings.volumeBoost,
+              min: -12,
+              max: 12,
+              divisions: 48,
+              label: _formatDb(_settings.volumeBoost),
+              onChanged: (v) {
+                _update((s) => s.volumeBoost = v);
+                if (PlaybackController.instance.isReady) {
+                  PlaybackController.instance.setVolumeBoost(v);
+                }
+              },
+            ),
           ),
-        ),
-        _divider(context),
-        _buildTransitionBlock(context),
-      ],
-    ),
-  );
-}
+          _divider(context),
+          _buildTransitionBlock(context),
+        ],
+      ),
+    );
+  }
+
   Widget _buildTransitionBlock(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final enabled = _settings.transitionsEnabled;
@@ -704,7 +720,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               Switch(
                 value: enabled,
-                onChanged: (v) => _update((s) => s.transitionsEnabled = v),
+                onChanged: (v) {
+                  _update((s) => s.transitionsEnabled = v);
+                  _applyTransitionsToPlayer();
+                },
               ),
             ],
           ),
@@ -721,7 +740,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         label: 'Crossfade',
                         selected: mode == 0,
                         onTap: enabled
-                            ? () => _update((s) => s.transitionMode = 0)
+                            ? () {
+                                _update((s) => s.transitionMode = 0);
+                                _applyTransitionsToPlayer();
+                              }
                             : null,
                       ),
                     ),
@@ -731,7 +753,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         label: 'Fade In / Out',
                         selected: mode == 1,
                         onTap: enabled
-                            ? () => _update((s) => s.transitionMode = 1)
+                            ? () {
+                                _update((s) => s.transitionMode = 1);
+                                _applyTransitionsToPlayer();
+                              }
                             : null,
                       ),
                     ),
@@ -772,7 +797,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     label:
                         '${_settings.crossfadeSeconds.toStringAsFixed(1)} s',
                     onChanged: enabled
-                        ? (v) => _update((s) => s.crossfadeSeconds = v)
+                        ? (v) {
+                            _update((s) => s.crossfadeSeconds = v);
+                            _applyTransitionsToPlayer();
+                          }
                         : null,
                   )
                 else
@@ -783,7 +811,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     divisions: 24,
                     label: '${_settings.fadeSeconds.toStringAsFixed(1)} s',
                     onChanged: enabled
-                        ? (v) => _update((s) => s.fadeSeconds = v)
+                        ? (v) {
+                            _update((s) => s.fadeSeconds = v);
+                            _applyTransitionsToPlayer();
+                          }
                         : null,
                   ),
               ],
