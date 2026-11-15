@@ -128,6 +128,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   final _positionCtrl = StreamController<Duration>.broadcast();
   final _durationCtrl = StreamController<Duration?>.broadcast();
   final _playingCtrl = StreamController<bool>.broadcast();
+  // ===== STATS =====
+  final _trackCompletedCtrl = StreamController<String>.broadcast();
 
   bool _canGoPrevious = false;
   bool _canGoNext = false;
@@ -245,6 +247,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<Duration?> get durationStream => _durationCtrl.stream;
   Stream<bool> get playingStream => _playingCtrl.stream;
 
+  /// Emite el `songKey` (path o title) de la pista que terminó de forma
+  /// natural. Sirve para contar reproducciones en StatsService.
+  // ===== STATS =====
+  Stream<String> get trackCompletedStream => _trackCompletedCtrl.stream;
+
   // ============================================================
   // GETTERS
   // ============================================================
@@ -338,6 +345,25 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return order.last;
     }
     return null;
+  }
+
+  // ============================================================
+  // STATS: helpers
+  // ============================================================
+
+  // ===== STATS =====
+  String _songKeyOf(Song s) =>
+      (s.path != null && s.path!.isNotEmpty) ? s.path! : s.title;
+
+  /// Notifica que la pista en [songIndex] de la cola activa terminó de
+  /// forma natural. Llamar ANTES de cambiar de pista.
+  // ===== STATS =====
+  void _emitTrackCompleted(int songIndex) {
+    final q = _activeQueue;
+    if (songIndex < 0 || songIndex >= q.songs.length) return;
+    final song = q.songs[songIndex];
+    if (_trackCompletedCtrl.isClosed) return;
+    _trackCompletedCtrl.add(_songKeyOf(song));
   }
 
   // ============================================================
@@ -731,6 +757,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
+    // ===== STATS =====
+    // La pista saliente terminó de forma natural (crossfade completo).
+    _emitTrackCompleted(_activeQueue.currentIndex);
+
     final oldSource = _source;
 
     _source = ns;
@@ -887,6 +917,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _handlingCompleted = true;
     try {
       final q = _activeQueue;
+
+      // ===== STATS =====
+      // Fin natural de la pista actual: notificar antes de cambiar.
+      _emitTrackCompleted(q.currentIndex);
 
       if (q.repeatMode == PlayerRepeatMode.one) {
         await _loadAndPlay(q.currentIndex, autoPlay: true);
@@ -1659,6 +1693,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     await _positionCtrl.close();
     await _durationCtrl.close();
     await _playingCtrl.close();
+    // ===== STATS =====
+    await _trackCompletedCtrl.close();
     _volumeNotifier.dispose();
     _slowedNotifier.dispose();
     await _releaseVoice();

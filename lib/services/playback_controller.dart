@@ -8,6 +8,7 @@ import '../models/song.dart';
 import 'playback_audio_handler.dart';
 import 'playback_queue.dart';
 import 'settings_service.dart';
+import 'stats_service.dart';
 
 const Duration kRewindThreshold = Duration(seconds: 3);
 
@@ -58,6 +59,21 @@ class PlaybackController {
         'PlaybackController.init: no se pudo cargar settings: $e',
       );
     }
+
+    // Estadísticas: solo lectura, no altera la reproducción.
+    try {
+      await StatsService.instance.init(_handler!);
+    } catch (e) {
+      debugPrint(
+        'PlaybackController.init: no se pudo iniciar StatsService: $e',
+      );
+    }
+  }
+
+  /// Vuelca estadísticas pendientes y cierra el servicio.
+  /// Llamar al cerrar la app (p. ej. desde `WidgetsBindingObserver`).
+  Future<void> disposeStats() async {
+    await StatsService.instance.dispose();
   }
 
   // ============================================================
@@ -184,6 +200,10 @@ class PlaybackController {
 
   Stream<bool> get shuffle => handler.shuffleStream;
   Stream<PlayerRepeatMode> get repeat => handler.repeatStream;
+
+  /// Emite el `songKey` de la pista que terminó de forma natural.
+  /// Lo consume `StatsService`.
+  Stream<String> get trackCompleted => handler.trackCompletedStream;
 
   ValueListenable<double> get volume => handler.volumeListenable;
 
