@@ -10,6 +10,7 @@ import 'dart:math' as math;
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_soloud/flutter_soloud.dart' as sl;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import 'playback_queue.dart';
@@ -37,6 +38,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   MediaKind get activeQueueKind => _activeQueue.kind;
 
+  /// true si la cola activa es de música. Los efectos de audio
+  /// (ReplayGain, Slowed y Reverb) solo se aplican en este caso.
+  bool get _isMusicQueue => _activeQueue.kind == MediaKind.music;
+
   Future<void> _loadChain = Future<void>.value();
   int _loadGeneration = 0; // para setQueueOf encadenado
   int _loadToken = 0; // para _loadAndPlay (descarta cargas obsoletas)
@@ -56,9 +61,16 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   final ValueNotifier<double> _slowedNotifier = ValueNotifier<double>(1.0);
 
   static const double kMinSlowed = 0.6;
+  static const String _kSlowedPrefKey = 'effects_slowed_factor';
 
   /// Velocidad real aplicada a las voces (velocidad normal × slowed).
-  double get _effectiveSpeed => _speed * _slowed;
+  /// El efecto Slowed solo aplica a música; en podcast se usa solo `_speed`.
+  double get _effectiveSpeed => _speed * (_isMusicQueue ? _slowed : 1.0);
+
+  // ----- Reverb: se silencia mientras suena un podcast -----
+  /// Nivel de reverb del usuario guardado mientras la cola activa es de
+  /// podcast (null = no hay nada que restaurar).
+  double? _reverbBeforePodcast;
 
   List<MediaControl>? _lastControls;
   List<int>? _lastCompactActionIndices;
@@ -75,12 +87,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   DateTime _lastPositionEmit = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastPublish = DateTime.fromMillisecondsSinceEpoch(0);
 
-  // Volumen + ReplayGain + Boost
+  // Volumen + ReplayGain
   double _userVolume = 1.0;
   final ValueNotifier<double> _volumeNotifier = ValueNotifier<double>(1.0);
   final ReplayGainService _rg = ReplayGainService.instance;
   double _replayGainDb = 0.0;
-  double _volumeBoostDb = 0.0;
   double _lastVol = -1;
 
   // ============================================================
@@ -126,6 +137,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _rg.activeGainDb.addListener(_onReplayGainChanged);
     _onReplayGainChanged();
     _publish();
+    unawaited(_loadSlowed());
   }
 
   // ============================================================
@@ -138,6 +150,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       _engineInit = null;
     }));
     ReverbService.instance.applyToEngine();
+    _syncReverbForQueue();
   }
 
   Future<void> _disposeSource(sl.AudioSource? source) async {
@@ -191,6 +204,34 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get _hasSource => _source != null || _loading;
 
   // ============================================================
+  // EFECTOS SOLO PARA MÚSICA
+  // ============================================================
+
+  /// Reverb: mientras la cola activa es de podcast se pone a 0 (sin
+  /// persistir) y al volver a música se restaura el nivel del usuario.
+  void _syncReverbForQueue() {
+    final reverb = ReverbService.instance;
+    try {
+      if (!reverb.isSupported) return;
+      if (_isMusicQueue) {
+        final saved = _reverbBeforePodcast;
+        if (saved != null) {
+          _reverbBeforePodcast = null;
+          reverb.setLevel(saved);
+        }
+      } else {
+        if (_reverbBeforePodcast == null) {
+          final current = reverb.level.value;
+          _reverbBeforePodcast = current;
+          if (current > 0.0) reverb.setLevel(0.0);
+        }
+      }
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: sync reverb falló -> $e');
+    }
+  }
+
+  // ============================================================
   // STREAMS PÚBLICOS
   // ============================================================
 
@@ -224,19 +265,16 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get isPlaying => _playing;
   double get playerSpeed => _speed;
 
-  /// Factor de Slowed actual (1.0 = apagado).
+  /// Factor de Slowed actual (1.0 = apagado). Solo afecta a música.
   double get slowed => _slowed;
   ValueListenable<double> get slowedListenable => _slowedNotifier;
 
-  /// Volumen del usuario (0..1). NO incluye RG ni boost.
+  /// Volumen del usuario (0..1). NO incluye RG.
   double get volume => _userVolume;
   ValueListenable<double> get volumeListenable => _volumeNotifier;
 
-  /// Volumen físico real de la voz (incluye RG + boost + fade). Solo debug.
+  /// Volumen físico real de la voz (incluye RG + fade). Solo debug.
   double get effectiveVolume => _lastVol < 0 ? _userVolume : _lastVol;
-
-  /// Amplificación de volumen actual en dB (−12..+12).
-  double get volumeBoost => _volumeBoostDb;
 
   double get fadeFactor => _fadeFactor;
 
@@ -422,13 +460,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // ============================================================
 
   double _baseLinear() {
-    final rg = _replayGainDb == 0
-        ? 1.0
-        : math.pow(10, _replayGainDb / 20).toDouble();
-    final boost = _volumeBoostDb == 0
-        ? 1.0
-        : math.pow(10, _volumeBoostDb / 20).toDouble();
-    return _userVolume * rg * boost;
+    // ReplayGain solo aplica a música.
+    final rg = (_isMusicQueue && _replayGainDb != 0)
+        ? math.pow(10, _replayGainDb / 20).toDouble()
+        : 1.0;
+    return _userVolume * rg;
   }
 
   void _applyVolume({bool force = false}) {
@@ -467,19 +503,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  void setVolumeBoost(double db) {
-    final v = db.clamp(-12.0, 12.0).toDouble();
-    if ((v - _volumeBoostDb).abs() < 0.01) return;
-    _volumeBoostDb = v;
-    if (_crossfading) {
-      _mixCrossfade(_position);
-    } else {
-      _applyVolume(force: true);
-    }
-  }
-
   void _onReplayGainChanged() {
     _replayGainDb = _rg.enabled.value ? _rg.activeGainDb.value : 0.0;
+    // El ReplayGain solo afecta a música; en podcast no hace falta tocar voces.
+    if (!_isMusicQueue) return;
     if (_crossfading) {
       _mixCrossfade(_position);
     } else {
@@ -508,16 +535,40 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   /// Efecto Slowed: [factor] 1.0 = apagado, [kMinSlowed]..1.0 = más lento
-  /// y más grave (velocidad y tono van juntos).
+  /// y más grave (velocidad y tono van juntos). Solo afecta a música.
   Future<void> setSlowed(double factor) async {
     final v = factor.clamp(kMinSlowed, 1.0).toDouble();
     if ((v - _slowed).abs() < 0.0005) return;
     _slowed = v;
     _slowedNotifier.value = v;
+    // En podcast el slowed no aplica: no tocar voces ni cancelar crossfade.
+    if (!_isMusicQueue) return;
     // La ventana de crossfade depende de la velocidad: se recalcula.
     _cancelCrossfade();
     _applySpeedToVoices();
     _publish();
+  }
+
+  /// Guarda el nivel de Slowed actual (llamar al soltar el slider).
+  Future<void> persistSlowed() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble(_kSlowedPrefKey, _slowed);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: no se pudo guardar slowed -> $e');
+    }
+  }
+
+  /// Restaura el nivel de Slowed guardado al iniciar.
+  Future<void> _loadSlowed() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getDouble(_kSlowedPrefKey);
+      if (saved == null) return;
+      await setSlowed(saved);
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: no se pudo leer slowed -> $e');
+    }
   }
 
   // ============================================================
@@ -1222,6 +1273,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastMediaItemKey = null;
     _lastQueueKey = null;
 
+    // Efectos (reverb) solo en música: se silencian/restauran al cambiar.
+    _syncReverbForQueue();
+
     if (!_activeQueueCtrl.isClosed) _activeQueueCtrl.add(kind);
     _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
 
@@ -1297,6 +1351,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _duration = Duration.zero;
 
     _activeQueue = _musicQueue;
+    _syncReverbForQueue();
 
     if (!_activeQueueCtrl.isClosed) _activeQueueCtrl.add(MediaKind.music);
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);

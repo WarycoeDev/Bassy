@@ -42,12 +42,11 @@ class PlaybackController {
       ),
     );
 
-    // Carga el boost y las transiciones guardadas y aplícalos al handler
-    // recién creado. Son independientes de ReplayGain y del volumen del
-    // usuario.
+    // Carga las transiciones guardadas y las aplica al handler recién
+    // creado. Son independientes de ReplayGain y del volumen del usuario.
+    // (El nivel de Slowed se restaura solo dentro del propio handler.)
     try {
       final settings = await SettingsService.instance.load();
-      _handler!.setVolumeBoost(settings.volumeBoost);
       _handler!.setTransitionConfig(
         enabled: settings.transitionsEnabled,
         mode: settings.transitionMode,
@@ -104,15 +103,6 @@ class PlaybackController {
 
   Future<void> setSpeed(double speed) => handler.setSpeed(speed);
   Future<void> setVolume(double volume) => handler.setVolume(volume);
-
-  /// Aplica la amplificación de volumen (dB, −12..+12).
-  /// Independiente de ReplayGain y del volumen del usuario.
-  ///
-  /// En Android usa `AndroidLoudnessEnhancer` (boost real, puede pasar de
-  /// 1.0). En desktop/iOS/web cae al multiplicador clásico con clamp.
-  Future<void> setVolumeBoost(double db) async {
-    handler.setVolumeBoost(db);
-  }
 
   /// Aplica la configuración de transiciones al handler.
   /// Llamar desde SettingsScreen cada vez que el usuario cambie
@@ -262,9 +252,8 @@ class PlaybackController {
 
   double get speedNow => _handler?.playerSpeed ?? 1.0;
   double get volumeNow => _handler?.volume ?? 1.0;
-  double get volumeBoostNow => _handler?.volumeBoost ?? 0.0;
 
-  /// Volumen físico real aplicado al player (incluye RG y boost).
+  /// Volumen físico real aplicado al player (incluye RG y fade).
   /// Solo para debug. NO lo uses para el slider del reproductor.
   double get effectiveVolumeNow => _handler?.effectiveVolume ?? 1.0;
 

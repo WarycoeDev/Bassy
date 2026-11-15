@@ -60,7 +60,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _loaded = true;
     });
     _refreshLibraryTotal();
-    // NUEVO: empujar la config de transiciones al player en cuanto cargue.
+    // Empuja la config de transiciones al player en cuanto cargue.
     _applyTransitionsToPlayer();
   }
 
@@ -92,7 +92,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _persist();
   }
 
-  // NUEVO: aplica la config de transiciones al reproductor en vivo.
+  // Aplica la config de transiciones al reproductor en vivo.
   void _applyTransitionsToPlayer() {
     if (!PlaybackController.instance.isReady) return;
     unawaited(
@@ -639,31 +639,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         color: scheme.surfaceContainer,
         borderRadius: BorderRadius.circular(12),
       ),
-      child: Column(
-        children: [
-          _SliderItem(
-            icon: Icons.graphic_eq,
-            title: 'Amplificación de volumen',
-            subtitle: _formatDb(_settings.volumeBoost),
-            enabled: true,
-            child: Slider(
-              value: _settings.volumeBoost,
-              min: -12,
-              max: 12,
-              divisions: 48,
-              label: _formatDb(_settings.volumeBoost),
-              onChanged: (v) {
-                _update((s) => s.volumeBoost = v);
-                if (PlaybackController.instance.isReady) {
-                  PlaybackController.instance.setVolumeBoost(v);
-                }
-              },
-            ),
-          ),
-          _divider(context),
-          _buildTransitionBlock(context),
-        ],
-      ),
+      child: _buildTransitionBlock(context),
     );
   }
 
@@ -1102,11 +1078,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  String _formatDb(double db) {
-    final sign = db > 0 ? '+' : '';
-    return '$sign${db.toStringAsFixed(1)} dB';
-  }
-
   Widget _divider(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Divider(
@@ -1249,81 +1220,6 @@ class _SettingItem extends StatelessWidget {
               ),
             ),
             if (trailing != null) ...[const SizedBox(width: 8), trailing!],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SliderItem extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool enabled;
-  final Widget child;
-
-  const _SliderItem({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.enabled,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final opacity = enabled ? 1.0 : 0.4;
-
-    return Opacity(
-      opacity: opacity,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(icon, color: scheme.onSurfaceVariant, size: 20),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: TextStyle(
-                          color: scheme.onSurface,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        subtitle,
-                        style: TextStyle(
-                          color: scheme.onSurfaceVariant,
-                          fontSize: 12,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            child,
           ],
         ),
       ),
