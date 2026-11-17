@@ -38,8 +38,8 @@ class SongContextMenu {
   static List<ActionMenuItem> _buildQueueActions(Song song) {
     return [
       ActionMenuItem(
-        icon: Icons.playlist_play,
-        label: 'Sobrescribir cola y reproducir',
+        icon: Icons.play_arrow,
+        label: 'Reproducir ahora',
         onTap: () => _replaceQueueAndPlay(song),
       ),
       ..._queueAddRemove(song),
@@ -47,7 +47,7 @@ class SongContextMenu {
   }
 
   // ============================================================
-  // MENÚ DE COLA CON CONTEXTO
+  // MENÚ DE COLA CON CONTEXTO (ej. desde un álbum o playlist)
   // ============================================================
 
   static Future<void> showQueueSheetForContext(
@@ -67,8 +67,8 @@ class SongContextMenu {
 
     final actions = <ActionMenuItem>[
       ActionMenuItem(
-        icon: Icons.playlist_play,
-        label: 'Sobreescribir cola y reproducir',
+        icon: Icons.play_arrow,
+        label: 'Reproducir ahora',
         onTap: () async {
           await controller.switchToQueue(kind);
           await controller.setQueueOf(
@@ -80,7 +80,17 @@ class SongContextMenu {
         },
       ),
       ActionMenuItem(
-        icon: Icons.queue_music,
+        icon: Icons.queue_play_next,
+        label: 'Reproducir a continuación',
+        onTap: () async {
+          await controller.switchToQueue(kind);
+          await controller.addToQueueOf(kind, song);
+          // Nota: si tienes un método para insertar al inicio,
+          // úsalo aquí en lugar de addToQueueOf.
+        },
+      ),
+      ActionMenuItem(
+        icon: Icons.playlist_add,
         label: 'Añadir todo a la cola',
         onTap: () async {
           for (final s in contextSongs) {
@@ -102,7 +112,7 @@ class SongContextMenu {
   }
 
   // ============================================================
-  // MENÚ DE CONTEXTO
+  // MENÚ DE CONTEXTO (long-press / tap derecho)
   // ============================================================
 
   static Future<void> showSheet(
@@ -176,6 +186,7 @@ class SongContextMenu {
     final isFav = favorites.contains(song);
 
     return [
+      // --- Reproducción ---
       ActionMenuItem(
         icon: Icons.play_arrow,
         label: 'Reproducir ahora',
@@ -185,7 +196,11 @@ class SongContextMenu {
           queueIndex: queueIndex,
         ),
       ),
+
+      // --- Cola ---
       ..._queueAddRemove(song),
+
+      // --- Biblioteca personal ---
       ActionMenuItem(
         icon: Icons.playlist_add,
         label: 'Añadir a playlist',
@@ -207,6 +222,8 @@ class SongContextMenu {
           );
         },
       ),
+
+      // --- Navegación ---
       ..._musicActions(context, song),
     ];
   }
@@ -238,8 +255,12 @@ class SongContextMenu {
     return [
       ActionMenuItem(
         icon: Icons.playlist_remove,
-        label: 'Quitar de la cola',
+        label: isCurrent
+            ? 'Quitar de la cola (sonando ahora)'
+            : 'Quitar de la cola',
         isDestructive: true,
+        // Deshabilitado si es la canción actual: quitar la canción en
+        // reproducción puede dejar la cola en un estado raro.
         enabled: !isCurrent,
         onTap: () async {
           if (handler == null) return;
@@ -312,7 +333,7 @@ class SongContextMenu {
     return [
       ActionMenuItem(
         icon: Icons.album_outlined,
-        label: 'Ir al álbum',
+        label: hasAlbum ? 'Ver álbum' : 'Sin álbum disponible',
         enabled: hasAlbum,
         onTap: () {
           if (!hasAlbum) return;
@@ -321,7 +342,7 @@ class SongContextMenu {
       ),
       ActionMenuItem(
         icon: Icons.person_outline,
-        label: 'Ir al artista',
+        label: hasArtist ? 'Ver artista' : 'Sin artista disponible',
         enabled: hasArtist,
         onTap: () {
           if (!hasArtist) return;
@@ -330,7 +351,7 @@ class SongContextMenu {
       ),
       ActionMenuItem(
         icon: Icons.info_outline,
-        label: 'Detalles',
+        label: 'Ver detalles',
         onTap: () => _todo(context, 'Detalles'),
       ),
     ];
@@ -377,7 +398,7 @@ class SongContextMenu {
       if (position > Duration.zero)
         ActionMenuItem(
           icon: Icons.restart_alt,
-          label: 'Reiniciar progreso',
+          label: 'Empezar desde el principio',
           onTap: () => _todo(context, 'Reiniciar progreso'),
         ),
       ActionMenuItem(
@@ -387,12 +408,12 @@ class SongContextMenu {
       ),
       ActionMenuItem(
         icon: Icons.timer_outlined,
-        label: 'Dormir después de…',
+        label: 'Temporizador de sueño',
         onTap: () => _todo(context, 'Sleep timer'),
       ),
       ActionMenuItem(
         icon: Icons.info_outline,
-        label: 'Detalles del episodio',
+        label: 'Ver detalles del episodio',
         onTap: () => _todo(context, 'Detalles del episodio'),
       ),
     ];
