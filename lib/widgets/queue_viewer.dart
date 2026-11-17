@@ -253,29 +253,7 @@ class _QueuePanelState extends State<QueuePanel> {
               ],
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-            child: SegmentedButton<MediaKind>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment<MediaKind>(
-                  value: MediaKind.music,
-                  label: Text('Música'),
-                  icon: Icon(Icons.music_note, size: 18),
-                ),
-                ButtonSegment<MediaKind>(
-                  value: MediaKind.podcast,
-                  label: Text('Capítulos'),
-                  icon: Icon(Icons.mic, size: 18),
-                ),
-              ],
-              selected: {_viewKind},
-              onSelectionChanged: (sel) {
-                if (sel.isEmpty) return;
-                setState(() => _viewKind = sel.first);
-              },
-            ),
-          ),
+          
           Divider(
             height: 1,
             color: scheme.outlineVariant.withValues(alpha: 0.5),

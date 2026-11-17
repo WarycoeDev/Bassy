@@ -3,6 +3,9 @@
 // Handler de reproducción sobre flutter_soloud (SoLoud + miniaudio).
 // Misma API pública que la versión con just_audio, para que
 // PlaybackController y las pantallas no cambien.
+//
+// Comportamiento de colas: hay dos colas independientes (música y
+// podcast). Cuando una cola empieza a SONAR, la contraria se vacía.
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -35,6 +38,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   PlaybackQueue _queueFor(MediaKind kind) =>
       kind == MediaKind.podcast ? _chaptersQueue : _musicQueue;
+
+  /// El tipo contrario a [k].
+  MediaKind _otherKind(MediaKind k) =>
+      k == MediaKind.podcast ? MediaKind.music : MediaKind.podcast;
 
   MediaKind get activeQueueKind => _activeQueue.kind;
 
@@ -1245,6 +1252,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     final targetQueue = _queueFor(kind);
 
+    // ---- Cola de OTRO tipo ----
     if (kind != _activeQueue.kind) {
       targetQueue.songs = playable;
       targetQueue.resetOrder();
@@ -1252,16 +1260,46 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       targetQueue.shuffleEnabled = false;
       targetQueue.savedPosition = Duration.zero;
       targetQueue.savedPlaying = autoPlay;
-      _emitControlsState();
+
+      if (!autoPlay) {
+        // Solo se deja preparada, sin tocar lo que suena.
+        _emitControlsState();
+        return;
+      }
+
+      // Se va a reproducir: la cola contraria (la que sonaba) se borra.
+      final old = _activeQueue;
+      final h = _handle;
+      if (h != null && _isValid(h)) {
+        try {
+          _soloud.setPause(h, true);
+        } catch (_) {}
+      }
+      old.reset();
+
+      _activeQueue = targetQueue;
+      _lastMediaItemKey = null;
+      _lastQueueKey = null;
+      _syncReverbForQueue();
+
+      if (!_activeQueueCtrl.isClosed) _activeQueueCtrl.add(kind);
+      if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
+      if (!_repeatCtrl.isClosed) _repeatCtrl.add(targetQueue.repeatMode);
+
+      await _loadAndPlay(newStart, autoPlay: true);
       return;
     }
 
+    // ---- Misma cola activa ----
     _activeQueue.shuffleEnabled = false;
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
 
     _activeQueue.songs = playable;
     _activeQueue.resetOrder();
     _activeQueue.currentIndex = newStart;
+
+    // Si se va a reproducir, la cola contraria se vacía.
+    if (autoPlay) _queueFor(_otherKind(kind)).reset();
 
     await _loadAndPlay(newStart, autoPlay: autoPlay);
   }
@@ -1301,6 +1339,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       target.savedPlaying = autoPlay ?? true;
     } else if (autoPlay != null) {
       target.savedPlaying = autoPlay;
+    }
+
+    // Si la cola destino va a sonar, la anterior se borra.
+    if (target.songs.isNotEmpty && target.savedPlaying) {
+      _queueFor(_otherKind(kind)).reset();
     }
 
     _activeQueue = target;
