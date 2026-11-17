@@ -25,6 +25,11 @@ class SongTile extends StatelessWidget {
   /// su eliminación de la lista sin que los demás salten de golpe).
   final bool isRemoving;
 
+  /// Widget opcional que se dibuja SOBRE la carátula, en la esquina
+  /// superior izquierda. Sirve para badges de estado (completado,
+  /// en progreso, etc.) sin ocupar espacio en la fila.
+  final Widget? coverOverlay;
+
   static const double tileRadius = 12;
 
   const SongTile({
@@ -38,6 +43,7 @@ class SongTile extends StatelessWidget {
     this.reorderMode = false,
     this.reorderIndex,
     this.isRemoving = false,
+    this.coverOverlay,
   });
 
   static final Map<String, _CoverCacheEntry> _coverCache = {};
@@ -286,6 +292,12 @@ class SongTile extends StatelessWidget {
                 right: 2,
                 bottom: 2,
                 child: _PlayingBadge(song: song, onCover: true),
+              ),
+            if (coverOverlay != null)
+              Positioned(
+                top: -1,
+                left: -1,
+                child: coverOverlay!,
               ),
           ],
         ),

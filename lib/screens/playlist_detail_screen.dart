@@ -1,4 +1,5 @@
 // lib/screens/playlist_detail_screen.dart
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../models/song.dart';
 import '../services/favorites_store.dart';
 import '../services/playback_controller.dart';
 import '../services/playlists_store.dart';
+import '../services/stats_service.dart';
 import '../widgets/action_menu.dart';
 import '../widgets/playback_menu.dart';
 import '../widgets/song_tile.dart';
@@ -45,9 +47,16 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   /// que era lo que causaba el "parpadeo" entre posición vieja y nueva.
   List<Song>? _localSongs;
 
+  /// Tick que fuerza reconstrucción periódica para refrescar progreso
+  /// de podcasts desde `StatsService` (que no es un ChangeNotifier).
+  final ValueNotifier<int> _podcastTick = ValueNotifier<int>(0);
+  Timer? _podcastTimer;
+
   bool get _isFavorites => widget.playlist.kind == PlaylistKind.favorites;
 
   bool get _isUserPlaylist => widget.playlist.kind == PlaylistKind.custom;
+
+  bool get _isPodcast => widget.playlist.kind == PlaylistKind.podcast;
 
   String? get _userId {
     final id = widget.playlist.id;
@@ -56,6 +65,46 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   }
 
   bool get _canReorder => _isFavorites || _isUserPlaylist;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_isPodcast) {
+      _startPodcastTicker();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant PlaylistDetailScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final wasPodcast = oldWidget.playlist.kind == PlaylistKind.podcast;
+    final isPodcast = widget.playlist.kind == PlaylistKind.podcast;
+    if (isPodcast && !wasPodcast) {
+      _startPodcastTicker();
+    } else if (!isPodcast && wasPodcast) {
+      _stopPodcastTicker();
+    }
+  }
+
+  void _startPodcastTicker() {
+    _podcastTimer?.cancel();
+    _podcastTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      _podcastTick.value++;
+    });
+  }
+
+  void _stopPodcastTicker() {
+    _podcastTimer?.cancel();
+    _podcastTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _stopPodcastTicker();
+    _podcastTick.dispose();
+    super.dispose();
+  }
 
   // ============================================================
   // Playlist "viva"
@@ -226,6 +275,23 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       );
     }
 
+    // Para podcasts añadimos un tick que refresca el progreso desde
+    // StatsService (no notifica cambios por sí solo).
+    if (_isPodcast) {
+      return ValueListenableBuilder<int>(
+        valueListenable: _podcastTick,
+        builder: (context, _, __) {
+          if (listenable == null) {
+            return bodyFor(_livePlaylist());
+          }
+          return AnimatedBuilder(
+            animation: listenable,
+            builder: (context, _) => bodyFor(_livePlaylist()),
+          );
+        },
+      );
+    }
+
     if (listenable == null) {
       return bodyFor(_livePlaylist());
     }
@@ -236,7 +302,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   }
 
   // ============================================================
-  // Reproducir todo
+  // Reproducir todo / Reanudar (header)
   // ============================================================
 
   Future<void> _playAll(BuildContext context, Playlist live) async {
@@ -299,6 +365,89 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
     );
   }
 
+  /// Devuelve el primer episodio con progreso pendiente (en curso), o
+  /// `null` si no hay ninguno. Si no hay ninguno en curso pero hay
+  /// alguno sin empezar, devuelve el primero sin empezar.
+  Song? _nextPodcastToResume(Playlist live) {
+    Song? firstNotStarted;
+    for (final s in live.songs) {
+      final p = StatsService.instance.progressOf(s);
+      if (p == null) {
+        firstNotStarted ??= s;
+        continue;
+      }
+      if (p.completed) continue;
+      if (p.position > Duration.zero && p.fraction < 1.0) {
+        return s;
+      }
+      firstNotStarted ??= s;
+    }
+    return firstNotStarted;
+  }
+
+  Future<void> _resumeFromHeader(BuildContext context, Playlist live) async {
+    final target = _nextPodcastToResume(live);
+    if (target == null) return;
+    await _resumePodcast(target, live);
+  }
+
+  // ============================================================
+  // Reanudar podcast desde posición guardada
+  // ============================================================
+
+  Future<void> _resumePodcast(Song song, Playlist live) async {
+    final controller = PlaybackController.instance;
+    if (!controller.isReady) {
+      debugPrint('PlaylistDetailScreen: PlaybackController no inicializado');
+      return;
+    }
+
+    final progress = StatsService.instance.progressOf(song);
+    final startAt = (progress != null && !progress.completed)
+        ? progress.position
+        : Duration.zero;
+
+    // Si la cola de podcasts ya contiene esta canción, saltamos a ella
+    // y hacemos seek. Si no, reemplazamos la cola por la playlist
+    // comenzando en esta canción.
+    final podcastQueue = controller.songsOf(MediaKind.podcast);
+    final existingIndex =
+        podcastQueue.indexWhere((s) => s.path == song.path);
+
+    if (existingIndex >= 0) {
+      await controller.switchToQueue(MediaKind.podcast);
+      await controller.playFromQueue(existingIndex);
+      if (startAt > Duration.zero) {
+        // Pequeña espera para que el handler tenga la voz lista antes
+        // de hacer seek (evita carrera con _loadAndPlay).
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        try {
+          await controller.seek(startAt);
+        } catch (e) {
+          debugPrint('PlaylistDetailScreen: no se pudo hacer seek -> $e');
+        }
+      }
+      return;
+    }
+
+    await controller.switchToQueue(MediaKind.podcast);
+    final startIndex = live.songs.indexWhere((s) => s.path == song.path);
+    await controller.setQueueOf(
+      MediaKind.podcast,
+      live.songs,
+      startIndex: startIndex < 0 ? 0 : startIndex,
+      autoPlay: true,
+    );
+    if (startAt > Duration.zero) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      try {
+        await controller.seek(startAt);
+      } catch (e) {
+        debugPrint('PlaylistDetailScreen: no se pudo hacer seek -> $e');
+      }
+    }
+  }
+
   // ============================================================
   // Cuerpo pantalla completa
   // ============================================================
@@ -314,6 +463,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildCover(context, live),
               const SizedBox(width: 16),
@@ -372,6 +522,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
     Playlist live,
   ) {
     final header = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildCover(context, live),
         const SizedBox(width: 16),
@@ -456,35 +607,61 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   }
 
   Widget _buildHeaderActions(BuildContext context, Playlist live) {
-    return Row(
-      children: [
-        FilledButton.icon(
+  // ¿Hay algo que reanudar? Solo mostramos el botón si existe.
+  final resumeTarget = _isPodcast ? _nextPodcastToResume(live) : null;
+
+  // "Reproducir todo" y "Reanudar" siempre en la misma línea.
+  // Usamos Expanded para que ambos quepan aunque la pantalla sea estrecha,
+  // y el botón de reordenar queda al lado (fijo, sin flex).
+  return Row(
+    children: [
+      Expanded(
+        child: FilledButton.icon(
           onPressed: live.songs.isEmpty
               ? null
               : () => _playAll(context, live),
           icon: const Icon(Icons.play_arrow, size: 20),
-          label: const Text('Reproducir todo'),
+          label: const Text(
+            'Reproducir todo',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
-        if (_canReorder && live.songs.length > 1) ...[
-          const SizedBox(width: 8),
-          IconButton.filledTonal(
-            onPressed: () {
-              if (_reorderMode) {
-                _exitReorderMode();
-              } else {
-                _enterReorderMode(live);
-              }
-            },
-            tooltip: _reorderMode ? 'Listo' : 'Reordenar',
-            icon: Icon(
-              _reorderMode ? Icons.check : Icons.swap_vert,
-              size: 20,
+      ),
+      if (resumeTarget != null) ...[
+        const SizedBox(width: 8),
+        Expanded(
+          child: FilledButton.tonalIcon(
+            onPressed: () => _resumeFromHeader(context, live),
+            icon: const Icon(Icons.play_circle_outline, size: 20),
+            label: const Text(
+              'Reanudar',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
-        ],
+        ),
       ],
-    );
-  }
+      if (_canReorder && live.songs.length > 1) ...[
+        const SizedBox(width: 8),
+        IconButton.filledTonal(
+          onPressed: () {
+            if (_reorderMode) {
+              _exitReorderMode();
+            } else {
+              _enterReorderMode(live);
+            }
+          },
+          tooltip: _reorderMode ? 'Listo' : 'Reordenar',
+          icon: Icon(
+            _reorderMode ? Icons.check : Icons.swap_vert,
+            size: 20,
+          ),
+        ),
+      ],
+    ],
+  );
+}
 
   // ============================================================
   // Lista de canciones
@@ -592,7 +769,29 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       );
     }
 
-    // Lista plana (álbum/artista/podcast).
+    // ============================================================
+    // PODCAST: badge de estado sobre la carátula
+    // (sin botón reanudar; ese vive en el header)
+    // ============================================================
+    if (_isPodcast) {
+      return ListView.builder(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        itemCount: live.songs.length,
+        itemBuilder: (context, index) {
+          final song = live.songs[index];
+          return RepaintBoundary(
+            key: ValueKey<String>('podcast:${song.path}'),
+            child: _PodcastTile(
+              song: song,
+              queueContext: live.songs,
+              queueIndex: index,
+            ),
+          );
+        },
+      );
+    }
+
+    // Lista plana (álbum/artista).
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       itemCount: live.songs.length,
@@ -675,6 +874,122 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
         border: Border.all(color: scheme.outlineVariant),
       ),
       child: Icon(icon, size: 44, color: scheme.onSurfaceVariant),
+    );
+  }
+}
+
+// ============================================================
+// Tile de podcast: badge de estado sobre la carátula
+// (sin botón reanudar; ese vive en el header)
+// ============================================================
+
+class _PodcastTile extends StatelessWidget {
+  final Song song;
+  final List<Song> queueContext;
+  final int queueIndex;
+
+  const _PodcastTile({
+    required this.song,
+    required this.queueContext,
+    required this.queueIndex,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final progress = StatsService.instance.progressOf(song);
+
+    final double fraction = progress?.fraction.clamp(0.0, 1.0) ?? 0.0;
+    final bool completed = progress?.completed ?? false;
+    final bool inProgress =
+        !completed && fraction > 0.0 && fraction < 1.0;
+
+    // Badge sobre la carátula (esquina superior izquierda).
+    final Widget? coverOverlay = completed
+        ? _CoverBadge(
+            icon: Icons.check,
+            background: scheme.primary,
+            foreground: scheme.onPrimary,
+          )
+        : (inProgress
+            ? _CoverProgressBadge(
+                fraction: fraction,
+                background: scheme.tertiary,
+                foreground: scheme.onTertiary,
+              )
+            : null);
+
+    return SongTile(
+      song: song,
+      queueContext: queueContext,
+      queueIndex: queueIndex,
+      coverOverlay: coverOverlay,
+    );
+  }
+}
+
+/// Badge circular "completado" que se dibuja sobre la carátula.
+class _CoverBadge extends StatelessWidget {
+  final IconData icon;
+  final Color background;
+  final Color foreground;
+
+  const _CoverBadge({
+    required this.icon,
+    required this.background,
+    required this.foreground,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 20,
+      height: 20,
+      decoration: BoxDecoration(
+        color: background,
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: Theme.of(context).colorScheme.surface,
+          width: 1.5,
+        ),
+      ),
+      child: Icon(icon, size: 12, color: foreground),
+    );
+  }
+}
+
+/// Badge circular con progreso (anillo) sobre la carátula.
+class _CoverProgressBadge extends StatelessWidget {
+  final double fraction;
+  final Color background;
+  final Color foreground;
+
+  const _CoverProgressBadge({
+    required this.fraction,
+    required this.background,
+    required this.foreground,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 20,
+      height: 20,
+      decoration: BoxDecoration(
+        color: background,
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: Theme.of(context).colorScheme.surface,
+          width: 1.5,
+        ),
+      ),
+      padding: const EdgeInsets.all(3),
+      child: CircularProgressIndicator(
+        value: fraction,
+        strokeWidth: 2,
+        backgroundColor: foreground.withValues(alpha: 0.3),
+        valueColor: AlwaysStoppedAnimation<Color>(foreground),
+      ),
     );
   }
 }
