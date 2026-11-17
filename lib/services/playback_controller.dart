@@ -38,14 +38,11 @@ class PlaybackController {
         androidNotificationChannelId: 'com.example.bassy.audio',
         androidNotificationChannelName: 'Reproducción',
         androidNotificationOngoing: false,
-        androidStopForegroundOnPause: false,
+        androidStopForegroundOnPause: true, // <--- CORREGIDO: Libera el foreground al pausar/detener
         androidNotificationIcon: 'mipmap/ic_launcher',
       ),
     );
 
-    // Carga las transiciones guardadas y las aplica al handler recién
-    // creado. Son independientes de ReplayGain y del volumen del usuario.
-    // (El nivel de Slowed se restaura solo dentro del propio handler.)
     try {
       final settings = await SettingsService.instance.load();
       _handler!.setTransitionConfig(
@@ -60,7 +57,6 @@ class PlaybackController {
       );
     }
 
-    // Estadísticas: solo lectura, no altera la reproducción.
     try {
       await StatsService.instance.init(_handler!);
     } catch (e) {
@@ -70,8 +66,6 @@ class PlaybackController {
     }
   }
 
-  /// Vuelca estadísticas pendientes y cierra el servicio.
-  /// Llamar al cerrar la app (p. ej. desde `WidgetsBindingObserver`).
   Future<void> disposeStats() async {
     await StatsService.instance.dispose();
   }
@@ -120,10 +114,6 @@ class PlaybackController {
   Future<void> setSpeed(double speed) => handler.setSpeed(speed);
   Future<void> setVolume(double volume) => handler.setVolume(volume);
 
-  /// Aplica la configuración de transiciones al handler.
-  /// Llamar desde SettingsScreen cada vez que el usuario cambie
-  /// `transitionsEnabled`, `transitionMode`, `crossfadeSeconds` o
-  /// `fadeSeconds`.
   Future<void> setTransitionConfig({
     required bool enabled,
     required int mode,
@@ -201,8 +191,6 @@ class PlaybackController {
   Stream<bool> get shuffle => handler.shuffleStream;
   Stream<PlayerRepeatMode> get repeat => handler.repeatStream;
 
-  /// Emite el `songKey` de la pista que terminó de forma natural.
-  /// Lo consume `StatsService`.
   Stream<String> get trackCompleted => handler.trackCompletedStream;
 
   ValueListenable<double> get volume => handler.volumeListenable;
@@ -273,11 +261,8 @@ class PlaybackController {
   double get speedNow => _handler?.playerSpeed ?? 1.0;
   double get volumeNow => _handler?.volume ?? 1.0;
 
-  /// Volumen físico real aplicado al player (incluye RG y fade).
-  /// Solo para debug. NO lo uses para el slider del reproductor.
   double get effectiveVolumeNow => _handler?.effectiveVolume ?? 1.0;
 
-  /// Factor de fade actual (0..1). Útil para debug.
   double get fadeFactorNow => _handler?.fadeFactor ?? 1.0;
 
   bool get shuffleEnabled => _handler?.shuffleEnabled ?? false;

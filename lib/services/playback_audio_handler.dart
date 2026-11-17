@@ -165,7 +165,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> _disposeSource(sl.AudioSource? source) async {
     if (source == null) return;
     try {
-      // Al liberar la fuente también se detienen sus voces.
       await _soloud.disposeSource(source);
     } catch (e) {
       debugPrint('PlaybackAudioHandler: error liberando fuente -> $e');
@@ -191,7 +190,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  /// Detiene y libera la voz principal (y cualquier crossfade).
   Future<void> _releaseVoice() async {
     _cancelCrossfade();
     final s = _source;
@@ -216,8 +214,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // EFECTOS SOLO PARA MÚSICA
   // ============================================================
 
-  /// Reverb: mientras la cola activa es de podcast se pone a 0 (sin
-  /// persistir) y al volver a música se restaura el nivel del usuario.
   void _syncReverbForQueue() {
     final reverb = ReverbService.instance;
     try {
@@ -254,8 +250,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Stream<Duration?> get durationStream => _durationCtrl.stream;
   Stream<bool> get playingStream => _playingCtrl.stream;
 
-  /// Emite el `songKey` (path o title) de la pista que terminó de forma
-  /// natural. Sirve para contar reproducciones en StatsService.
   // ===== STATS =====
   Stream<String> get trackCompletedStream => _trackCompletedCtrl.stream;
 
@@ -279,15 +273,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get isPlaying => _playing;
   double get playerSpeed => _speed;
 
-  /// Factor de Slowed actual (1.0 = apagado). Solo afecta a música.
   double get slowed => _slowed;
   ValueListenable<double> get slowedListenable => _slowedNotifier;
 
-  /// Volumen del usuario (0..1). NO incluye RG.
   double get volume => _userVolume;
   ValueListenable<double> get volumeListenable => _volumeNotifier;
 
-  /// Volumen físico real de la voz (incluye RG + fade). Solo debug.
   double get effectiveVolume => _lastVol < 0 ? _userVolume : _lastVol;
 
   double get fadeFactor => _fadeFactor;
@@ -327,7 +318,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     return v;
   }
 
-  /// Índice de canción de la siguiente pista, o null si no hay.
   int? _nextIndexOf(PlaybackQueue q) {
     _ensureOrder(q);
     final order = q.sourceOrder;
@@ -362,8 +352,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   String _songKeyOf(Song s) =>
       (s.path != null && s.path!.isNotEmpty) ? s.path! : s.title;
 
-  /// Notifica que la pista en [songIndex] de la cola activa terminó de
-  /// forma natural. Llamar ANTES de cambiar de pista.
   // ===== STATS =====
   void _emitTrackCompleted(int songIndex) {
     final q = _activeQueue;
@@ -397,7 +385,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   static double _ease(double t) =>
       math.sin(t.clamp(0.0, 1.0).toDouble() * math.pi / 2);
 
-  /// Factor del modo Fade In/Out (función pura de posición/duración).
   double _computeFadeFactor(Duration position, Duration? duration) {
     if (!_transitionsEnabled || _transitionMode != 1) return 1.0;
 
@@ -465,7 +452,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  /// La voz principal dejó de existir: fin de pista o invalidación externa.
   void _onVoiceEnded() {
     final nearEnd = _duration > Duration.zero &&
         _position >= _duration - const Duration(seconds: 2);
@@ -479,7 +465,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    // Había una siguiente pista precargada: se promueve sin hueco.
     if (_nextSource != null && (_crossfading || _startNextVoice())) {
       _finishCrossfade();
       return;
@@ -493,7 +478,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // ============================================================
 
   double _baseLinear() {
-    // ReplayGain solo aplica a música.
     final rg = (_isMusicQueue && _replayGainDb != 0)
         ? math.pow(10, _replayGainDb / 20).toDouble()
         : 1.0;
@@ -538,7 +522,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   void _onReplayGainChanged() {
     _replayGainDb = _rg.enabled.value ? _rg.activeGainDb.value : 0.0;
-    // El ReplayGain solo afecta a música; en podcast no hace falta tocar voces.
     if (!_isMusicQueue) return;
     if (_crossfading) {
       _mixCrossfade(_position);
@@ -547,7 +530,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  /// Aplica la velocidad efectiva (velocidad × slowed) a las voces activas.
   void _applySpeedToVoices() {
     final s = _effectiveSpeed;
     try {
@@ -567,22 +549,17 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _publish();
   }
 
-  /// Efecto Slowed: [factor] 1.0 = apagado, [kMinSlowed]..1.0 = más lento
-  /// y más grave (velocidad y tono van juntos). Solo afecta a música.
   Future<void> setSlowed(double factor) async {
     final v = factor.clamp(kMinSlowed, 1.0).toDouble();
     if ((v - _slowed).abs() < 0.0005) return;
     _slowed = v;
     _slowedNotifier.value = v;
-    // En podcast el slowed no aplica: no tocar voces ni cancelar crossfade.
     if (!_isMusicQueue) return;
-    // La ventana de crossfade depende de la velocidad: se recalcula.
     _cancelCrossfade();
     _applySpeedToVoices();
     _publish();
   }
 
-  /// Guarda el nivel de Slowed actual (llamar al soltar el slider).
   Future<void> persistSlowed() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -592,7 +569,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  /// Restaura el nivel de Slowed guardado al iniciar.
   Future<void> _loadSlowed() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -623,7 +599,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       final x = _xfWindowMs();
       if (x < 500) return;
 
-      // Fase 1: precargar con antelación.
       if (_nextSource == null) {
         final preloadAt =
             _duration - Duration(milliseconds: x) - _xfPreloadLead;
@@ -635,7 +610,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         return;
       }
 
-      // Fase 2: arrancar al entrar en la ventana.
       if (position.inMilliseconds < _xfStartMs) return;
 
       if (!_startNextVoice(lateMs: position.inMilliseconds - _xfStartMs)) {
@@ -645,7 +619,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       }
     }
 
-    // Fase 3: mezclar. Fase 4: terminar.
     final t = _mixCrossfade(position);
     if (t >= 1.0) _finishCrossfade();
   }
@@ -729,7 +702,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  /// Aplica volúmenes de ambas voces según el progreso de la mezcla.
   double _mixCrossfade(Duration position) {
     final span = math.max(1, _xfSpanMs);
     final t = ((position.inMilliseconds - _xfStartMs) / span)
@@ -753,8 +725,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     return t;
   }
 
-  /// La voz entrante pasa a ser la principal (nunca se hace play() de
-  /// nuevo sobre la misma fuente).
   void _finishCrossfade() {
     final ns = _nextSource;
     final nh = _nextHandle;
@@ -765,7 +735,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     // ===== STATS =====
-    // La pista saliente terminó de forma natural (crossfade completo).
     _emitTrackCompleted(_activeQueue.currentIndex);
 
     final oldSource = _source;
@@ -793,7 +762,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _emitControlsState();
   }
 
-  /// Cancela cualquier crossfade (en curso o precargado).
   void _cancelCrossfade() {
     _xfToken++;
     _xfPreparing = false;
@@ -834,7 +802,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _resumeAfterLoad = autoPlay;
     _cancelCrossfade();
 
-    // Silencia la pista anterior mientras se carga la nueva.
     final oldHandle = _handle;
     if (oldHandle != null && _isValid(oldHandle)) {
       try {
@@ -867,8 +834,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       _duration = _soloud.getLength(source);
       if (!_durationCtrl.isClosed) _durationCtrl.add(_duration);
 
-      // La voz nace en pausa y a volumen 0: seek, velocidad y volumen se
-      // dejan listos ANTES de que suene el primer sample.
       final handle = _soloud.play(
         source,
         volume: 0.0,
@@ -926,7 +891,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       final q = _activeQueue;
 
       // ===== STATS =====
-      // Fin natural de la pista actual: notificar antes de cambiar.
       _emitTrackCompleted(q.currentIndex);
 
       if (q.repeatMode == PlayerRepeatMode.one) {
@@ -938,7 +902,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       if (next != null) {
         await _loadAndPlay(next, autoPlay: true);
       } else {
-        // Fin de la cola: se deja lista la primera pista, en pausa.
         _ensureOrder(q);
         final first = q.sourceOrder.isEmpty ? 0 : q.sourceOrder.first;
         await _loadAndPlay(first, autoPlay: false);
@@ -1011,10 +974,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     if (updateQueue) {
       if (song == null) {
-        if (_lastMediaItemKey != null) {
-          mediaItem.add(null);
-          _lastMediaItemKey = null;
-        }
+        if (mediaItem.value != null) mediaItem.add(null);
+        _lastMediaItemKey = null;
       } else {
         final liveDuration = (!_loading && _duration > Duration.zero)
             ? _duration
@@ -1086,6 +1047,32 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         shuffleMode: _systemShuffleMode,
       ),
     );
+  }
+
+  Future<void> _publishStopped() async {
+    _lastMediaItemKey = null;
+    _lastQueueKey = null;
+    _lastControls = const <MediaControl>[];
+    _lastCompactActionIndices = const <int>[];
+
+    mediaItem.add(null);
+    queue.add(const <MediaItem>[]);
+    
+    playbackState.add(
+      PlaybackState(
+        controls: const <MediaControl>[],
+        systemActions: const <MediaAction>{},
+        androidCompactActionIndices: const <int>[],
+        processingState: AudioProcessingState.idle, // <--- Obliga a Android a descartar la sesión
+        playing: false,
+        updatePosition: Duration.zero,
+        bufferedPosition: Duration.zero,
+        speed: 1.0,
+        queueIndex: null,
+      ),
+    );
+
+    await super.stop();
   }
 
   MediaItem _toMediaItem(Song song, [Duration? duration]) {
@@ -1252,7 +1239,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     final targetQueue = _queueFor(kind);
 
-    // ---- Cola de OTRO tipo ----
     if (kind != _activeQueue.kind) {
       targetQueue.songs = playable;
       targetQueue.resetOrder();
@@ -1262,12 +1248,10 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       targetQueue.savedPlaying = autoPlay;
 
       if (!autoPlay) {
-        // Solo se deja preparada, sin tocar lo que suena.
         _emitControlsState();
         return;
       }
 
-      // Se va a reproducir: la cola contraria (la que sonaba) se borra.
       final old = _activeQueue;
       final h = _handle;
       if (h != null && _isValid(h)) {
@@ -1290,7 +1274,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    // ---- Misma cola activa ----
     _activeQueue.shuffleEnabled = false;
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
 
@@ -1298,7 +1281,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _activeQueue.resetOrder();
     _activeQueue.currentIndex = newStart;
 
-    // Si se va a reproducir, la cola contraria se vacía.
     if (autoPlay) _queueFor(_otherKind(kind)).reset();
 
     await _loadAndPlay(newStart, autoPlay: autoPlay);
@@ -1341,7 +1323,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       target.savedPlaying = autoPlay;
     }
 
-    // Si la cola destino va a sonar, la anterior se borra.
     if (target.songs.isNotEmpty && target.savedPlaying) {
       _queueFor(_otherKind(kind)).reset();
     }
@@ -1350,7 +1331,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastMediaItemKey = null;
     _lastQueueKey = null;
 
-    // Efectos (reverb) solo en música: se silencian/restauran al cambiar.
     _syncReverbForQueue();
 
     if (!_activeQueueCtrl.isClosed) _activeQueueCtrl.add(kind);
@@ -1415,17 +1395,20 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _loadGeneration++;
     _loadToken++;
     _loading = false;
+    _resumeAfterLoad = false;
+    _handlingCompleted = false;
 
-    _activeQueue.saveLiveState(position: _position, playing: false);
-
+    _cancelCrossfade();
     _musicQueue.reset();
     _chaptersQueue.reset();
 
-    _resumeAfterLoad = false;
     await _releaseVoice();
     _setPlaying(false);
+
     _position = Duration.zero;
     _duration = Duration.zero;
+    _fadeFactor = 1.0;
+    _lastVol = -1;
 
     _activeQueue = _musicQueue;
     _syncReverbForQueue();
@@ -1433,12 +1416,14 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     if (!_activeQueueCtrl.isClosed) _activeQueueCtrl.add(MediaKind.music);
     if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
     if (!_repeatCtrl.isClosed) _repeatCtrl.add(PlayerRepeatMode.off);
-
-    _lastMediaItemKey = null;
-    _lastQueueKey = null;
+    if (!_positionCtrl.isClosed) _positionCtrl.add(Duration.zero);
+    if (!_durationCtrl.isClosed) _durationCtrl.add(null);
 
     _rg.notifyCurrentSong(null);
-    _emitControlsState();
+    _emitCanGoPrevious();
+    _emitCanGoNext();
+
+    await _publishStopped();
   }
 
   // ============================================================
@@ -1521,7 +1506,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     q.currentIndex = newIndex;
 
     if (isActive && wasCurrent) {
-      // Se quitó la pista que sonaba: se carga la que ocupa su lugar.
       await _loadAndPlay(newIndex, autoPlay: wasPlaying);
       return;
     }
@@ -1623,7 +1607,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       }
       _setPlaying(true);
     } else {
-      // Voz invalidada (p. ej. por el sistema): se recarga donde iba.
       await _loadAndPlay(q.currentIndex, autoPlay: true, start: _position);
     }
     _publish();
@@ -1645,11 +1628,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> stop() async {
-    _loadGeneration++;
-    _cancelCrossfade();
-    _activeQueue.saveLiveState(position: _position, playing: false);
-    await _clearQueueOf(_activeQueue.kind);
-    await super.stop();
+    await clearAllQueues();
+    await super.stop(); // <--- Destruye la MediaSession nativa y limpia el fantasma de Android
   }
 
   @override
