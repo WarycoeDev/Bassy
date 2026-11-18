@@ -610,9 +610,6 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   // ¿Hay algo que reanudar? Solo mostramos el botón si existe.
   final resumeTarget = _isPodcast ? _nextPodcastToResume(live) : null;
 
-  // "Reproducir todo" y "Reanudar" siempre en la misma línea.
-  // Usamos Expanded para que ambos quepan aunque la pantalla sea estrecha,
-  // y el botón de reordenar queda al lado (fijo, sin flex).
   return Row(
     children: [
       Expanded(
@@ -628,20 +625,34 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
           ),
         ),
       ),
+
       if (resumeTarget != null) ...[
         const SizedBox(width: 8),
-        Expanded(
-          child: FilledButton.tonalIcon(
+
+        // Podcast: Reanudar como botón de solo icono.
+        if (_isPodcast)
+          IconButton.filledTonal(
             onPressed: () => _resumeFromHeader(context, live),
-            icon: const Icon(Icons.play_circle_outline, size: 20),
-            label: const Text(
-              'Reanudar',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            tooltip: 'Reanudar',
+            icon: const Icon(
+              Icons.play_circle_outline,
+              size: 22,
+            ),
+          )
+        else
+          Expanded(
+            child: FilledButton.tonalIcon(
+              onPressed: () => _resumeFromHeader(context, live),
+              icon: const Icon(Icons.play_circle_outline, size: 20),
+              label: const Text(
+                'Reanudar',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ),
-        ),
       ],
+
       if (_canReorder && live.songs.length > 1) ...[
         const SizedBox(width: 8),
         IconButton.filledTonal(

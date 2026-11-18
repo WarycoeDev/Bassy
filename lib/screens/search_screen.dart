@@ -946,6 +946,7 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  // Álbumes, artistas y podcasts usan el mismo tile que LibraryScreen.
   List<Widget> _playlistSection(
     BuildContext context, {
     required String title,
@@ -1023,6 +1024,18 @@ class _SearchScreenState extends State<SearchScreen> {
   // ─────────────────────────────────────────────────────────────
   // TILE para playlists (álbum/artista/podcast) — más alto
   // ─────────────────────────────────────────────────────────────
+  // -------------------------------------------------------------------------
+  // Tile compartido con LibraryScreen para álbumes, artistas y podcasts.
+  //
+  // Mantiene exactamente las mismas proporciones visuales del listado de
+  // LibraryScreen:
+  //   - tile: 88 px de alto
+  //   - padding: 6 px
+  //   - portada: 76 × 76 px
+  //   - separación portada/texto: 12 px
+  //   - separación entre tiles: 10 px
+  //   - artistas: portada circular
+  // -------------------------------------------------------------------------
   Widget _playlistTile(
     BuildContext context, {
     required _SearchEntry entry,
@@ -1032,46 +1045,54 @@ class _SearchScreenState extends State<SearchScreen> {
   }) {
     final scheme = Theme.of(context).colorScheme;
     final playlist = entry.playlist!;
-    final cover = entry.cover; // precalculada en el índice
+    final coverPath = entry.cover;
 
-    const double coverSize = 68;
-    final radius = roundCover
-        ? BorderRadius.circular(coverSize / 2)
-        : BorderRadius.circular(10);
+    const double tileHeight = 88;
+    const double coverSize = 76;
+    const double tilePadding = 6;
+    const double tileGap = 10;
+
+    final cover = SizedBox(
+      width: coverSize,
+      height: coverSize,
+      child: coverPath != null && coverPath.isNotEmpty
+          ? Image.file(
+              File(coverPath),
+              fit: BoxFit.cover,
+              cacheWidth: 160,
+              filterQuality: FilterQuality.low,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => _buildSearchCoverFallback(
+                context,
+                icon: icon,
+              ),
+            )
+          : _buildSearchCoverFallback(
+              context,
+              icon: icon,
+            ),
+    );
 
     return GestureDetector(
       onTap: () => _openPlaylist(playlist),
       behavior: HitTestBehavior.opaque,
       child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        padding: const EdgeInsets.all(10),
+        height: tileHeight,
+        margin: const EdgeInsets.only(bottom: tileGap),
+        padding: const EdgeInsets.all(tilePadding),
         decoration: BoxDecoration(
           color: scheme.surfaceContainer,
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
           children: [
-            Container(
-              width: coverSize,
-              height: coverSize,
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainerHigh,
-                borderRadius: radius,
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: cover != null
-                  ? Image.file(
-                      File(cover),
-                      fit: BoxFit.cover,
-                      cacheWidth: 160, // decodifica pequeño, no la portada full
-                      filterQuality: FilterQuality.low,
-                      gaplessPlayback: true,
-                      errorBuilder: (_, __, ___) =>
-                          Icon(icon, size: 28, color: scheme.onSurfaceVariant),
-                    )
-                  : Icon(icon, size: 28, color: scheme.onSurfaceVariant),
-            ),
-            const SizedBox(width: 14),
+            roundCover
+                ? ClipOval(child: cover)
+                : ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: cover,
+                  ),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1082,17 +1103,17 @@ class _SearchScreenState extends State<SearchScreen> {
                     style: TextStyle(
                       color: scheme.onSurface,
                       fontWeight: FontWeight.w600,
-                      fontSize: 15,
+                      fontSize: 14,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 3),
                   Text(
                     '${playlist.subtitle} · $meta',
                     style: TextStyle(
                       color: scheme.onSurfaceVariant,
-                      fontSize: 12.5,
+                      fontSize: 11.5,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -1100,9 +1121,29 @@ class _SearchScreenState extends State<SearchScreen> {
                 ],
               ),
             ),
-            Icon(Icons.chevron_right, color: scheme.onSurfaceVariant, size: 22),
+            Icon(
+              Icons.chevron_right,
+              color: scheme.onSurfaceVariant,
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildSearchCoverFallback(
+    BuildContext context, {
+    required IconData icon,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+
+    return Container(
+      color: scheme.surfaceContainerHigh,
+      alignment: Alignment.center,
+      child: Icon(
+        icon,
+        size: 34,
+        color: scheme.onSurfaceVariant,
       ),
     );
   }
