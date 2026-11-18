@@ -454,6 +454,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       confirmLabel: 'Guardar',
       cancelLabel: 'Cancelar',
       maxLength: 60,
+      coverPath: _userPlaylistCover(pl),          // 👈 carátula
+    fallbackIcon: Icons.queue_music,
     );
     if (result == null || !result.confirmed) return;
     final name = result.text.trim();
@@ -522,7 +524,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       context,
       title: pl.name,
       subtitle: '${pl.songPaths.length} canciones',
-      fallbackIcon: Icons.queue_music,
+      coverPath: _userPlaylistCover(pl),           // 👈 carátula
+    fallbackIcon: Icons.queue_music, 
       message:
           '¿Eliminar «${pl.name}»? El archivo .bassy se borrará del disco.',
       confirmLabel: 'Eliminar',
