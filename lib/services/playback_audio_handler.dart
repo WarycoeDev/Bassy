@@ -88,7 +88,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   static const Duration _positionEmitEvery = Duration(milliseconds: 100);
   static const Duration _publishEvery = Duration(milliseconds: 250);
   static const Duration _rewindThreshold = Duration(seconds: 3);
-  static const int _diskLoadThresholdBytes = 64 * 1024 * 1024;
+
+  // ⚡ Solo archivos muy pequeños se decodifican a RAM. El resto se
+  // streamea desde disco (LoadMode.disk): arranque casi instantáneo en
+  // vez de decodificar todo el PCM antes de sonar.
+  // Si notas duraciones/seeks imprecisos en MP3 VBR, sube este valor.
+  static const int _diskLoadThresholdBytes = 2 * 1024 * 1024; // 2 MB
 
   Timer? _ticker;
   DateTime _lastPositionEmit = DateTime.fromMillisecondsSinceEpoch(0);
@@ -142,25 +147,49 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _canGoNext = false;
 
   PlaybackAudioHandler() {
-    _activeQueue = _musicQueue;
-    _rg.activeGainDb.addListener(_onReplayGainChanged);
-    _onReplayGainChanged();
-    _publish();
-    unawaited(_loadSlowed());
-  }
+  _activeQueue = _musicQueue;
+  _rg.activeGainDb.addListener(_onReplayGainChanged);
+  _onReplayGainChanged();
+  _publish();
+  unawaited(_loadSlowed());
+
+  // Pre-inicializa el motor, diferido para no competir con el arranque.
+  Future<void>.delayed(const Duration(milliseconds: 800), () {
+    unawaited(_ensureEngine().catchError((Object e) {
+      debugPrint('PlaybackAudioHandler: pre-init del motor falló -> $e');
+    }));
+  });
+}
 
   // ============================================================
   // MOTOR
   // ============================================================
 
   Future<void> _ensureEngine() async {
+  if (_soloud.isInitialized) return;
+  await (_engineInit ??= () async {
     if (_soloud.isInitialized) return;
-    await (_engineInit ??= _soloud.init().whenComplete(() {
-      _engineInit = null;
-    }));
-    ReverbService.instance.applyToEngine();
-    _syncReverbForQueue();
-  }
+    try {
+      if (Platform.isLinux) {
+        await _soloud.setLinuxAudioBackend(sl.LinuxAudioBackend.pulseAudio);
+      }
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: backend de audio no aplicado -> $e');
+    }
+    if (_soloud.isInitialized) return;
+    try {
+      await _soloud.init();
+    } catch (e) {
+      // Si otro punto lo inicializó entretanto, no es un error real.
+      if (!_soloud.isInitialized) rethrow;
+    }
+  }()
+      .whenComplete(() {
+    _engineInit = null;
+  }));
+  ReverbService.instance.applyToEngine();
+  _syncReverbForQueue();
+}
 
   Future<void> _disposeSource(sl.AudioSource? source) async {
     if (source == null) return;
@@ -786,6 +815,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     int songIndex, {
     required bool autoPlay,
     Duration start = Duration.zero,
+    int skipDepth = 0,
   }) async {
     final q = _activeQueue;
     if (songIndex < 0 || songIndex >= q.songs.length) return;
@@ -794,6 +824,21 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     final path = song.path;
     if (path == null || path.isEmpty || !File(path).existsSync()) {
       debugPrint('PlaybackAudioHandler: archivo no disponible -> $path');
+      // ⚡ Ya no validamos toda la cola al crearla; los archivos
+      // inexistentes se saltan aquí, al llegar a ellos.
+      if (autoPlay && skipDepth < 20) {
+        final prevIdx = q.currentIndex;
+        q.currentIndex = songIndex;
+        final next = _nextIndexOf(q);
+        if (next != null && next != songIndex) {
+          return _loadAndPlay(
+            next,
+            autoPlay: true,
+            skipDepth: skipDepth + 1,
+          );
+        }
+        q.currentIndex = prevIdx;
+      }
       return;
     }
 
@@ -802,12 +847,19 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _resumeAfterLoad = autoPlay;
     _cancelCrossfade();
 
+    // Pausamos la voz vieja YA, pero NO la liberamos todavía. La
+    // liberación se hace en background después de que la nueva voz
+    // empiece a sonar.
+    final oldSource = _source;
     final oldHandle = _handle;
     if (oldHandle != null && _isValid(oldHandle)) {
       try {
         _soloud.setPause(oldHandle, true);
       } catch (_) {}
     }
+    _source = null;
+    _handle = null;
+    _lastVol = -1;
 
     q.currentIndex = songIndex;
     _publish();
@@ -815,7 +867,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     try {
       await _ensureEngine();
 
-      final size = await File(path).length();
+      int size = 0;
+      try {
+        size = File(path).lengthSync();
+      } catch (_) {
+        size = 0;
+      }
       final source = await _soloud.loadFile(
         path,
         mode: size > _diskLoadThresholdBytes
@@ -827,8 +884,6 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         await _disposeSource(source);
         return;
       }
-
-      await _releaseVoice();
 
       _source = source;
       _duration = _soloud.getLength(source);
@@ -873,8 +928,15 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
       _lastPositionEmit = DateTime.fromMillisecondsSinceEpoch(0);
       if (!_positionCtrl.isClosed) _positionCtrl.add(_position);
+
+      // Liberar la voz anterior en background.
+      if (oldSource != null) {
+        unawaited(_disposeSource(oldSource));
+      }
     } catch (e, st) {
       debugPrint('PlaybackAudioHandler: carga falló -> $e\n$st');
+      // Si falló la nueva, al menos liberamos la vieja.
+      if (oldSource != null) unawaited(_disposeSource(oldSource));
       _setPlaying(false);
     } finally {
       if (token == _loadToken) _loading = false;
@@ -930,6 +992,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     return unique;
   }
 
+  /// Comprobación COMPLETA (toca el disco). Úsala solo para una canción
+  /// suelta, nunca en bucle sobre toda la cola.
   bool _isPlayable(Song s) {
     final p = s.path;
     if (p == null || p.isEmpty) return false;
@@ -938,6 +1002,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       return false;
     }
     return true;
+  }
+
+  /// Comprobación BARATA (sin disco) para filtrar colas grandes.
+  bool _hasPath(Song s) {
+    final p = s.path;
+    return p != null && p.isNotEmpty;
   }
 
   // ============================================================
@@ -983,13 +1053,16 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         final key =
             '${_activeQueue.kind.name}|${song.path ?? song.title}|${liveDuration?.inMilliseconds}';
         if (key != _lastMediaItemKey) {
-          mediaItem.add(_toMediaItem(song, liveDuration));
+          mediaItem.add(_toMediaItem(song, liveDuration, true));
           _lastMediaItemKey = key;
         }
       }
 
+      // ⚡ Clave O(1): toda mutación de la cola asigna una lista nueva,
+      // así que identityHashCode + length detecta los cambios sin
+      // recorrer ni unir todos los paths (esto se llama cada 250 ms).
       final queueKey =
-          '${_activeQueue.kind.name}#${_activeQueue.songs.map((s) => s.path ?? s.title).join('|')}';
+          '${_activeQueue.kind.name}#${identityHashCode(_activeQueue.songs)}#${_activeQueue.songs.length}';
       if (queueKey != _lastQueueKey) {
         queue.add(
           _activeQueue.songs
@@ -1057,13 +1130,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     mediaItem.add(null);
     queue.add(const <MediaItem>[]);
-    
+
     playbackState.add(
       PlaybackState(
         controls: const <MediaControl>[],
         systemActions: const <MediaAction>{},
         androidCompactActionIndices: const <int>[],
-        processingState: AudioProcessingState.idle, // <--- Obliga a Android a descartar la sesión
+        processingState: AudioProcessingState.idle, // Obliga a Android a descartar la sesión
         playing: false,
         updatePosition: Duration.zero,
         bufferedPosition: Duration.zero,
@@ -1075,17 +1148,25 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     await super.stop();
   }
 
-  MediaItem _toMediaItem(Song song, [Duration? duration]) {
+  /// [checkArt] = true comprueba en disco que exista la carátula (solo
+  /// para el item actual). Para los items de la cola NO se comprueba:
+  /// hacerlo por cada canción bloqueaba el hilo de UI.
+  MediaItem _toMediaItem(
+    Song song, [
+    Duration? duration,
+    bool checkArt = false,
+  ]) {
     final cover = song.coverPath;
     final d = song.duration;
+    final hasCover = cover != null &&
+        cover.isNotEmpty &&
+        (!checkArt || File(cover).existsSync());
     return MediaItem(
       id: song.path ?? song.title,
       title: song.title,
       artist: song.subtitle,
       duration: duration ?? ((d != null && d > Duration.zero) ? d : null),
-      artUri: cover != null && cover.isNotEmpty && File(cover).existsSync()
-          ? Uri.file(cover)
-          : null,
+      artUri: hasCover ? Uri.file(cover) : null,
       extras: {
         'path': song.path,
         'queueKind': _activeQueue.kind.name,
@@ -1226,7 +1307,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     final target = songs[startIndex];
     final unique = _dedupeSongs(songs);
-    final playable = unique.where(_isPlayable).toList();
+
+    // ⚡ Filtro barato (sin tocar el disco). Antes se hacía
+    // File.existsSync() por cada canción de la cola en el hilo de UI,
+    // lo que causaba el retraso al abrir. Los archivos que ya no
+    // existan se saltan en _loadAndPlay.
+    final playable = unique.where(_hasPath).toList();
     if (playable.isEmpty) {
       debugPrint('PlaybackAudioHandler: no hay fuentes válidas en la cola');
       await _clearQueueOf(kind);
@@ -1629,7 +1715,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> stop() async {
     await clearAllQueues();
-    await super.stop(); // <--- Destruye la MediaSession nativa y limpia el fantasma de Android
+    await super.stop(); // Destruye la MediaSession nativa y limpia el fantasma de Android
   }
 
   @override
