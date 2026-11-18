@@ -2,7 +2,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../screens/home_screen.dart';
 import '../screens/library_screen.dart';
 import '../screens/search_screen.dart';
 import '../screens/settings_screen.dart';
@@ -16,35 +15,30 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> {
-  static const int _homeIndex = 0;
-  static const int _libraryIndex = 1;
+  // Biblioteca es la primera pestaña (y raíz lógica de la app).
+  static const int _libraryIndex = 0;
 
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
-  int _selectedIndex = _homeIndex;
+  // ✅ Biblioteca como pestaña inicial
+  int _selectedIndex = _libraryIndex;
 
   /// Lazy-mount: cada pestaña se construye la primera vez que se visita
-  /// y se mantiene montada después.
+  /// y se mantiene montada después. La pestaña inicial (Biblioteca)
+  /// se monta desde el arranque.
   late final List<bool> _visited = <bool>[
-    true, // Inicio siempre montada
-    false,
-    false,
-    false,
+    true,  // Biblioteca (pestaña inicial, montada desde el arranque)
+    false, // Búsqueda
+    false, // Configuración
   ];
 
   final List<Widget> _screens = const [
-    HomeScreen(),
     LibraryScreen(),
     SearchScreen(),
     SettingsScreen(),
   ];
 
   static const _destinations = <_NavDestination>[
-    _NavDestination(
-      icon: Icons.home_outlined,
-      selectedIcon: Icons.home_rounded,
-      label: 'Inicio',
-    ),
     _NavDestination(
       icon: Icons.library_music_outlined,
       selectedIcon: Icons.library_music_rounded,
@@ -81,7 +75,7 @@ class _AppShellState extends State<AppShell> {
   ///  1. Drawer abierto → cerrarlo.
   ///  2. Biblioteca: playlist/álbum/artista inline abierto → cerrarlo.
   ///  3. Biblioteca: ruta empujada en su Navigator anidado → popearla.
-  ///  4. Pestaña distinta de Inicio → volver a Inicio.
+  ///  4. Pestaña distinta de Biblioteca → volver a Biblioteca.
   ///  5. Si no, salir de la app.
   void _handleBack() {
     final scaffold = _scaffoldKey.currentState;
@@ -98,14 +92,14 @@ class _AppShellState extends State<AppShell> {
         nav.pop();
         return;
       }
-    }
 
-    if (_selectedIndex != _homeIndex) {
-      setState(() => _selectedIndex = _homeIndex);
+      // Ya estamos en la raíz lógica (Biblioteca) sin nada que popear.
+      SystemNavigator.pop();
       return;
     }
 
-    SystemNavigator.pop();
+    // Otra pestaña → volver a Biblioteca.
+    setState(() => _selectedIndex = _libraryIndex);
   }
 
   @override

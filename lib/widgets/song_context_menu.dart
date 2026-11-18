@@ -9,6 +9,7 @@ import '../screens/library_screen.dart';
 import '../screens/playlist_detail_screen.dart';
 import '../services/favorites_store.dart';
 import '../services/playback_controller.dart';
+import '../services/stats_service.dart';
 import 'action_menu.dart';
 import 'input_menu.dart';
 import 'playlist_picker_dialog.dart';
@@ -85,8 +86,6 @@ class SongContextMenu {
         onTap: () async {
           await controller.switchToQueue(kind);
           await controller.addToQueueOf(kind, song);
-          // Nota: si tienes un método para insertar al inicio,
-          // úsalo aquí en lugar de addToQueueOf.
         },
       ),
       ActionMenuItem(
@@ -168,16 +167,38 @@ class SongContextMenu {
     int? queueIndex,
   }) {
     if (song.kind == MediaKind.podcast) {
+      final hasProgress = _hasProgress(song);
+
       return [
+        // --- Reproducción ---
+        // Sin progreso guardado: un solo botón "Reproducir" (desde 0).
+        // Con progreso: "Reproducir desde el principio" + "Reanudar".
         ActionMenuItem(
-          icon: Icons.play_arrow,
-          label: 'Reproducir ahora',
-          onTap: () => _playNow(
+          icon: hasProgress ? Icons.replay : Icons.play_arrow,
+          label: hasProgress
+              ? 'Reproducir desde el principio'
+              : 'Reproducir',
+          onTap: () => _playPodcastFromStart(
             song,
             queueContext: queueContext,
             queueIndex: queueIndex,
           ),
         ),
+        if (hasProgress)
+          ActionMenuItem(
+            icon: Icons.play_circle_outline,
+            label: 'Reanudar',
+            onTap: () => _resumePodcast(
+              song,
+              queueContext: queueContext,
+              queueIndex: queueIndex,
+            ),
+          ),
+
+        // --- Cola (solo añadir; sin "Quitar de la cola" en podcast) ---
+        ..._queueAddOnly(song),
+
+        // --- Stats / marcado ---
         ..._podcastActions(context, song),
       ];
     }
@@ -186,7 +207,6 @@ class SongContextMenu {
     final isFav = favorites.contains(song);
 
     return [
-      // --- Reproducción ---
       ActionMenuItem(
         icon: Icons.play_arrow,
         label: 'Reproducir ahora',
@@ -196,11 +216,7 @@ class SongContextMenu {
           queueIndex: queueIndex,
         ),
       ),
-
-      // --- Cola ---
       ..._queueAddRemove(song),
-
-      // --- Biblioteca personal ---
       ActionMenuItem(
         icon: Icons.playlist_add,
         label: 'Añadir a playlist',
@@ -212,12 +228,32 @@ class SongContextMenu {
         onTap: () async {
           await favorites.toggle(song);
           if (!context.mounted) return;
-          
         },
       ),
-
-      // --- Navegación ---
       ..._musicActions(context, song),
+    ];
+  }
+
+  /// Solo la acción de añadir a la cola (si no está ya). No incluye
+  /// "Quitar de la cola". Se usa en el menú de podcast.
+  static List<ActionMenuItem> _queueAddOnly(Song song) {
+    final c = PlaybackController.instance;
+    final handler = c.isReady ? c.handler : null;
+    final kind = song.kind;
+
+    final queueSongs = handler?.songsOf(kind) ?? const <Song>[];
+    final inQueue = queueSongs.any((s) => s.path == song.path);
+
+    if (inQueue) return const [];
+    return [
+      ActionMenuItem(
+        icon: Icons.queue_music,
+        label: 'Añadir a la cola',
+        onTap: () async {
+          if (handler == null) return;
+          await handler.addToQueueOf(kind, song);
+        },
+      ),
     ];
   }
 
@@ -252,8 +288,6 @@ class SongContextMenu {
             ? 'Quitar de la cola (sonando ahora)'
             : 'Quitar de la cola',
         isDestructive: true,
-        // Deshabilitado si es la canción actual: quitar la canción en
-        // reproducción puede dejar la cola en un estado raro.
         enabled: !isCurrent,
         onTap: () async {
           if (handler == null) return;
@@ -313,6 +347,128 @@ class SongContextMenu {
     }
   }
 
+  // ============================================================
+  // Reproducción de podcast: desde el principio / reanudar
+  // ============================================================
+
+  /// ¿Hay progreso guardado pendiente de terminar para [song]?
+  /// Devuelve `false` si nunca se ha empezado o si ya está completado.
+  static bool _hasProgress(Song song) {
+    final stats = StatsService.instance;
+    if (stats.isPlayed(song)) return false;
+    final progress = stats.progressOf(song);
+    final position = progress?.position ?? Duration.zero;
+    return position > Duration.zero && !(progress?.completed ?? false);
+  }
+
+  /// Indica si el episodio tiene progreso guardado pendiente de terminar.
+  static bool _canResume(Song song) => _hasProgress(song);
+
+  /// Carga en la cola todos los episodios de [queueContext] (si se
+  /// proporciona) y reproduce [song] desde [start]. Si no hay contexto,
+  /// se comporta como antes: cola de un solo episodio.
+  static Future<void> _playPodcastInContext(
+    Song song, {
+    required Duration start,
+    List<Song>? queueContext,
+    int? queueIndex,
+  }) async {
+    final c = PlaybackController.instance;
+    if (!c.isReady) return;
+
+    final ctx = queueContext
+        ?.where((s) => s.kind == MediaKind.podcast)
+        .toList();
+
+    if (kDebugMode) {
+      debugPrint(
+        'SongContextMenu._playPodcastInContext: '
+        'ctx=${ctx?.length ?? 0}, queueIndex=$queueIndex, start=$start',
+      );
+    }
+
+    try {
+      if (ctx == null || ctx.isEmpty) {
+        await c.setQueueOf(
+          song.kind,
+          [song],
+          startIndex: 0,
+          autoPlay: true,
+          startPosition: start,
+        );
+        return;
+      }
+
+      int index;
+      final provided = queueIndex;
+      if (provided != null &&
+          provided >= 0 &&
+          provided < ctx.length &&
+          ctx[provided].path == song.path) {
+        index = provided;
+      } else {
+        index = ctx.indexWhere((s) => s.path == song.path);
+      }
+
+      if (index < 0) {
+        ctx.insert(0, song);
+        index = 0;
+      }
+
+      if (kDebugMode) {
+        debugPrint(
+          'SongContextMenu._playPodcastInContext: setQueueOf con '
+          '${ctx.length} episodios, startIndex=$index',
+        );
+      }
+
+      await c.setQueueOf(
+        song.kind,
+        ctx,
+        startIndex: index,
+        autoPlay: true,
+        startPosition: start,
+      );
+    } catch (e) {
+      debugPrint('SongContextMenu: no se pudo reproducir podcast -> $e');
+    }
+  }
+
+  /// Reproduce el episodio clicado desde el inicio (posición 0) y deja
+  /// todos los capítulos del podcast en la cola.
+  static Future<void> _playPodcastFromStart(
+    Song song, {
+    List<Song>? queueContext,
+    int? queueIndex,
+  }) async {
+    StatsService.instance.markAsUnplayed(song);
+
+    await _playPodcastInContext(
+      song,
+      start: Duration.zero,
+      queueContext: queueContext,
+      queueIndex: queueIndex,
+    );
+  }
+
+  /// Reanuda el episodio clicado desde su progreso guardado y deja
+  /// todos los capítulos del podcast en la cola.
+  static Future<void> _resumePodcast(
+    Song song, {
+    List<Song>? queueContext,
+    int? queueIndex,
+  }) async {
+    final progress = StatsService.instance.progressOf(song);
+    final position = progress?.position ?? Duration.zero;
+
+    await _playPodcastInContext(
+      song,
+      start: position,
+      queueContext: queueContext,
+      queueIndex: queueIndex,
+    );
+  }
+
   static List<ActionMenuItem> _musicActions(
     BuildContext context,
     Song song,
@@ -350,25 +506,23 @@ class SongContextMenu {
     ];
   }
 
-  // ---------- Añadir a playlist (picker con checkboxes) ----------
-
   static Future<void> _addToPlaylist(
     BuildContext context,
     Song song,
   ) async {
     final changed = await PlaylistPickerDialog.show(context, song);
     if (!changed || !context.mounted) return;
-   
   }
-
-  // ---------- Acciones específicas de podcast ----------
 
   static List<ActionMenuItem> _podcastActions(
     BuildContext context,
     Song song,
   ) {
-    final isPlayed = _isPlayed(song);
-    final position = _playbackPosition(song);
+    final stats = StatsService.instance;
+    final progress = stats.progressOf(song);
+    final isPlayed = stats.isPlayed(song);
+    final position = progress?.position ?? Duration.zero;
+    final hasProgress = position > Duration.zero && !isPlayed;
 
     return [
       ActionMenuItem(
@@ -376,18 +530,25 @@ class SongContextMenu {
         label: isPlayed
             ? 'Marcar como no reproducido'
             : 'Marcar como reproducido',
-        onTap: () => _todo(
-          context,
-          isPlayed
-              ? 'Marcar como no reproducido'
-              : 'Marcar como reproducido',
-        ),
+        onTap: () {
+          stats.togglePlayed(song);
+          if (!context.mounted) return;
+          _showToast(
+            context,
+            isPlayed
+                ? 'Marcado como no reproducido'
+                : 'Marcado como reproducido',
+          );
+        },
       ),
-      if (position > Duration.zero)
+      if (hasProgress)
         ActionMenuItem(
           icon: Icons.restart_alt,
-          label: 'Empezar desde el principio',
-          onTap: () => _todo(context, 'Reiniciar progreso'),
+          label: 'Borrar progreso',
+          onTap: () {
+            stats.markAsUnplayed(song);
+            if (!context.mounted) return;
+          },
         ),
       ActionMenuItem(
         icon: Icons.info_outline,
@@ -395,6 +556,20 @@ class SongContextMenu {
         onTap: () => _todo(context, 'Detalles del episodio'),
       ),
     ];
+  }
+
+  static void _showToast(BuildContext context, String message) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
   }
 
   static void _openPlaylist(BuildContext context, Playlist playlist) {
@@ -453,11 +628,7 @@ class SongContextMenu {
   static IconData _fallbackIcon(Song song) =>
       song.kind == MediaKind.podcast ? Icons.mic : Icons.music_note;
 
-  static bool _isPlayed(Song song) => false;
-
-  static Duration _playbackPosition(Song song) => Duration.zero;
-
   static void _todo(BuildContext context, String label) {
-   
+    // Placeholder para acciones aún no implementadas.
   }
 }

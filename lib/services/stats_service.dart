@@ -250,6 +250,15 @@ class StatsService {
   bool _persisting = false;
   bool _persistAgain = false;
 
+  /// Notifier que se incrementa cada vez que cambia cualquier dato
+  /// (historial, progreso o estadísticas). Permite que la UI se
+  /// refresque sin reabrir menús.
+  final ValueNotifier<int> revision = ValueNotifier<int>(0);
+
+void _bump() {
+  revision.value++;
+}
+
   // ============================================================
   // INIT
   // ============================================================
@@ -263,6 +272,7 @@ class StatsService {
     _statsFile = await _resolveStatsFile();
     await _loadFromDisk();
     await _migrateFromPrefsIfNeeded();
+    _bump();
     _bind(handler);
   }
 
@@ -612,6 +622,7 @@ class StatsService {
     );
 
     // Cambio de pista / stop: guardamos ya, no esperamos al debounce.
+    _bump();
     unawaited(_persistNow());
   }
 
@@ -643,6 +654,7 @@ class StatsService {
     );
     s.lastProgressSaveAt = DateTime.now();
     _pruneProgress();
+    _bump();
 
     if (immediate) {
       _persistDebounce?.cancel();
@@ -670,6 +682,122 @@ class StatsService {
     for (final p in toRemove) {
       _progress.remove(p.songKey);
     }
+  }
+
+  // ============================================================
+  // MARCAR COMO REPRODUCIDO / NO REPRODUCIDO
+  // ============================================================
+
+  /// Marca [song] como reproducida sin pasar por el reproductor.
+  /// Actualiza el progreso (posición 0, completed = true) y las
+  /// estadísticas agregadas (playCount + 1).
+  ///
+  /// Idempotente: si ya estaba marcada como reproducida no suma otra
+  /// reproducción; solo refresca `updatedAt`.
+  void markAsPlayed(Song song) {
+    final key = _keyOf(song);
+    final now = DateTime.now();
+
+    // Si es la sesión activa, la cerramos para que _saveProgressForSession
+    // (que se dispara al pausar) no pise luego el completed:true.
+    final s = _session;
+    if (s != null && s.songKey == key) {
+      _accumulateListening(s, now);
+      s.wasPlaying = false;
+      _session = null;
+    }
+
+    final existing = _progress[key];
+    final alreadyPlayed = existing?.completed == true;
+    final duration = _durationOfSong(song) ?? existing?.duration;
+
+    _progress[key] = TrackProgress(
+      songKey: key,
+      kind: song.kind,
+      position: Duration.zero,
+      duration: duration,
+      updatedAt: now,
+      completed: true,
+    );
+
+    if (!alreadyPlayed) {
+      final prev = _songs[key];
+      _songs[key] = (prev ??
+              SongStats(
+                songKey: key,
+                title: song.title,
+                subtitle: song.subtitle,
+                coverPath: song.coverPath,
+                kind: song.kind,
+                playCount: 0,
+                totalListened: Duration.zero,
+              ))
+          .copyWith(
+        playCount: (prev?.playCount ?? 0) + 1,
+        lastPlayedAt: now,
+      );
+    }
+
+    _pruneProgress();
+    _bump();
+    unawaited(_persistNow());
+  }
+
+  /// Marca [song] como NO reproducida: progreso a cero y completed=false.
+  /// No toca playCount ni totalListened (no es una reproducción real).
+  void markAsUnplayed(Song song) {
+    final key = _keyOf(song);
+    final now = DateTime.now();
+
+    final s = _session;
+    if (s != null && s.songKey == key) {
+      s.wasPlaying = false;
+      _session = null;
+    }
+
+    final existing = _progress[key];
+    final duration = _durationOfSong(song) ?? existing?.duration;
+
+    _progress[key] = TrackProgress(
+      songKey: key,
+      kind: song.kind,
+      position: Duration.zero,
+      duration: duration,
+      updatedAt: now,
+      completed: false,
+    );
+
+    _bump();
+    unawaited(_persistNow());
+  }
+
+  /// Alterna el estado reproducido/no reproducido. Devuelve el nuevo
+  /// estado (`true` = reproducido).
+  bool togglePlayed(Song song) {
+    final wasPlayed = _progress[_keyOf(song)]?.completed == true;
+    if (wasPlayed) {
+      markAsUnplayed(song);
+    } else {
+      markAsPlayed(song);
+    }
+    return !wasPlayed;
+  }
+
+  /// Duración fiable para una pista: del reproductor si es la actual,
+  /// si no de los metadatos.
+  Duration? _durationOfSong(Song song) {
+    final h = _handler;
+    final key = _keyOf(song);
+    if (h != null) {
+      final cur = h.currentSong;
+      if (cur != null && _keyOf(cur) == key) {
+        final d = h.durationNow;
+        if (d > Duration.zero) return d;
+      }
+    }
+    final meta = song.duration;
+    if (meta != null && meta > Duration.zero) return meta;
+    return null;
   }
 
   // ============================================================
@@ -713,6 +841,24 @@ class StatsService {
     return stored;
   }
 
+  /// ¿Está [song] marcada como reproducida? (completada o progreso
+  /// al final). Útil para pintar el tick en listas.
+  bool isPlayed(Song song) {
+    final p = progressOf(song);
+    if (p == null) return false;
+    if (p.completed) return true;
+    // Aunque completed no esté marcado, si llegó casi al final lo
+    // consideramos reproducido (compatibilidad con datos viejos).
+    final d = p.duration;
+    if (d != null && d > Duration.zero) {
+      final tol = song.kind == MediaKind.podcast
+          ? _podcastEndTolerance
+          : _endTolerance;
+      return p.position >= d - tol;
+    }
+    return false;
+  }
+
   SongStats? statsOf(Song song) => _songs[_keyOf(song)];
 
   Map<String, SongStats> get allSongStats => Map.unmodifiable(_songs);
@@ -726,6 +872,7 @@ class StatsService {
     _history.clear();
     _progress.clear();
     _songs.clear();
+    _bump();
     _schedulePersist();
   }
 
@@ -739,6 +886,7 @@ class StatsService {
     await _trackCompletedSub?.cancel();
     _handler = null;
     _initialized = false;
+    revision.dispose();
   }
 
   // ============================================================

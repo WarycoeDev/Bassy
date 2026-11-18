@@ -236,25 +236,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _buildHeader(context),
               const SizedBox(height: 24),
 
-              _buildSectionTitle(context, 'Cuenta'),
-              const SizedBox(height: 12),
-              _buildAccountCard(context),
-              const SizedBox(height: 24),
-
-              _buildSectionTitle(context, 'ReplayGain'),
-              const SizedBox(height: 12),
-              _buildReplayGainGroup(context),
-              const SizedBox(height: 24),
-
-              _buildSectionTitle(context, 'Reproducción'),
-              const SizedBox(height: 12),
-              _buildPlaybackGroup(context),
-              const SizedBox(height: 24),
-
-              _buildSectionTitle(context, 'Almacenamiento'),
-              const SizedBox(height: 12),
-              _buildStorageGroup(context),
-              const SizedBox(height: 24),
 
               _buildSectionTitle(context, 'Apariencia'),
               const SizedBox(height: 12),
@@ -279,6 +260,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ]),
               const SizedBox(height: 24),
+
+              _buildSectionTitle(context, 'ReplayGain'),
+              const SizedBox(height: 12),
+              _buildReplayGainGroup(context),
+              const SizedBox(height: 24),
+
+              _buildSectionTitle(context, 'Reproducción'),
+              const SizedBox(height: 12),
+              _buildPlaybackGroup(context),
+              const SizedBox(height: 24),
+
+              _buildSectionTitle(context, 'Almacenamiento'),
+              const SizedBox(height: 12),
+              _buildStorageGroup(context),
+              const SizedBox(height: 24),
+
+              
 
               _buildSectionTitle(context, 'Acerca de'),
               const SizedBox(height: 12),

@@ -75,13 +75,6 @@ class SongTile extends StatelessWidget {
 
     final bool isInteractive = !reorderMode && !isRemoving;
 
-    // IMPORTANTE: el InkWell pinta su splash/highlight sobre el Material
-    // ancestro más cercano. Antes era el del Scaffold, por lo que el efecto
-    // no se recortaba con el scroll del contenedor y se salía de los
-    // límites (y además quedaba tapado por el Container con color).
-    // Ahora cada tile tiene su propio Material (con el color de fondo y el
-    // recorte redondeado), así el efecto vive dentro del tile y se recorta
-    // junto con él.
     final tile = Material(
       color: scheme.surfaceContainer,
       borderRadius: BorderRadius.circular(tileRadius),
@@ -194,10 +187,11 @@ class SongTile extends StatelessWidget {
             }
           : null,
       onSecondaryTapDown: isInteractive
-          ? (_) {
-              SongContextMenu.showSheet(
+          ? (details) {
+              SongContextMenu.showAt(
                 context,
                 song,
+                globalPosition: details.globalPosition,
                 queueContext: queueContext,
                 queueIndex: queueIndex,
               );
@@ -206,8 +200,6 @@ class SongTile extends StatelessWidget {
       child: tile,
     );
 
-    // Envolvemos todo en AnimatedSize y ClipRect para que,
-    // cuando isRemoving cambie a true, la altura colapse a 0 suavemente.
     return AnimatedSize(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOut,
@@ -321,70 +313,75 @@ class SongTile extends StatelessWidget {
       return provided;
     }
     final found = ctx.indexWhere((s) => s.path == song.path);
-    return found >= 0 ? found : 0;
+    final resolved = found >= 0 ? found : 0;
+    if (kDebugMode && found < 0) {
+      debugPrint(
+        'SongTile._resolvedIndex: "${song.title}" no está en ctx '
+        '(len=${ctx.length}); usando índice 0',
+      );
+    }
+    return resolved;
   }
 
   /// Tap simple en el tile.
   ///
   /// Reglas:
-  /// 1. Si CUALQUIERA de las dos colas (música o podcast) ya tiene
-  ///    elementos, se abre el menú de queue correspondiente para que el
-  ///    usuario decida (reproducir, agregar, etc.).
-  /// 2. Si ambas colas están vacías, se reproduce ÚNICAMENTE este tile
-  ///    (cola de un solo elemento), sin importar el contexto
-  ///    (álbum/playlist/podcast).
+  /// 1. PODCAST: siempre abre el menú de podcast (`showSheet`), sin
+  ///    importar si la cola tiene contenido o no. Así el usuario decide
+  ///    entre "Reproducir desde el principio", "Reanudar", añadir a la
+  ///    cola, etc., y el contexto de la lista se reenvía para que la
+  ///    cola se cargue con todos los capítulos.
+  /// 2. MÚSICA:
+  ///    - Si CUALQUIERA de las dos colas ya tiene elementos, se abre el
+  ///      menú de queue correspondiente para decidir qué hacer.
+  ///    - Si ambas colas están vacías, se reproduce ÚNICAMENTE este tile
+  ///      (cola de un solo elemento), sin importar el contexto.
   Future<void> _defaultOnTap(BuildContext context) async {
     final c = PlaybackController.instance;
 
     if (!c.isReady) {
       debugPrint('SongTile: PlaybackController no listo');
-      if (context.mounted) {
-
-      }
       return;
     }
 
     final handler = c.handler;
+    final ctx = queueContext;
 
-    // ¿Hay algo en alguna de las dos colas?
+    // --- PODCAST: siempre menú de podcast -------------------------
+    if (song.kind == MediaKind.podcast) {
+      if (!context.mounted) return;
+      final startIndex = (ctx != null && ctx.isNotEmpty)
+          ? _resolvedIndex(ctx)
+          : null;
+      await SongContextMenu.showSheet(
+        context,
+        song,
+        queueContext: ctx,
+        queueIndex: startIndex ?? queueIndex,
+      );
+      return;
+    }
+
+    // --- MÚSICA: comportamiento previo ---------------------------
     final musicQueue = handler.songsOf(MediaKind.music);
     final podcastQueue = handler.songsOf(MediaKind.podcast);
     final hasAnyQueue = musicQueue.isNotEmpty || podcastQueue.isNotEmpty;
 
     if (hasAnyQueue && context.mounted) {
-      // Deja abierto el menú de queue para decidir qué hacer con este tile
-      // respecto a la cola existente. Usamos el contexto si lo hay para
-      // ofrecer "reproducir desde aquí", "agregar", etc.
-      final ctx = queueContext;
       if (ctx != null && ctx.isNotEmpty) {
         final startIndex = _resolvedIndex(ctx);
-        if (song.kind == MediaKind.podcast) {
-          await SongContextMenu.showSheet(
-            context,
-            song,
-            queueContext: ctx,
-            queueIndex: startIndex,
-          );
-        } else {
-          await SongContextMenu.showQueueSheetForContext(
-            context,
-            song,
-            contextSongs: ctx,
-            startIndex: startIndex,
-          );
-        }
+        await SongContextMenu.showQueueSheetForContext(
+          context,
+          song,
+          contextSongs: ctx,
+          startIndex: startIndex,
+        );
       } else {
-        // Sin contexto de lista: mostramos el menú simple de queue.
-        if (song.kind == MediaKind.podcast) {
-          await SongContextMenu.showSheet(context, song);
-        } else {
-          await SongContextMenu.showQueueSheet(context, song);
-        }
+        await SongContextMenu.showQueueSheet(context, song);
       }
       return;
     }
 
-    // Ambas colas vacías: reproducir solo este tile.
     try {
       await c.switchToQueue(song.kind);
       await handler.setQueueOf(
@@ -395,9 +392,6 @@ class SongTile extends StatelessWidget {
       );
     } catch (e, st) {
       debugPrint('SongTile: fallo al reproducir -> $e\n$st');
-      if (context.mounted) {
-
-      }
     }
   }
 }
