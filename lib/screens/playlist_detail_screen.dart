@@ -341,7 +341,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       actions: [
         PlaybackMenuAction(
           icon: Icons.play_arrow,
-          label: 'Sobreescribir cola y reproducir',
+          label: 'Reproducir ahora',
           onTap: () async {
             await controller.switchToQueue(queueKind);
             await controller.setQueueOf(

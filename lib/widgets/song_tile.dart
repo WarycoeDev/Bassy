@@ -324,6 +324,15 @@ class SongTile extends StatelessWidget {
     return found >= 0 ? found : 0;
   }
 
+  /// Tap simple en el tile.
+  ///
+  /// Reglas:
+  /// 1. Si CUALQUIERA de las dos colas (música o podcast) ya tiene
+  ///    elementos, se abre el menú de queue correspondiente para que el
+  ///    usuario decida (reproducir, agregar, etc.).
+  /// 2. Si ambas colas están vacías, se reproduce ÚNICAMENTE este tile
+  ///    (cola de un solo elemento), sin importar el contexto
+  ///    (álbum/playlist/podcast).
   Future<void> _defaultOnTap(BuildContext context) async {
     final c = PlaybackController.instance;
 
@@ -341,70 +350,56 @@ class SongTile extends StatelessWidget {
     }
 
     final handler = c.handler;
-    final ctx = queueContext;
-    final queueSongs = handler.songsOf(song.kind);
 
-    if (ctx == null || ctx.isEmpty) {
-      if (queueSongs.isNotEmpty && context.mounted) {
+    // ¿Hay algo en alguna de las dos colas?
+    final musicQueue = handler.songsOf(MediaKind.music);
+    final podcastQueue = handler.songsOf(MediaKind.podcast);
+    final hasAnyQueue = musicQueue.isNotEmpty || podcastQueue.isNotEmpty;
+
+    if (hasAnyQueue && context.mounted) {
+      // Deja abierto el menú de queue para decidir qué hacer con este tile
+      // respecto a la cola existente. Usamos el contexto si lo hay para
+      // ofrecer "reproducir desde aquí", "agregar", etc.
+      final ctx = queueContext;
+      if (ctx != null && ctx.isNotEmpty) {
+        final startIndex = _resolvedIndex(ctx);
+        if (song.kind == MediaKind.podcast) {
+          await SongContextMenu.showSheet(
+            context,
+            song,
+            queueContext: ctx,
+            queueIndex: startIndex,
+          );
+        } else {
+          await SongContextMenu.showQueueSheetForContext(
+            context,
+            song,
+            contextSongs: ctx,
+            startIndex: startIndex,
+          );
+        }
+      } else {
+        // Sin contexto de lista: mostramos el menú simple de queue.
         if (song.kind == MediaKind.podcast) {
           await SongContextMenu.showSheet(context, song);
         } else {
           await SongContextMenu.showQueueSheet(context, song);
         }
-        return;
-      }
-
-      try {
-        await c.switchToQueue(song.kind);
-        await handler.setQueueOf(
-          song.kind,
-          [song],
-          startIndex: 0,
-          autoPlay: true,
-        );
-      } catch (e, st) {
-        debugPrint('SongTile: fallo al reproducir -> $e\n$st');
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('No se pudo reproducir: $e')),
-          );
-        }
       }
       return;
     }
 
-    final startIndex = _resolvedIndex(ctx);
-
-    if (queueSongs.isNotEmpty && context.mounted) {
-      if (song.kind == MediaKind.podcast) {
-        await SongContextMenu.showSheet(
-          context,
-          song,
-          queueContext: ctx,
-          queueIndex: startIndex,
-        );
-        return;
-      }
-
-      await SongContextMenu.showQueueSheetForContext(
-        context,
-        song,
-        contextSongs: ctx,
-        startIndex: startIndex,
-      );
-      return;
-    }
-
+    // Ambas colas vacías: reproducir solo este tile.
     try {
       await c.switchToQueue(song.kind);
       await handler.setQueueOf(
         song.kind,
-        ctx,
-        startIndex: startIndex,
+        [song],
+        startIndex: 0,
         autoPlay: true,
       );
     } catch (e, st) {
-      debugPrint('SongTile: fallo al reproducir contexto -> $e\n$st');
+      debugPrint('SongTile: fallo al reproducir -> $e\n$st');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('No se pudo reproducir: $e')),

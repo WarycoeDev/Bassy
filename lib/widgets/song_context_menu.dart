@@ -81,7 +81,7 @@ class SongContextMenu {
       ),
       ActionMenuItem(
         icon: Icons.queue_play_next,
-        label: 'Reproducir a continuación',
+        label: 'Añadir a la cola',
         onTap: () async {
           await controller.switchToQueue(kind);
           await controller.addToQueueOf(kind, song);
@@ -402,18 +402,8 @@ class SongContextMenu {
           onTap: () => _todo(context, 'Reiniciar progreso'),
         ),
       ActionMenuItem(
-        icon: Icons.speed,
-        label: 'Velocidad de reproducción',
-        onTap: () => _todo(context, 'Velocidad de reproducción'),
-      ),
-      ActionMenuItem(
-        icon: Icons.timer_outlined,
-        label: 'Temporizador de sueño',
-        onTap: () => _todo(context, 'Sleep timer'),
-      ),
-      ActionMenuItem(
         icon: Icons.info_outline,
-        label: 'Ver detalles del episodio',
+        label: 'Ver detalles',
         onTap: () => _todo(context, 'Detalles del episodio'),
       ),
     ];
