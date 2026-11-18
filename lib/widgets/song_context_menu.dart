@@ -1,4 +1,3 @@
-
 // lib/widgets/song_context_menu.dart
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
@@ -14,6 +13,7 @@ import '../services/stats_service.dart';
 import 'action_menu.dart';
 import 'input_menu.dart';
 import 'playlist_picker_dialog.dart';
+import 'song_details_dialog.dart';
 
 class SongContextMenu {
   SongContextMenu._();
@@ -605,10 +605,7 @@ class SongContextMenu {
       ActionMenuItem(
         icon: Icons.info_outline,
         label: 'Ver detalles',
-        onTap: () => _todo(
-          context,
-          'Detalles',
-        ),
+        onTap: () => SongDetailsDialog.show(context, song),
       ),
     ];
   }
@@ -654,8 +651,8 @@ class SongContextMenu {
             ? Icons.check_circle
             : Icons.check_circle_outline,
         label: isPlayed
-            ? 'Marcar como no reproducido'
-            : 'Marcar como reproducido',
+            ? 'Marcar como no completado'
+            : 'Marcar como completado',
         onTap: () {
           stats.togglePlayed(song);
 
@@ -684,10 +681,7 @@ class SongContextMenu {
       ActionMenuItem(
         icon: Icons.info_outline,
         label: 'Ver detalles',
-        onTap: () => _todo(
-          context,
-          'Detalles del episodio',
-        ),
+        onTap: () => SongDetailsDialog.show(context, song),
       ),
     ];
   }
@@ -792,11 +786,4 @@ class SongContextMenu {
       song.kind == MediaKind.podcast
           ? Icons.mic
           : Icons.music_note;
-
-  static void _todo(
-    BuildContext context,
-    String label,
-  ) {
-    // Placeholder para acciones aún no implementadas.
-  }
 }
