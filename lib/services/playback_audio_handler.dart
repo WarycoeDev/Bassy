@@ -147,49 +147,49 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _canGoNext = false;
 
   PlaybackAudioHandler() {
-  _activeQueue = _musicQueue;
-  _rg.activeGainDb.addListener(_onReplayGainChanged);
-  _onReplayGainChanged();
-  _publish();
-  unawaited(_loadSlowed());
+    _activeQueue = _musicQueue;
+    _rg.activeGainDb.addListener(_onReplayGainChanged);
+    _onReplayGainChanged();
+    _publish();
+    unawaited(_loadSlowed());
 
-  // Pre-inicializa el motor, diferido para no competir con el arranque.
-  Future<void>.delayed(const Duration(milliseconds: 800), () {
-    unawaited(_ensureEngine().catchError((Object e) {
-      debugPrint('PlaybackAudioHandler: pre-init del motor falló -> $e');
-    }));
-  });
-}
+    // Pre-inicializa el motor, diferido para no competir con el arranque.
+    Future<void>.delayed(const Duration(milliseconds: 800), () {
+      unawaited(_ensureEngine().catchError((Object e) {
+        debugPrint('PlaybackAudioHandler: pre-init del motor falló -> $e');
+      }));
+    });
+  }
 
   // ============================================================
   // MOTOR
   // ============================================================
 
   Future<void> _ensureEngine() async {
-  if (_soloud.isInitialized) return;
-  await (_engineInit ??= () async {
     if (_soloud.isInitialized) return;
-    try {
-      if (Platform.isLinux) {
-        await _soloud.setLinuxAudioBackend(sl.LinuxAudioBackend.pulseAudio);
+    await (_engineInit ??= () async {
+      if (_soloud.isInitialized) return;
+      try {
+        if (Platform.isLinux) {
+          await _soloud.setLinuxAudioBackend(sl.LinuxAudioBackend.pulseAudio);
+        }
+      } catch (e) {
+        debugPrint('PlaybackAudioHandler: backend de audio no aplicado -> $e');
       }
-    } catch (e) {
-      debugPrint('PlaybackAudioHandler: backend de audio no aplicado -> $e');
-    }
-    if (_soloud.isInitialized) return;
-    try {
-      await _soloud.init();
-    } catch (e) {
-      // Si otro punto lo inicializó entretanto, no es un error real.
-      if (!_soloud.isInitialized) rethrow;
-    }
-  }()
-      .whenComplete(() {
-    _engineInit = null;
-  }));
-  ReverbService.instance.applyToEngine();
-  _syncReverbForQueue();
-}
+      if (_soloud.isInitialized) return;
+      try {
+        await _soloud.init();
+      } catch (e) {
+        // Si otro punto lo inicializó entretanto, no es un error real.
+        if (!_soloud.isInitialized) rethrow;
+      }
+    }()
+        .whenComplete(() {
+      _engineInit = null;
+    }));
+    ReverbService.instance.applyToEngine();
+    _syncReverbForQueue();
+  }
 
   Future<void> _disposeSource(sl.AudioSource? source) async {
     if (source == null) return;
@@ -294,6 +294,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   bool get hasPrevious => _hasSource && _previousIndexOf(_activeQueue) != null;
 
   Duration get position => _position;
+
+  /// Duración REAL de la pista cargada (Duration.zero mientras carga).
+  /// Las estadísticas la usan porque `Song.duration` suele venir vacía
+  /// en podcasts.
+  Duration get durationNow => _duration;
 
   bool get canGoPrevious =>
       hasPrevious || (_hasSource && _position > _rewindThreshold);
@@ -862,7 +867,15 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastVol = -1;
 
     q.currentIndex = songIndex;
+
+    // ===== STATS / REANUDAR =====
+    // Reiniciamos posición y duración ANTES de publicar: así nadie
+    // (estadísticas, UI) ve la posición/duración de la pista anterior
+    // asociada a la nueva. Si hay posición inicial, ya la reflejamos.
+    _position = start;
+    _duration = Duration.zero;
     _publish();
+    if (!_positionCtrl.isClosed) _positionCtrl.add(start);
 
     try {
       await _ensureEngine();
@@ -922,6 +935,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       if (autoPlay) {
         _soloud.setPause(handle, false);
         _setPlaying(true);
+        if (startAt > const Duration(seconds: 1)) {
+          unawaited(_verifySeek(handle, startAt, token));
+        }
       } else {
         _setPlaying(false);
       }
@@ -944,6 +960,28 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
     _emitControlsState();
+  }
+
+  /// En archivos grandes (LoadMode.disk) un seek hecho con la voz en
+  /// pausa puede no aplicarse. Comprobamos poco después de arrancar y
+  /// repetimos el seek si la posición real quedó lejos del objetivo.
+  Future<void> _verifySeek(
+    sl.SoundHandle handle,
+    Duration target,
+    int token,
+  ) async {
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    if (token != _loadToken || !_isValid(handle)) return;
+    try {
+      final pos = _soloud.getPosition(handle);
+      if ((pos - target).abs() > const Duration(seconds: 2)) {
+        _soloud.seek(handle, target);
+        _position = target;
+        if (!_positionCtrl.isClosed) _positionCtrl.add(target);
+      }
+    } catch (e) {
+      debugPrint('PlaybackAudioHandler: verificación de seek falló -> $e');
+    }
   }
 
   Future<void> _onCompleted() async {
@@ -1136,7 +1174,8 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         controls: const <MediaControl>[],
         systemActions: const <MediaAction>{},
         androidCompactActionIndices: const <int>[],
-        processingState: AudioProcessingState.idle, // Obliga a Android a descartar la sesión
+        processingState:
+            AudioProcessingState.idle, // Obliga a Android a descartar la sesión
         playing: false,
         updatePosition: Duration.zero,
         bufferedPosition: Duration.zero,
@@ -1262,6 +1301,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     List<Song> songs, {
     int startIndex = 0,
     bool autoPlay = true,
+    Duration? startPosition,
   }) {
     final kind = songs.isEmpty
         ? _activeQueue.kind
@@ -1269,7 +1309,13 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
                 MediaKind.podcast
             ? MediaKind.podcast
             : MediaKind.music);
-    return setQueueOf(kind, songs, startIndex: startIndex, autoPlay: autoPlay);
+    return setQueueOf(
+      kind,
+      songs,
+      startIndex: startIndex,
+      autoPlay: autoPlay,
+      startPosition: startPosition,
+    );
   }
 
   Future<void> setQueueOf(
@@ -1277,12 +1323,18 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     List<Song> songs, {
     int startIndex = 0,
     bool autoPlay = true,
+    Duration? startPosition,
   }) {
     final generation = ++_loadGeneration;
     final run = _loadChain.catchError((_) {}).then<void>((_) async {
       if (generation != _loadGeneration) return;
-      await _setQueueImpl(kind, songs,
-          startIndex: startIndex, autoPlay: autoPlay);
+      await _setQueueImpl(
+        kind,
+        songs,
+        startIndex: startIndex,
+        autoPlay: autoPlay,
+        startPosition: startPosition ?? Duration.zero,
+      );
     });
     _loadChain = run;
     return run;
@@ -1296,6 +1348,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     List<Song> songs, {
     required int startIndex,
     required bool autoPlay,
+    Duration startPosition = Duration.zero,
   }) async {
     _cancelCrossfade();
 
@@ -1330,7 +1383,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       targetQueue.resetOrder();
       targetQueue.currentIndex = newStart;
       targetQueue.shuffleEnabled = false;
-      targetQueue.savedPosition = Duration.zero;
+      targetQueue.savedPosition = startPosition;
       targetQueue.savedPlaying = autoPlay;
 
       if (!autoPlay) {
@@ -1356,7 +1409,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       if (!_shuffleCtrl.isClosed) _shuffleCtrl.add(false);
       if (!_repeatCtrl.isClosed) _repeatCtrl.add(targetQueue.repeatMode);
 
-      await _loadAndPlay(newStart, autoPlay: true);
+      await _loadAndPlay(newStart, autoPlay: true, start: startPosition);
       return;
     }
 
@@ -1369,7 +1422,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
 
     if (autoPlay) _queueFor(_otherKind(kind)).reset();
 
-    await _loadAndPlay(newStart, autoPlay: autoPlay);
+    await _loadAndPlay(newStart, autoPlay: autoPlay, start: startPosition);
   }
 
   // ============================================================
@@ -1380,9 +1433,12 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     MediaKind kind, {
     int? startIndex,
     bool? autoPlay,
+    Duration? startPosition,
   }) async {
     if (kind == _activeQueue.kind && _source != null) {
-      if (startIndex != null) await skipToQueueItem(startIndex);
+      if (startIndex != null) {
+        await _skipToIndex(startIndex, start: startPosition);
+      }
       return;
     }
 
@@ -1403,7 +1459,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
         startIndex >= 0 &&
         startIndex < target.songs.length) {
       target.currentIndex = startIndex;
-      target.savedPosition = Duration.zero;
+      target.savedPosition = startPosition ?? Duration.zero;
       target.savedPlaying = autoPlay ?? true;
     } else if (autoPlay != null) {
       target.savedPlaying = autoPlay;
@@ -1646,11 +1702,20 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // REPRODUCCIÓN
   // ============================================================
 
-  Future<void> playFromQueueOf(MediaKind kind, int index) async {
+  Future<void> playFromQueueOf(
+    MediaKind kind,
+    int index, {
+    Duration? startPosition,
+  }) async {
     if (kind == _activeQueue.kind && _source != null) {
-      await skipToQueueItem(index);
+      await _skipToIndex(index, start: startPosition);
     } else {
-      await switchToQueue(kind, startIndex: index, autoPlay: true);
+      await switchToQueue(
+        kind,
+        startIndex: index,
+        autoPlay: true,
+        startPosition: startPosition,
+      );
     }
   }
 
@@ -1702,13 +1767,18 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> pause() async {
     final h = _handle;
     try {
-      if (h != null && _isValid(h)) _soloud.setPause(h, true);
+      if (h != null && _isValid(h)) {
+        // Posición exacta justo al pausar (para estadísticas/reanudar).
+        _position = _livePosition();
+        _soloud.setPause(h, true);
+      }
       final nh = _nextHandle;
       if (nh != null && _isValid(nh)) _soloud.setPause(nh, true);
     } catch (e) {
       debugPrint('PlaybackAudioHandler: pause falló -> $e');
     }
     _setPlaying(false);
+    if (!_positionCtrl.isClosed) _positionCtrl.add(_position);
     _publish();
   }
 
@@ -1770,12 +1840,20 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<void> skipToQueueItem(int index) async {
+  Future<void> skipToQueueItem(int index) => _skipToIndex(index);
+
+  Future<void> _skipToIndex(int index, {Duration? start}) async {
     final q = _activeQueue;
     if (index < 0 || index >= q.songs.length) return;
 
     if (_source == null && !_loading) {
-      await setQueueOf(q.kind, q.songs, startIndex: index, autoPlay: true);
+      await setQueueOf(
+        q.kind,
+        q.songs,
+        startIndex: index,
+        autoPlay: true,
+        startPosition: start,
+      );
       return;
     }
 
@@ -1784,7 +1862,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
       q.sourceOrder = _buildOrder(q, index);
     }
 
-    await _loadAndPlay(index, autoPlay: true);
+    await _loadAndPlay(
+      index,
+      autoPlay: true,
+      start: start ?? Duration.zero,
+    );
   }
 
   @override

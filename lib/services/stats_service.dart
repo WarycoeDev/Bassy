@@ -218,7 +218,19 @@ class StatsService {
   static const int _maxHistoryEntries = 500;
   static const int _maxProgressEntries = 2000;
 
+  /// Tolerancia para considerar una canción "terminada".
   static const Duration _endTolerance = Duration(seconds: 2);
+
+  /// En podcasts se considera terminado si faltan menos de esto
+  /// (créditos, despedida, etc.).
+  static const Duration _podcastEndTolerance = Duration(seconds: 15);
+
+  /// Mínimo de escucha real para guardar progreso. Evita que sesiones
+  /// que solo se cargaron (sin sonar) pisen el progreso guardado.
+  static const Duration _minListenToSave = Duration(seconds: 1);
+
+  /// Cada cuánto se guarda el progreso de un podcast mientras suena.
+  static const Duration _progressSaveEvery = Duration(seconds: 5);
 
   bool _initialized = false;
   File? _statsFile;
@@ -260,18 +272,13 @@ class StatsService {
   Future<File> _resolveStatsFile() async {
     Directory base;
     if (Platform.isAndroid) {
-      // getApplicationSupportDirectory() en Android apunta a
-      // /data/user/0/<pkg>/files — NO es visible desde el explorador.
-      // getExternalStorageDirectory() apunta a
-      // /storage/emulated/0/Android/data/<pkg>/files, que SÍ es visible
-      // y es lo que pide el usuario.
-      final ext = await getExternalStorageDirectory();
-      if (ext != null) {
-        base = ext;
-      } else {
-        // Fallback si el dispositivo no expone almacenamiento externo.
-        base = await getApplicationSupportDirectory();
+      Directory? ext;
+      try {
+        ext = await getExternalStorageDirectory();
+      } catch (e) {
+        debugPrint('StatsService: sin almacenamiento externo -> $e');
       }
+      base = ext ?? await getApplicationSupportDirectory();
     } else {
       base = await getApplicationSupportDirectory();
     }
@@ -297,25 +304,37 @@ class StatsService {
       if (raw.trim().isEmpty) return;
       final json = jsonDecode(raw) as Map<String, dynamic>;
 
-      final h = (json['history'] as List<dynamic>? ?? const []);
-      _history
-        ..clear()
-        ..addAll(h.map(
-            (e) => PlaybackHistoryEntry.fromJson(e as Map<String, dynamic>)));
+      // Cada entrada se parsea por separado: una entrada corrupta no
+      // debe tirar abajo todo el historial/progreso.
+      _history.clear();
+      for (final e in (json['history'] as List<dynamic>? ?? const [])) {
+        try {
+          _history
+              .add(PlaybackHistoryEntry.fromJson(e as Map<String, dynamic>));
+        } catch (_) {}
+      }
 
+      _progress.clear();
       final p = (json['progress'] as Map<String, dynamic>? ?? const {});
-      _progress
-        ..clear()
-        ..addAll(p.map((k, v) =>
-            MapEntry(k, TrackProgress.fromJson(v as Map<String, dynamic>))));
+      p.forEach((k, v) {
+        try {
+          _progress[k] = TrackProgress.fromJson(v as Map<String, dynamic>);
+        } catch (_) {}
+      });
 
+      _songs.clear();
       final s = (json['songs'] as Map<String, dynamic>? ?? const {});
-      _songs
-        ..clear()
-        ..addAll(s.map((k, v) =>
-            MapEntry(k, SongStats.fromJson(v as Map<String, dynamic>))));
+      s.forEach((k, v) {
+        try {
+          _songs[k] = SongStats.fromJson(v as Map<String, dynamic>);
+        } catch (_) {}
+      });
     } catch (e) {
       debugPrint('StatsService: no se pudo leer $f -> $e');
+      // Respaldamos el archivo dañado para no sobrescribirlo y perderlo.
+      try {
+        await f.copy('${f.path}.corrupt');
+      } catch (_) {}
     }
   }
 
@@ -421,10 +440,7 @@ class StatsService {
     if (_session!.songKey == key) return;
 
     final s = _session!;
-    final dur = s.song?.duration;
-    final nearEnd = dur != null &&
-        dur > Duration.zero &&
-        s.lastPosition >= dur - _endTolerance;
+    final nearEnd = _isNearEnd(s.lastPosition, _durationOf(s), s.kind);
     _closeSession(completed: nearEnd);
     _startSession(song, handler.position);
   }
@@ -438,21 +454,35 @@ class StatsService {
         s.wasPlaying = true;
         s.lastTickAt = DateTime.now();
       }
-    } else {
-      if (s.wasPlaying) {
-        _accumulateListening(s, DateTime.now());
-        s.wasPlaying = false;
-      }
-      _saveProgressForSession();
+    } else if (s.wasPlaying) {
+      // Solo en la TRANSICIÓN reproduciendo -> pausa. Antes se guardaba
+      // en cada emisión de estado en pausa (cada pocos cientos de ms),
+      // pisando el progreso y el flag `completed`.
+      _accumulateListening(s, DateTime.now());
+      s.wasPlaying = false;
+      _saveProgressForSession(immediate: true);
     }
   }
 
   void _onPosition(Duration pos) {
     final s = _session;
-    if (s == null) return;
+    final h = _handler;
+    if (s == null || h == null) return;
+
+    // Solo aceptamos posiciones de la pista de la sesión. Durante un
+    // cambio de pista o un stop/clear el handler emite posiciones que
+    // pertenecen a otra cosa (p. ej. Duration.zero al limpiar colas) y
+    // pisaban el progreso real.
+    final cur = h.currentSong;
+    if (cur == null || _keyOf(cur) != s.songKey) return;
+
     s.lastPosition = pos;
+    final d = h.durationNow;
+    if (d > Duration.zero) s.duration = d;
+
     if (s.wasPlaying) {
       _accumulateListening(s, DateTime.now());
+      _maybeSavePeriodic(s);
     }
   }
 
@@ -475,6 +505,8 @@ class StatsService {
   // ============================================================
 
   void _startSession(Song song, Duration startPos) {
+    final h = _handler;
+    final liveDur = h?.durationNow ?? Duration.zero;
     _session = _ActiveSession(
       songKey: _keyOf(song),
       title: song.title,
@@ -484,8 +516,36 @@ class StatsService {
       startedAt: DateTime.now(),
       lastPosition: startPos,
       lastTickAt: DateTime.now(),
-    );
-    _session!.song = song;
+    )
+      ..song = song
+      ..duration = liveDur > Duration.zero ? liveDur : null
+      ..lastProgressSaveAt = DateTime.now();
+  }
+
+  /// Duración real de la sesión: la del reproductor si es la pista
+  /// actual; si no, la cacheada; si no, la de los metadatos.
+  Duration? _durationOf(_ActiveSession s) {
+    final h = _handler;
+    final cur = h?.currentSong;
+    if (h != null && cur != null && _keyOf(cur) == s.songKey) {
+      final d = h.durationNow;
+      if (d > Duration.zero) {
+        s.duration = d;
+        return d;
+      }
+    }
+    final cached = s.duration;
+    if (cached != null && cached > Duration.zero) return cached;
+    final meta = s.song?.duration;
+    if (meta != null && meta > Duration.zero) return meta;
+    return null;
+  }
+
+  bool _isNearEnd(Duration pos, Duration? dur, MediaKind kind) {
+    if (dur == null || dur <= Duration.zero) return false;
+    final tol =
+        kind == MediaKind.podcast ? _podcastEndTolerance : _endTolerance;
+    return pos >= dur - tol;
   }
 
   void _closeSession({required bool completed}) {
@@ -498,8 +558,12 @@ class StatsService {
     }
     _session = null;
 
+    // Sesión que solo se cargó pero no sonó: no es una reproducción.
+    // No creamos historial ni tocamos el progreso guardado.
+    if (!completed && s.listened < _minListenToSave) return;
+
     final posAtEnd = s.lastPosition;
-    final trackDuration = s.song?.duration;
+    final trackDuration = _durationOf(s);
 
     _history.insert(
       0,
@@ -524,7 +588,7 @@ class StatsService {
       songKey: s.songKey,
       kind: s.kind,
       position: completed ? Duration.zero : posAtEnd,
-      duration: trackDuration,
+      duration: trackDuration ?? _progress[s.songKey]?.duration,
       updatedAt: DateTime.now(),
       completed: completed,
     );
@@ -547,22 +611,55 @@ class StatsService {
       lastPlayedAt: DateTime.now(),
     );
 
-    _schedulePersist();
+    // Cambio de pista / stop: guardamos ya, no esperamos al debounce.
+    unawaited(_persistNow());
   }
 
-  void _saveProgressForSession() {
+  /// Guarda el progreso de la sesión actual (pausa o guardado periódico).
+  void _saveProgressForSession({bool immediate = false}) {
     final s = _session;
+    final h = _handler;
     if (s == null) return;
+
+    // Si no ha sonado nada real, no pisamos lo que ya había guardado.
+    if (s.listened < _minListenToSave) return;
+
+    // Posición más exacta: la del handler si sigue siendo esta pista.
+    final cur = h?.currentSong;
+    if (h != null && cur != null && _keyOf(cur) == s.songKey) {
+      s.lastPosition = h.position;
+    }
+
+    final dur = _durationOf(s);
+    final completed = _isNearEnd(s.lastPosition, dur, s.kind);
+
     _progress[s.songKey] = TrackProgress(
       songKey: s.songKey,
       kind: s.kind,
-      position: s.lastPosition,
-      duration: s.song?.duration,
+      position: completed ? Duration.zero : s.lastPosition,
+      duration: dur ?? _progress[s.songKey]?.duration,
       updatedAt: DateTime.now(),
-      completed: false,
+      completed: completed,
     );
+    s.lastProgressSaveAt = DateTime.now();
     _pruneProgress();
-    _schedulePersist();
+
+    if (immediate) {
+      _persistDebounce?.cancel();
+      unawaited(_persistNow());
+    } else {
+      _schedulePersist();
+    }
+  }
+
+  /// Guardado periódico mientras suena (solo podcasts): si la app muere
+  /// sin pausar, se conserva el punto donde te quedaste.
+  void _maybeSavePeriodic(_ActiveSession s) {
+    if (s.kind != MediaKind.podcast) return;
+    if (s.listened < _minListenToSave) return;
+    final now = DateTime.now();
+    if (now.difference(s.lastProgressSaveAt) < _progressSaveEvery) return;
+    _saveProgressForSession();
   }
 
   void _pruneProgress() {
@@ -597,7 +694,24 @@ class StatsService {
 
   TrackProgress? getProgress(String songKey) => _progress[songKey];
 
-  TrackProgress? progressOf(Song song) => _progress[_keyOf(song)];
+  /// Progreso de [song]. Si la pista está sonando ahora mismo devuelve
+  /// el progreso EN VIVO (no hay que esperar a pausar para verlo).
+  TrackProgress? progressOf(Song song) {
+    final key = _keyOf(song);
+    final stored = _progress[key];
+    final s = _session;
+    if (s != null && s.songKey == key && s.listened >= _minListenToSave) {
+      return TrackProgress(
+        songKey: key,
+        kind: s.kind,
+        position: s.lastPosition,
+        duration: _durationOf(s) ?? stored?.duration,
+        updatedAt: DateTime.now(),
+        completed: false,
+      );
+    }
+    return stored;
+  }
 
   SongStats? statsOf(Song song) => _songs[_keyOf(song)];
 
@@ -624,6 +738,7 @@ class StatsService {
     await _positionSub?.cancel();
     await _trackCompletedSub?.cancel();
     _handler = null;
+    _initialized = false;
   }
 
   // ============================================================
@@ -644,8 +759,10 @@ class _ActiveSession {
 
   Song? song;
   Duration lastPosition;
+  Duration? duration;
   Duration listened = Duration.zero;
   DateTime lastTickAt;
+  DateTime lastProgressSaveAt = DateTime.now();
   bool wasPlaying = false;
 
   _ActiveSession({

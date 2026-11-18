@@ -38,7 +38,7 @@ class PlaybackController {
         androidNotificationChannelId: 'com.example.bassy.audio',
         androidNotificationChannelName: 'Reproducción',
         androidNotificationOngoing: false,
-        androidStopForegroundOnPause: true, // <--- CORREGIDO: Libera el foreground al pausar/detener
+        androidStopForegroundOnPause: true,
         androidNotificationIcon: 'mipmap/ic_launcher',
       ),
     );
@@ -142,7 +142,30 @@ class PlaybackController {
   // COLA POR KIND (nueva API)
   // ============================================================
 
-  Future<void> switchToQueue(MediaKind kind) => handler.switchToQueue(kind);
+  /// Cambia a la cola [kind]. Si se indica [startIndex] salta a ese
+  /// elemento; [startPosition] permite arrancar en un punto concreto
+  /// (reanudar un podcast).
+  Future<void> switchToQueue(
+    MediaKind kind, {
+    int? startIndex,
+    bool? autoPlay,
+    Duration? startPosition,
+  }) =>
+      handler.switchToQueue(
+        kind,
+        startIndex: startIndex,
+        autoPlay: autoPlay,
+        startPosition: startPosition,
+      );
+
+  /// Reproduce el elemento [index] de la cola [kind], opcionalmente
+  /// desde [startPosition].
+  Future<void> playFromQueueOf(
+    MediaKind kind,
+    int index, {
+    Duration? startPosition,
+  }) =>
+      handler.playFromQueueOf(kind, index, startPosition: startPosition);
 
   MediaKind get activeQueueKind => handler.activeQueueKind;
 
@@ -157,12 +180,14 @@ class PlaybackController {
     List<Song> songs, {
     int startIndex = 0,
     bool autoPlay = true,
+    Duration? startPosition,
   }) =>
       handler.setQueueOf(
         kind,
         songs,
         startIndex: startIndex,
         autoPlay: autoPlay,
+        startPosition: startPosition,
       );
 
   Future<void> addToQueueOf(MediaKind kind, Song song) =>
@@ -257,6 +282,8 @@ class PlaybackController {
   bool get hasNext => _handler?.hasNext ?? false;
   bool get hasPrevious => _handler?.hasPrevious ?? false;
   Duration get positionNow => _handler?.position ?? Duration.zero;
+  Duration get durationNow => _handler?.durationNow ?? Duration.zero;
+  bool get isPlayingNow => _handler?.isPlaying ?? false;
 
   double get speedNow => _handler?.playerSpeed ?? 1.0;
   double get volumeNow => _handler?.volume ?? 1.0;
