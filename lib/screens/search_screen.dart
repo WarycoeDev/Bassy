@@ -1,4 +1,3 @@
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -25,7 +24,10 @@ class SearchScreen extends StatefulWidget {
   State<SearchScreen> createState() => _SearchScreenState();
 }
 
-class _SearchScreenState extends State<SearchScreen> {
+// CAMBIO: se añade WidgetsBindingObserver para detectar cuándo se oculta
+// el teclado del sistema.
+class _SearchScreenState extends State<SearchScreen>
+    with WidgetsBindingObserver {
   static const _prefsKey = 'search_history_v1';
   static const _maxHistory = 12;
   static const _debounceMs = 250;
@@ -50,6 +52,9 @@ class _SearchScreenState extends State<SearchScreen> {
   final FocusNode _searchFocusNode = FocusNode();
 
   final GlobalKey<NavigatorState> _navKey = GlobalKey<NavigatorState>();
+
+  // CAMBIO: recuerda si el teclado estaba visible en la última métrica.
+  bool _keyboardWasVisible = false;
 
   /// Query committed (ya con debounce, trimmed).
   String _query = '';
@@ -90,6 +95,9 @@ class _SearchScreenState extends State<SearchScreen> {
   void initState() {
     super.initState();
 
+    // CAMBIO: observamos los cambios de métricas (teclado).
+    WidgetsBinding.instance.addObserver(this);
+
     // Importante:
     // Nunca solicitamos foco automáticamente.
     _loadHistory();
@@ -98,6 +106,9 @@ class _SearchScreenState extends State<SearchScreen> {
 
   @override
   void dispose() {
+    // CAMBIO: dejamos de observar.
+    WidgetsBinding.instance.removeObserver(this);
+
     _debounce?.cancel();
     _applyTimer?.cancel();
     _sub?.cancel();
@@ -111,6 +122,22 @@ class _SearchScreenState extends State<SearchScreen> {
     _libCount.dispose();
 
     super.dispose();
+  }
+
+  // CAMBIO: cuando el teclado pasa de visible a oculto (gesto/botón atrás,
+  // botón de bajar teclado, etc.) se quita el foco del buscador.
+  @override
+  void didChangeMetrics() {
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isEmpty) return;
+
+    final visible = views.first.viewInsets.bottom > 0;
+
+    if (_keyboardWasVisible && !visible) {
+      _dismissKeyboard();
+    }
+
+    _keyboardWasVisible = visible;
   }
 
   // ===========================================================================
@@ -609,81 +636,78 @@ class _SearchScreenState extends State<SearchScreen> {
   Widget _buildSearchBar(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    // Este GestureDetector consume el tap del buscador para que el
-    // GestureDetector exterior NO llame a _dismissKeyboard.
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        // No hacemos unfocus.
-        //
-        // El TextField mantiene su comportamiento normal:
-        // al tocarlo obtiene el foco y abre el teclado.
-      },
-      child: Container(
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainer,
-          borderRadius: BorderRadius.circular(12),
+    // CAMBIO: se eliminó el GestureDetector interno que envolvía el campo;
+    // ya no hace falta porque el desenfoque por toque externo se maneja con
+    // TextField.onTapOutside.
+    return Container(
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: TextField(
+        controller: _searchController,
+
+        // Control de foco explícito.
+        focusNode: _searchFocusNode,
+
+        // MUY IMPORTANTE:
+        // evita que Flutter abra el teclado automáticamente al montar
+        // o reconstruir esta pantalla.
+        autofocus: false,
+
+        // CAMBIO: cualquier toque fuera del buscador (chips, tiles,
+        // botones, listas, etc.) le quita el foco, aunque otro widget
+        // consuma el gesto.
+        onTapOutside: (_) => _dismissKeyboard(),
+
+        textInputAction: TextInputAction.search,
+
+        onSubmitted: _onSubmitted,
+        onChanged: _onTextChanged,
+
+        style: TextStyle(
+          color: scheme.onSurface,
+          fontSize: 14,
         ),
-        child: TextField(
-          controller: _searchController,
 
-          // Control de foco explícito.
-          focusNode: _searchFocusNode,
+        cursorColor: scheme.primary,
 
-          // MUY IMPORTANTE:
-          // evita que Flutter abra el teclado automáticamente al montar
-          // o reconstruir esta pantalla.
-          autofocus: false,
-
-          textInputAction: TextInputAction.search,
-
-          onSubmitted: _onSubmitted,
-          onChanged: _onTextChanged,
-
-          style: TextStyle(
-            color: scheme.onSurface,
+        decoration: InputDecoration(
+          hintText: 'Canciones, artistas, álbumes...',
+          hintStyle: TextStyle(
+            color: scheme.onSurfaceVariant,
             fontSize: 14,
           ),
 
-          cursorColor: scheme.primary,
+          prefixIcon: Icon(
+            Icons.search,
+            color: scheme.onSurfaceVariant,
+            size: 22,
+          ),
 
-          decoration: InputDecoration(
-            hintText: 'Canciones, artistas, álbumes...',
-            hintStyle: TextStyle(
-              color: scheme.onSurfaceVariant,
-              fontSize: 14,
-            ),
+          suffixIcon: ValueListenableBuilder<bool>(
+            valueListenable: _hasText,
+            builder: (_, has, __) {
+              if (!has) {
+                return const SizedBox.shrink();
+              }
 
-            prefixIcon: Icon(
-              Icons.search,
-              color: scheme.onSurfaceVariant,
-              size: 22,
-            ),
+              return GestureDetector(
+                onTap: _clearText,
+                behavior: HitTestBehavior.opaque,
+                child: Icon(
+                  Icons.close,
+                  color: scheme.onSurfaceVariant,
+                  size: 20,
+                ),
+              );
+            },
+          ),
 
-            suffixIcon: ValueListenableBuilder<bool>(
-              valueListenable: _hasText,
-              builder: (_, has, __) {
-                if (!has) {
-                  return const SizedBox.shrink();
-                }
+          border: InputBorder.none,
 
-                return GestureDetector(
-                  onTap: _clearText,
-                  behavior: HitTestBehavior.opaque,
-                  child: Icon(
-                    Icons.close,
-                    color: scheme.onSurfaceVariant,
-                    size: 20,
-                  ),
-                );
-              },
-            ),
-
-            border: InputBorder.none,
-
-            contentPadding: const EdgeInsets.symmetric(
-              vertical: 16,
-            ),
+          contentPadding: const EdgeInsets.symmetric(
+            vertical: 16,
           ),
         ),
       ),
