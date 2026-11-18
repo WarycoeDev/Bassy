@@ -201,6 +201,7 @@ class _QueuePanelState extends State<QueuePanel> {
     _maybeAutoScroll(currentIndex, songs.length);
 
     final minHeight = widget.embedded ? 0.0 : _minPanelHeight;
+    final allowEdit = _viewKind != MediaKind.podcast;
 
     return Material(
       color: widget.embedded
@@ -268,6 +269,8 @@ class _QueuePanelState extends State<QueuePanel> {
                     scheme: scheme,
                     songs: songs,
                     currentIndex: currentIndex,
+                    allowRemove: allowEdit,
+                    allowReorder: allowEdit,
                     onPlay: _handlePlay,
                     onRemoveConfirmed: (index, song) async {
                       // 1. Disparamos la animación de colapso
@@ -333,6 +336,8 @@ class _QueueContainer extends StatelessWidget {
   final ColorScheme scheme;
   final List<Song> songs;
   final int currentIndex;
+  final bool allowRemove;
+  final bool allowReorder;
   final double minHeight;
   final ScrollController scrollController;
   final double listPadding;
@@ -345,6 +350,8 @@ class _QueueContainer extends StatelessWidget {
     required this.scheme,
     required this.songs,
     required this.currentIndex,
+    required this.allowRemove,
+    required this.allowReorder,
     required this.minHeight,
     required this.scrollController,
     required this.listPadding,
@@ -410,7 +417,8 @@ class _QueueContainer extends StatelessWidget {
             ),
             buildDefaultDragHandles: false,
             itemCount: songs.length,
-            onReorder: (o, n) => onReorder(o, n),
+            onReorder:
+                allowReorder ? (o, n) => onReorder(o, n) : (_, __) {},
             proxyDecorator: (child, index, animation) {
               return AnimatedBuilder(
                 animation: animation,
@@ -437,6 +445,7 @@ class _QueueContainer extends StatelessWidget {
               final isCurrent = index == currentIndex;
               final entryKey = _entryKey(index);
               final isRemoving = removingIds.contains(song.path);
+              final canDismiss = allowRemove && !isCurrent && !isRemoving;
 
               return _CollapseOnRemove(
                 key: ValueKey('queue-item-$entryKey'),
@@ -446,23 +455,23 @@ class _QueueContainer extends StatelessWidget {
                   children: [
                     Dismissible(
                       key: ValueKey('dismiss-$entryKey'),
-                      direction: (isCurrent || isRemoving)
-                          ? DismissDirection.none
-                          : DismissDirection.horizontal,
+                      direction: canDismiss
+                          ? DismissDirection.horizontal
+                          : DismissDirection.none,
                       background: _DismissBg(
                         scheme: scheme,
                         alignment: Alignment.centerLeft,
                         icon: Icons.delete_outline_rounded,
-                        enabled: !isCurrent && !isRemoving,
+                        enabled: canDismiss,
                       ),
                       secondaryBackground: _DismissBg(
                         scheme: scheme,
                         alignment: Alignment.centerRight,
                         icon: Icons.delete_outline_rounded,
-                        enabled: !isCurrent && !isRemoving,
+                        enabled: canDismiss,
                       ),
                       confirmDismiss: (_) async {
-                        if (isCurrent) return false;
+                        if (!canDismiss) return false;
 
                         final confirmed = await _confirmRemove(context, song);
                         if (confirmed) {
@@ -482,6 +491,7 @@ class _QueueContainer extends StatelessWidget {
                         isCurrent: isCurrent,
                         scheme: scheme,
                         isRemoving: isRemoving,
+                        allowReorder: allowReorder,
                         onTap: () => onPlay(index),
                       ),
                     ),
@@ -509,6 +519,7 @@ class _QueueTile extends StatelessWidget {
   final bool isCurrent;
   final ColorScheme scheme;
   final bool isRemoving;
+  final bool allowReorder;
   final VoidCallback onTap;
 
   const _QueueTile({
@@ -517,6 +528,7 @@ class _QueueTile extends StatelessWidget {
     required this.isCurrent,
     required this.scheme,
     required this.isRemoving,
+    required this.allowReorder,
     required this.onTap,
   });
 
@@ -591,21 +603,24 @@ class _QueueTile extends StatelessWidget {
                     ),
                   ),
                 ),
-              ReorderableDragStartListener(
-                index: index,
-                enabled: isInteractive,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 8,
+              if (allowReorder)
+                ReorderableDragStartListener(
+                  index: index,
+                  enabled: isInteractive,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
+                    child: Icon(
+                      Icons.drag_handle_rounded,
+                      color: scheme.onSurfaceVariant,
+                      size: 22,
+                    ),
                   ),
-                  child: Icon(
-                    Icons.drag_handle_rounded,
-                    color: scheme.onSurfaceVariant,
-                    size: 22,
-                  ),
-                ),
-              ),
+                )
+              else
+                const SizedBox(width: 38),
             ],
           ),
         ),

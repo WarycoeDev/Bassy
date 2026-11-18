@@ -6,6 +6,12 @@ import 'package:flutter/services.dart';
 
 /// Acción individual que se muestra en el [ActionMenu].
 class ActionMenuItem {
+  /// Identificador opcional para distinguir acciones entre sí.
+  ///
+  /// Útil para filtrar (p. ej. ocultar "Añadir a la cola" cuando la
+  /// canción ya está en la cola), analytics, tests, etc.
+  final String? id;
+
   final IconData icon;
   final String label;
   final VoidCallback? onTap;
@@ -15,6 +21,7 @@ class ActionMenuItem {
   final bool enabled;
 
   const ActionMenuItem({
+    this.id,
     required this.icon,
     required this.label,
     required this.onTap,

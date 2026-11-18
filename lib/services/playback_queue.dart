@@ -49,6 +49,13 @@ class PlaybackQueue {
 
   bool get hasPrevious => currentIndex > 0 && currentIndex < songs.length;
 
+  /// ¿La canción con [songId] ya está en esta cola?
+  bool contains(String songId) =>
+      songs.any((s) => s.id == songId);
+
+  /// Variante por instancia (compara por id).
+  bool containsSong(Song song) => contains(song.id);
+
   /// Deja [sourceOrder] como identidad (orden original).
   void resetOrder() =>
       sourceOrder = List<int>.generate(songs.length, (i) => i);

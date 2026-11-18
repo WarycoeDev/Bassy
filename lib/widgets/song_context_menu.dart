@@ -1,3 +1,4 @@
+
 // lib/widgets/song_context_menu.dart
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
@@ -26,6 +27,7 @@ class SongContextMenu {
     Song song,
   ) async {
     final actions = _buildQueueActions(song);
+
     await ActionMenu.show(
       context,
       title: song.title,
@@ -43,12 +45,12 @@ class SongContextMenu {
         label: 'Reproducir ahora',
         onTap: () => _replaceQueueAndPlay(song),
       ),
-      ..._queueAddRemove(song),
+      ..._queueToggleAction(song),
     ];
   }
 
   // ============================================================
-  // MENÚ DE COLA CON CONTEXTO (ej. desde un álbum o playlist)
+  // MENÚ DE COLA CON CONTEXTO
   // ============================================================
 
   static Future<void> showQueueSheetForContext(
@@ -63,8 +65,11 @@ class SongContextMenu {
     if (!controller.isReady) return;
 
     final kind = song.kind;
+
     final safeIndex =
-        startIndex >= 0 && startIndex < contextSongs.length ? startIndex : 0;
+        startIndex >= 0 && startIndex < contextSongs.length
+            ? startIndex
+            : 0;
 
     final actions = <ActionMenuItem>[
       ActionMenuItem(
@@ -72,6 +77,7 @@ class SongContextMenu {
         label: 'Reproducir ahora',
         onTap: () async {
           await controller.switchToQueue(kind);
+
           await controller.setQueueOf(
             kind,
             contextSongs,
@@ -80,24 +86,10 @@ class SongContextMenu {
           );
         },
       ),
-      ActionMenuItem(
-        icon: Icons.queue_play_next,
-        label: 'Añadir a la cola',
-        onTap: () async {
-          await controller.switchToQueue(kind);
-          await controller.addToQueueOf(kind, song);
-        },
-      ),
-      ActionMenuItem(
-        icon: Icons.playlist_add,
-        label: 'Añadir todo a la cola',
-        onTap: () async {
-          for (final s in contextSongs) {
-            await controller.addToQueueOf(kind, s);
-          }
-        },
-      ),
-      ..._queueAddRemove(song),
+
+      // Una sola acción que cambia entre:
+      // "Añadir a la cola" / "Quitar de la cola"
+      ..._queueToggleAction(song),
     ];
 
     await ActionMenu.show(
@@ -126,6 +118,7 @@ class SongContextMenu {
       queueContext: queueContext,
       queueIndex: queueIndex,
     );
+
     await ActionMenu.show(
       context,
       title: song.title,
@@ -149,6 +142,7 @@ class SongContextMenu {
       queueContext: queueContext,
       queueIndex: queueIndex,
     );
+
     return ActionMenu.showAt(
       context,
       actions: actions,
@@ -171,8 +165,7 @@ class SongContextMenu {
 
       return [
         // --- Reproducción ---
-        // Sin progreso guardado: un solo botón "Reproducir" (desde 0).
-        // Con progreso: "Reproducir desde el principio" + "Reanudar".
+
         ActionMenuItem(
           icon: hasProgress ? Icons.replay : Icons.play_arrow,
           label: hasProgress
@@ -184,6 +177,7 @@ class SongContextMenu {
             queueIndex: queueIndex,
           ),
         ),
+
         if (hasProgress)
           ActionMenuItem(
             icon: Icons.play_circle_outline,
@@ -195,7 +189,10 @@ class SongContextMenu {
             ),
           ),
 
-        // --- Cola (solo añadir; sin "Quitar de la cola" en podcast) ---
+        // --- Cola ---
+        //
+        // Los podcasts mantienen solamente la opción de añadir.
+        // No se muestra "Quitar de la cola" aquí.
         ..._queueAddOnly(song),
 
         // --- Stats / marcado ---
@@ -216,58 +213,82 @@ class SongContextMenu {
           queueIndex: queueIndex,
         ),
       ),
-      ..._queueAddRemove(song),
+
+      // Una sola acción dinámica:
+      // "Añadir a la cola" si no está
+      // "Quitar de la cola" si ya está
+      ..._queueToggleAction(song),
+
       ActionMenuItem(
         icon: Icons.playlist_add,
         label: 'Añadir a playlist',
         onTap: () => _addToPlaylist(context, song),
       ),
+
       ActionMenuItem(
         icon: isFav ? Icons.favorite : Icons.favorite_border,
-        label: isFav ? 'Quitar de favoritos' : 'Añadir a favoritos',
+        label: isFav
+            ? 'Quitar de favoritos'
+            : 'Añadir a favoritos',
         onTap: () async {
           await favorites.toggle(song);
+
           if (!context.mounted) return;
         },
       ),
+
       ..._musicActions(context, song),
     ];
   }
 
-  /// Solo la acción de añadir a la cola (si no está ya). No incluye
-  /// "Quitar de la cola". Se usa en el menú de podcast.
-  static List<ActionMenuItem> _queueAddOnly(Song song) {
-    final c = PlaybackController.instance;
-    final handler = c.isReady ? c.handler : null;
+  // ============================================================
+  // ACCIÓN DE COLA DINÁMICA
+  // ============================================================
+
+  /// Devuelve UNA sola acción relacionada con la cola.
+  ///
+  /// Si la canción NO está en la cola:
+  ///   -> "Añadir a la cola"
+  ///
+  /// Si la canción YA está en la cola:
+  ///   -> "Quitar de la cola"
+  ///
+  /// Si es la canción que está sonando:
+  ///   -> "Quitar de la cola (sonando ahora)"
+  ///      pero permanece deshabilitada para evitar eliminar
+  ///      accidentalmente la canción actual.
+  static List<ActionMenuItem> _queueToggleAction(Song song) {
+    final controller = PlaybackController.instance;
+    final handler = controller.isReady ? controller.handler : null;
+
+    if (handler == null) {
+      return [
+        ActionMenuItem(
+          icon: Icons.queue_music,
+          label: 'Añadir a la cola',
+          enabled: false,
+          onTap: () {},
+        ),
+      ];
+    }
+
     final kind = song.kind;
 
-    final queueSongs = handler?.songsOf(kind) ?? const <Song>[];
-    final inQueue = queueSongs.any((s) => s.path == song.path);
+    final queueSongs = handler.songsOf(kind);
 
-    if (inQueue) return const [];
-    return [
-      ActionMenuItem(
-        icon: Icons.queue_music,
-        label: 'Añadir a la cola',
-        onTap: () async {
-          if (handler == null) return;
-          await handler.addToQueueOf(kind, song);
-        },
-      ),
-    ];
-  }
+    final queueIndex = queueSongs.indexWhere(
+      (s) => s.path == song.path,
+    );
 
-  static List<ActionMenuItem> _queueAddRemove(Song song) {
-    final c = PlaybackController.instance;
-    final handler = c.isReady ? c.handler : null;
-    final kind = song.kind;
+    final inQueue = queueIndex >= 0;
 
-    final queueSongs = handler?.songsOf(kind) ?? const <Song>[];
-    final inQueue = queueSongs.any((s) => s.path == song.path);
     final isCurrent =
-        handler != null &&
         handler.activeQueueKind == kind &&
         handler.currentSong?.path == song.path;
+
+    // ----------------------------------------------------------
+    // NO ESTÁ EN LA COLA -> AÑADIR
+    // ----------------------------------------------------------
 
     if (!inQueue) {
       return [
@@ -275,12 +296,16 @@ class SongContextMenu {
           icon: Icons.queue_music,
           label: 'Añadir a la cola',
           onTap: () async {
-            if (handler == null) return;
             await handler.addToQueueOf(kind, song);
           },
         ),
       ];
     }
+
+    // ----------------------------------------------------------
+    // YA ESTÁ EN LA COLA -> QUITAR
+    // ----------------------------------------------------------
+
     return [
       ActionMenuItem(
         icon: Icons.playlist_remove,
@@ -290,152 +315,210 @@ class SongContextMenu {
         isDestructive: true,
         enabled: !isCurrent,
         onTap: () async {
-          if (handler == null) return;
-          final idx = queueSongs.indexWhere((s) => s.path == song.path);
-          if (idx >= 0) {
-            await handler.removeFromQueueOf(kind, idx);
-          }
+          if (isCurrent) return;
+
+          final currentIndex = handler
+              .songsOf(kind)
+              .indexWhere((s) => s.path == song.path);
+
+          if (currentIndex < 0) return;
+
+          await handler.removeFromQueueOf(
+            kind,
+            currentIndex,
+          );
         },
       ),
     ];
   }
+
+  // ============================================================
+  // SOLO AÑADIR A COLA
+  // ============================================================
+
+  /// Acción exclusiva para podcasts.
+  ///
+  /// Si el podcast ya está en la cola no muestra ninguna acción.
+  static List<ActionMenuItem> _queueAddOnly(Song song) {
+    final controller = PlaybackController.instance;
+    final handler = controller.isReady
+        ? controller.handler
+        : null;
+
+    final kind = song.kind;
+
+    final queueSongs =
+        handler?.songsOf(kind) ?? const <Song>[];
+
+    final inQueue = queueSongs.any(
+      (s) => s.path == song.path,
+    );
+
+    if (inQueue) {
+      return const [];
+    }
+
+    return [
+      ActionMenuItem(
+        icon: Icons.queue_music,
+        label: 'Añadir a la cola',
+        onTap: () async {
+          if (handler == null) return;
+
+          await handler.addToQueueOf(
+            kind,
+            song,
+          );
+        },
+      ),
+    ];
+  }
+
+  // ============================================================
+  // REPRODUCCIÓN
+  // ============================================================
 
   static Future<void> _playNow(
     Song song, {
     List<Song>? queueContext,
     int? queueIndex,
   }) async {
-    final c = PlaybackController.instance;
-    if (!c.isReady) return;
-
-    final ctx = queueContext;
-    if (ctx == null || ctx.isEmpty) {
-      await _replaceQueueAndPlay(song);
-      return;
-    }
-
-    final kind = song.kind;
-    final safeIndex = (queueIndex != null &&
-            queueIndex >= 0 &&
-            queueIndex < ctx.length &&
-            ctx[queueIndex].path == song.path)
-        ? queueIndex
-        : ctx.indexWhere((s) => s.path == song.path);
-
-    final startIndex = safeIndex >= 0 ? safeIndex : 0;
-
-    try {
-      await c.switchToQueue(kind);
-      await c.setQueueOf(
-        kind,
-        ctx,
-        startIndex: startIndex,
-        autoPlay: true,
-      );
-    } catch (e) {
-      debugPrint('SongContextMenu: no se pudo reproducir contexto -> $e');
-    }
+    // "Reproducir ahora" debe reproducir ÚNICAMENTE la canción
+    // seleccionada, incluso cuando el menú fue abierto desde una
+    // playlist/listado que proporciona queueContext.
+    //
+    // No usamos queueContext aquí porque eso cargaría todas las
+    // canciones del contexto en la cola.
+    await _replaceQueueAndPlay(song);
   }
 
-  static Future<void> _replaceQueueAndPlay(Song song) async {
-    final c = PlaybackController.instance;
-    if (!c.isReady) return;
+  static Future<void> _replaceQueueAndPlay(
+    Song song,
+  ) async {
+    final controller = PlaybackController.instance;
+
+    if (!controller.isReady) return;
+
     try {
-      await c.playOnly(song);
+      await controller.playOnly(song);
     } catch (e) {
-      debugPrint('SongContextMenu: no se pudo reproducir -> $e');
+      debugPrint(
+        'SongContextMenu: no se pudo reproducir -> $e',
+      );
     }
   }
 
   // ============================================================
-  // Reproducción de podcast: desde el principio / reanudar
+  // REPRODUCCIÓN DE PODCAST
   // ============================================================
 
   /// ¿Hay progreso guardado pendiente de terminar para [song]?
-  /// Devuelve `false` si nunca se ha empezado o si ya está completado.
+  ///
+  /// Devuelve false si nunca se ha empezado o si ya está completado.
   static bool _hasProgress(Song song) {
     final stats = StatsService.instance;
+
     if (stats.isPlayed(song)) return false;
+
     final progress = stats.progressOf(song);
-    final position = progress?.position ?? Duration.zero;
-    return position > Duration.zero && !(progress?.completed ?? false);
+    final position =
+        progress?.position ?? Duration.zero;
+
+    return position > Duration.zero &&
+        !(progress?.completed ?? false);
   }
 
-  /// Indica si el episodio tiene progreso guardado pendiente de terminar.
-  static bool _canResume(Song song) => _hasProgress(song);
+  static bool _canResume(Song song) {
+    return _hasProgress(song);
+  }
 
-  /// Carga en la cola todos los episodios de [queueContext] (si se
-  /// proporciona) y reproduce [song] desde [start]. Si no hay contexto,
-  /// se comporta como antes: cola de un solo episodio.
+  /// Carga en la cola todos los episodios de [queueContext]
+  /// y reproduce [song] desde [start].
+  ///
+  /// Si no hay contexto, se comporta como antes:
+  /// cola de un solo episodio.
   static Future<void> _playPodcastInContext(
     Song song, {
     required Duration start,
     List<Song>? queueContext,
     int? queueIndex,
   }) async {
-    final c = PlaybackController.instance;
-    if (!c.isReady) return;
+    final controller = PlaybackController.instance;
 
-    final ctx = queueContext
-        ?.where((s) => s.kind == MediaKind.podcast)
+    if (!controller.isReady) return;
+
+    final contextSongs = queueContext
+        ?.where(
+          (s) => s.kind == MediaKind.podcast,
+        )
         .toList();
 
     if (kDebugMode) {
       debugPrint(
         'SongContextMenu._playPodcastInContext: '
-        'ctx=${ctx?.length ?? 0}, queueIndex=$queueIndex, start=$start',
+        'ctx=${contextSongs?.length ?? 0}, '
+        'queueIndex=$queueIndex, '
+        'start=$start',
       );
     }
 
     try {
-      if (ctx == null || ctx.isEmpty) {
-        await c.setQueueOf(
+      if (contextSongs == null ||
+          contextSongs.isEmpty) {
+        await controller.setQueueOf(
           song.kind,
           [song],
           startIndex: 0,
           autoPlay: true,
           startPosition: start,
         );
+
         return;
       }
 
       int index;
-      final provided = queueIndex;
-      if (provided != null &&
-          provided >= 0 &&
-          provided < ctx.length &&
-          ctx[provided].path == song.path) {
-        index = provided;
+
+      final providedIndex = queueIndex;
+
+      if (providedIndex != null &&
+          providedIndex >= 0 &&
+          providedIndex < contextSongs.length &&
+          contextSongs[providedIndex].path == song.path) {
+        index = providedIndex;
       } else {
-        index = ctx.indexWhere((s) => s.path == song.path);
+        index = contextSongs.indexWhere(
+          (s) => s.path == song.path,
+        );
       }
 
       if (index < 0) {
-        ctx.insert(0, song);
+        contextSongs.insert(0, song);
         index = 0;
       }
 
       if (kDebugMode) {
         debugPrint(
-          'SongContextMenu._playPodcastInContext: setQueueOf con '
-          '${ctx.length} episodios, startIndex=$index',
+          'SongContextMenu._playPodcastInContext: '
+          'setQueueOf con ${contextSongs.length} episodios, '
+          'startIndex=$index',
         );
       }
 
-      await c.setQueueOf(
+      await controller.setQueueOf(
         song.kind,
-        ctx,
+        contextSongs,
         startIndex: index,
         autoPlay: true,
         startPosition: start,
       );
     } catch (e) {
-      debugPrint('SongContextMenu: no se pudo reproducir podcast -> $e');
+      debugPrint(
+        'SongContextMenu: no se pudo reproducir podcast -> $e',
+      );
     }
   }
 
-  /// Reproduce el episodio clicado desde el inicio (posición 0) y deja
-  /// todos los capítulos del podcast en la cola.
+  /// Reproduce el episodio desde el principio.
   static Future<void> _playPodcastFromStart(
     Song song, {
     List<Song>? queueContext,
@@ -451,15 +534,17 @@ class SongContextMenu {
     );
   }
 
-  /// Reanuda el episodio clicado desde su progreso guardado y deja
-  /// todos los capítulos del podcast en la cola.
+  /// Reanuda el episodio desde su progreso guardado.
   static Future<void> _resumePodcast(
     Song song, {
     List<Song>? queueContext,
     int? queueIndex,
   }) async {
-    final progress = StatsService.instance.progressOf(song);
-    final position = progress?.position ?? Duration.zero;
+    final progress =
+        StatsService.instance.progressOf(song);
+
+    final position =
+        progress?.position ?? Duration.zero;
 
     await _playPodcastInContext(
       song,
@@ -469,6 +554,10 @@ class SongContextMenu {
     );
   }
 
+  // ============================================================
+  // ACCIONES MUSICALES
+  // ============================================================
+
   static List<ActionMenuItem> _musicActions(
     BuildContext context,
     Song song,
@@ -476,32 +565,50 @@ class SongContextMenu {
     final album = _findAlbum(song);
     final artist = _findArtist(song);
 
-    final hasAlbum = song.hasAlbum && album != null;
-    final hasArtist = song.hasArtist && artist != null;
+    final hasAlbum =
+        song.hasAlbum && album != null;
+
+    final hasArtist =
+        song.hasArtist && artist != null;
 
     return [
       ActionMenuItem(
         icon: Icons.album_outlined,
-        label: hasAlbum ? 'Ver álbum' : 'Sin álbum disponible',
+        label: hasAlbum
+            ? 'Ver álbum'
+            : 'Sin álbum disponible',
         enabled: hasAlbum,
         onTap: () {
           if (!hasAlbum) return;
-          _openPlaylist(context, album!);
+
+          _openPlaylist(
+            context,
+            album!,
+          );
         },
       ),
       ActionMenuItem(
         icon: Icons.person_outline,
-        label: hasArtist ? 'Ver artista' : 'Sin artista disponible',
+        label: hasArtist
+            ? 'Ver artista'
+            : 'Sin artista disponible',
         enabled: hasArtist,
         onTap: () {
           if (!hasArtist) return;
-          _openPlaylist(context, artist!);
+
+          _openPlaylist(
+            context,
+            artist!,
+          );
         },
       ),
       ActionMenuItem(
         icon: Icons.info_outline,
         label: 'Ver detalles',
-        onTap: () => _todo(context, 'Detalles'),
+        onTap: () => _todo(
+          context,
+          'Detalles',
+        ),
       ),
     ];
   }
@@ -510,29 +617,50 @@ class SongContextMenu {
     BuildContext context,
     Song song,
   ) async {
-    final changed = await PlaylistPickerDialog.show(context, song);
+    final changed =
+        await PlaylistPickerDialog.show(
+      context,
+      song,
+    );
+
     if (!changed || !context.mounted) return;
   }
+
+  // ============================================================
+  // ACCIONES DE PODCAST
+  // ============================================================
 
   static List<ActionMenuItem> _podcastActions(
     BuildContext context,
     Song song,
   ) {
     final stats = StatsService.instance;
-    final progress = stats.progressOf(song);
-    final isPlayed = stats.isPlayed(song);
-    final position = progress?.position ?? Duration.zero;
-    final hasProgress = position > Duration.zero && !isPlayed;
+
+    final progress =
+        stats.progressOf(song);
+
+    final isPlayed =
+        stats.isPlayed(song);
+
+    final position =
+        progress?.position ?? Duration.zero;
+
+    final hasProgress =
+        position > Duration.zero && !isPlayed;
 
     return [
       ActionMenuItem(
-        icon: isPlayed ? Icons.check_circle : Icons.check_circle_outline,
+        icon: isPlayed
+            ? Icons.check_circle
+            : Icons.check_circle_outline,
         label: isPlayed
             ? 'Marcar como no reproducido'
             : 'Marcar como reproducido',
         onTap: () {
           stats.togglePlayed(song);
+
           if (!context.mounted) return;
+
           _showToast(
             context,
             isPlayed
@@ -541,26 +669,42 @@ class SongContextMenu {
           );
         },
       ),
+
       if (hasProgress)
         ActionMenuItem(
           icon: Icons.restart_alt,
           label: 'Borrar progreso',
           onTap: () {
             stats.markAsUnplayed(song);
+
             if (!context.mounted) return;
           },
         ),
+
       ActionMenuItem(
         icon: Icons.info_outline,
         label: 'Ver detalles',
-        onTap: () => _todo(context, 'Detalles del episodio'),
+        onTap: () => _todo(
+          context,
+          'Detalles del episodio',
+        ),
       ),
     ];
   }
 
-  static void _showToast(BuildContext context, String message) {
-    final messenger = ScaffoldMessenger.maybeOf(context);
+  // ============================================================
+  // UTILIDADES
+  // ============================================================
+
+  static void _showToast(
+    BuildContext context,
+    String message,
+  ) {
+    final messenger =
+        ScaffoldMessenger.maybeOf(context);
+
     if (messenger == null) return;
+
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -572,17 +716,23 @@ class SongContextMenu {
       );
   }
 
-  static void _openPlaylist(BuildContext context, Playlist playlist) {
+  static void _openPlaylist(
+    BuildContext context,
+    Playlist playlist,
+  ) {
     showDialog<void>(
       context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.45),
+      barrierColor:
+          Colors.black.withValues(alpha: 0.45),
       builder: (dialogContext) {
-        final scheme = Theme.of(dialogContext).colorScheme;
+        final scheme =
+            Theme.of(dialogContext).colorScheme;
 
         return Dialog(
           backgroundColor: Colors.transparent,
           elevation: 0,
-          insetPadding: const EdgeInsets.symmetric(
+          insetPadding:
+              const EdgeInsets.symmetric(
             horizontal: 32,
             vertical: 24,
           ),
@@ -592,7 +742,8 @@ class SongContextMenu {
               maxHeight: 640,
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
+              borderRadius:
+                  BorderRadius.circular(18),
               child: Material(
                 color: scheme.surface,
                 child: PlaylistDetailScreen(
@@ -609,26 +760,43 @@ class SongContextMenu {
 
   static Playlist? _findAlbum(Song song) {
     if (!song.hasAlbum) return null;
+
     final target = song.albumOrUnknown;
-    for (final p in LibraryScreen.currentAlbums) {
-      if (p.title == target) return p;
+
+    for (final playlist
+        in LibraryScreen.currentAlbums) {
+      if (playlist.title == target) {
+        return playlist;
+      }
     }
+
     return null;
   }
 
   static Playlist? _findArtist(Song song) {
     if (!song.hasArtist) return null;
+
     final target = song.artistOrUnknown;
-    for (final p in LibraryScreen.currentArtists) {
-      if (p.title == target) return p;
+
+    for (final playlist
+        in LibraryScreen.currentArtists) {
+      if (playlist.title == target) {
+        return playlist;
+      }
     }
+
     return null;
   }
 
   static IconData _fallbackIcon(Song song) =>
-      song.kind == MediaKind.podcast ? Icons.mic : Icons.music_note;
+      song.kind == MediaKind.podcast
+          ? Icons.mic
+          : Icons.music_note;
 
-  static void _todo(BuildContext context, String label) {
+  static void _todo(
+    BuildContext context,
+    String label,
+  ) {
     // Placeholder para acciones aún no implementadas.
   }
 }
