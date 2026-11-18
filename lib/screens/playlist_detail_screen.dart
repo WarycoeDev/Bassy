@@ -332,6 +332,19 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       return;
     }
 
+    // Calculamos qué canciones de la playlist aún no están en la cola
+    // del MediaKind correspondiente. El botón "Añadir a la cola" solo
+    // estará activo si hay al menos una nueva.
+    final existingIds = targetQueueSongs.map((s) => s.id).toSet();
+    final missing = <Song>[];
+    final seen = <String>{};
+    for (final s in live.songs) {
+      if (seen.add(s.id) && !existingIds.contains(s.id)) {
+        missing.add(s);
+      }
+    }
+    final canAddToQueue = missing.isNotEmpty;
+
     await PlaybackMenu.show(
       context,
       title: live.title,
@@ -353,13 +366,18 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
           },
         ),
         PlaybackMenuAction(
+          id: 'add_to_queue',
           icon: Icons.queue_music,
           label: 'Añadir a la cola',
-          onTap: () async {
-            for (final s in live.songs) {
-              await controller.addToQueueOf(queueKind, s);
-            }
-          },
+          enabled: canAddToQueue,
+          onTap: canAddToQueue
+              ? () async {
+                  // Solo añadimos las que faltaban, ya deduplicadas.
+                  for (final s in missing) {
+                    await controller.addToQueueOf(queueKind, s);
+                  }
+                }
+              : null,
         ),
       ],
     );
@@ -607,72 +625,72 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   }
 
   Widget _buildHeaderActions(BuildContext context, Playlist live) {
-  // ¿Hay algo que reanudar? Solo mostramos el botón si existe.
-  final resumeTarget = _isPodcast ? _nextPodcastToResume(live) : null;
+    // ¿Hay algo que reanudar? Solo mostramos el botón si existe.
+    final resumeTarget = _isPodcast ? _nextPodcastToResume(live) : null;
 
-  return Row(
-    children: [
-      Expanded(
-        child: FilledButton.icon(
-          onPressed: live.songs.isEmpty
-              ? null
-              : () => _playAll(context, live),
-          icon: const Icon(Icons.play_arrow, size: 20),
-          label: const Text(
-            'Reproducir todo',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+    return Row(
+      children: [
+        Expanded(
+          child: FilledButton.icon(
+            onPressed: live.songs.isEmpty
+                ? null
+                : () => _playAll(context, live),
+            icon: const Icon(Icons.play_arrow, size: 20),
+            label: const Text(
+              'Reproducir todo',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
         ),
-      ),
 
-      if (resumeTarget != null) ...[
-        const SizedBox(width: 8),
+        if (resumeTarget != null) ...[
+          const SizedBox(width: 8),
 
-        // Podcast: Reanudar como botón de solo icono.
-        if (_isPodcast)
-          IconButton.filledTonal(
-            onPressed: () => _resumeFromHeader(context, live),
-            tooltip: 'Reanudar',
-            icon: const Icon(
-              Icons.play_circle_outline,
-              size: 22,
-            ),
-          )
-        else
-          Expanded(
-            child: FilledButton.tonalIcon(
+          // Podcast: Reanudar como botón de solo icono.
+          if (_isPodcast)
+            IconButton.filledTonal(
               onPressed: () => _resumeFromHeader(context, live),
-              icon: const Icon(Icons.play_circle_outline, size: 20),
-              label: const Text(
-                'Reanudar',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              tooltip: 'Reanudar',
+              icon: const Icon(
+                Icons.play_circle_outline,
+                size: 22,
+              ),
+            )
+          else
+            Expanded(
+              child: FilledButton.tonalIcon(
+                onPressed: () => _resumeFromHeader(context, live),
+                icon: const Icon(Icons.play_circle_outline, size: 20),
+                label: const Text(
+                  'Reanudar',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             ),
-          ),
-      ],
+        ],
 
-      if (_canReorder && live.songs.length > 1) ...[
-        const SizedBox(width: 8),
-        IconButton.filledTonal(
-          onPressed: () {
-            if (_reorderMode) {
-              _exitReorderMode();
-            } else {
-              _enterReorderMode(live);
-            }
-          },
-          tooltip: _reorderMode ? 'Listo' : 'Reordenar',
-          icon: Icon(
-            _reorderMode ? Icons.check : Icons.swap_vert,
-            size: 20,
+        if (_canReorder && live.songs.length > 1) ...[
+          const SizedBox(width: 8),
+          IconButton.filledTonal(
+            onPressed: () {
+              if (_reorderMode) {
+                _exitReorderMode();
+              } else {
+                _enterReorderMode(live);
+              }
+            },
+            tooltip: _reorderMode ? 'Listo' : 'Reordenar',
+            icon: Icon(
+              _reorderMode ? Icons.check : Icons.swap_vert,
+              size: 20,
+            ),
           ),
-        ),
+        ],
       ],
-    ],
-  );
-}
+    );
+  }
 
   // ============================================================
   // Lista de canciones

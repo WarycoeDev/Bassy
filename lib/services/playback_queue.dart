@@ -56,6 +56,37 @@ class PlaybackQueue {
   /// Variante por instancia (compara por id).
   bool containsSong(Song song) => contains(song.id);
 
+  /// ¿Todas las canciones de [candidates] ya están en esta cola?
+  ///
+  /// Útil para deshabilitar acciones masivas tipo "Añadir a la cola"
+  /// cuando no habría nada nuevo que añadir.
+  ///
+  /// Construye un `Set` de ids una sola vez para evitar O(n·m).
+  bool containsAll(Iterable<Song> candidates) {
+    final existing = songs.map((s) => s.id).toSet();
+    return candidates.every((s) => existing.contains(s.id));
+  }
+
+  /// ¿Al menos una canción de [candidates] NO está en esta cola?
+  bool hasAnyMissing(Iterable<Song> candidates) =>
+      !containsAll(candidates);
+
+  /// Devuelve las canciones de [candidates] que aún no están en la cola,
+  /// preservando el orden de entrada y sin duplicados.
+  ///
+  /// Construye un `Set` de ids existentes una sola vez para evitar O(n·m).
+  List<Song> missingFrom(Iterable<Song> candidates) {
+    final existing = songs.map((s) => s.id).toSet();
+    final seen = <String>{};
+    final result = <Song>[];
+    for (final song in candidates) {
+      if (seen.add(song.id) && !existing.contains(song.id)) {
+        result.add(song);
+      }
+    }
+    return result;
+  }
+
   /// Deja [sourceOrder] como identidad (orden original).
   void resetOrder() =>
       sourceOrder = List<int>.generate(songs.length, (i) => i);

@@ -1,6 +1,8 @@
 // lib/widgets/playback_menu.dart
 import 'package:flutter/material.dart';
 
+import '../models/song.dart';
+import '../services/playback_queue.dart';
 import 'action_menu.dart';
 
 /// Acción específica de reproducción.
@@ -55,6 +57,34 @@ class PlaybackMenu {
       subtitle: subtitle,
       coverPath: coverPath,
       fallbackIcon: isPodcast ? Icons.mic : Icons.music_note,
+    );
+  }
+
+  /// Construye la acción "Añadir a la cola" para una colección de canciones
+  /// (p. ej. todas las de una playlist), deshabilitándola si no hay nada
+  /// nuevo que añadir a [queue].
+  ///
+  /// [onAdd] recibe solo las canciones que faltan, para que el caller no
+  /// tenga que filtrar de nuevo.
+  ///
+  /// El `enabled` se evalúa en el momento de construir la acción, es decir,
+  /// justo cuando se va a abrir el menú.
+  static PlaybackMenuAction addToQueueActionFor({
+    required PlaybackQueue queue,
+    required List<Song> candidates,
+    required void Function(List<Song> missing) onAdd,
+    String label = 'Añadir a la cola',
+    IconData icon = Icons.queue_music,
+    String? id,
+  }) {
+    final missing = queue.missingFrom(candidates);
+    final enabled = missing.isNotEmpty;
+    return PlaybackMenuAction(
+      id: id ?? 'add_to_queue',
+      icon: icon,
+      label: label,
+      enabled: enabled,
+      onTap: enabled ? () => onAdd(missing) : null,
     );
   }
 }
