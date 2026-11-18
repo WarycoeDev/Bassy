@@ -99,6 +99,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   static const double _songTileExtent = 78;
 
+  // Dimensiones compartidas por los listados tipo "podcast".
+  static const double _listTileHeight = 88;
+  static const double _listCoverSize = 76;
+  static const double _listPad = (_listTileHeight - _listCoverSize) / 2; // 6
+  static const double _listTileGap = 10;
+
   @override
   void initState() {
     super.initState();
@@ -322,7 +328,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     try {
       final created = await PlaylistsStore.instance.create(name);
       if (!mounted) return;
-      
+
     } catch (e) {
 
     }
@@ -364,10 +370,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final imported =
           await PlaylistsStore.instance.importFromFile(path);
       if (!mounted) return;
-      
+
     } catch (e) {
       if (!mounted) return;
-      
+
     }
   }
 
@@ -456,10 +462,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     try {
       await PlaylistsStore.instance.save(pl.copyWith(name: name));
       if (!mounted) return;
-      
+
     } catch (e) {
       if (!mounted) return;
-      
+
     }
   }
 
@@ -501,10 +507,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final path =
           await PlaylistsStore.instance.exportToDirectory(pl.id, target);
       if (!mounted) return;
-      
+
     } catch (e) {
       if (!mounted) return;
-      
+
     }
   }
 
@@ -528,10 +534,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     try {
       await PlaylistsStore.instance.delete(pl.id);
       if (!mounted) return;
-     
+
     } catch (e) {
       if (!mounted) return;
-     
+
     }
   }
 
@@ -635,9 +641,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       case _fPlaylists:
         return _buildPlaylistsTab(context);
       case _fAlbums:
-        return _wrapInList(_fAlbums, _buildAlbumsDetailed(context));
+        return _buildAlbumsTab(context);
       case _fArtists:
-        return _wrapInList(_fArtists, _buildArtistsDetailed(context));
+        return _buildArtistsTab(context);
       case _fPodcasts:
         return _buildPodcastsList(context);
       case _fFavorites:
@@ -681,7 +687,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           onSeeAll: () => _changeFilter(_fPlaylists),
         ),
         const SizedBox(height: 12),
-        _buildPlaylists(context),
+        _buildPlaylistsCarousel(context),
         const SizedBox(height: 24),
         _buildSectionTitle(
           context,
@@ -1400,6 +1406,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Playlists de usuario
+  // -------------------------------------------------------------------------
+
+  /// Lista vertical de playlists (usada en la pestaña "Playlists").
+  /// Usa el mismo estilo de listado que podcasts.
   Widget _buildPlaylists(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();
 
@@ -1426,19 +1438,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
             return GestureDetector(
               onTap: () => _openUserPlaylist(context, pl),
               onLongPress: () => _playlistOptions(context, pl),
-              child: _buildDetailCard(
+              child: _buildListTile(
                 context: context,
-                leading: _buildUserPlaylistCover(
+                cover: _buildCoverImageOrIcon(
                   context,
                   coverPath: coverPath,
+                  fallbackIcon: Icons.queue_music,
+                  iconSize: 34,
                 ),
                 title: pl.name,
-                meta: '${pl.songPaths.length} canciones · .bassy',
-                trailing: Icon(
-                  Icons.chevron_right,
-                  color: scheme.onSurfaceVariant,
-                  size: 24,
-                ),
+                subtitle: '${pl.songPaths.length} canciones · .bassy',
+                coverIsRound: false,
               ),
             );
           }).toList(),
@@ -1447,41 +1457,105 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  /// Carátula cuadrada 64×64 con esquinas redondeadas para el listado.
-  Widget _buildUserPlaylistCover(
-    BuildContext context, {
-    required String? coverPath,
-  }) {
-    final scheme = Theme.of(context).colorScheme;
+  /// Carrusel horizontal de playlists con el mismo estilo de tile que
+  /// los podcasts (usado en la pestaña "Todo").
+  ///
+  /// Carátula 76×76, tile 88 de alto, padding simétrico de 6 en todos
+  /// los lados.
+  Widget _buildPlaylistsCarousel(BuildContext context) {
+    if (_loadingLibrary) return const SizedBox.shrink();
 
-    Widget fallback() => Container(
-          width: 64,
-          height: 64,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            color: scheme.surfaceContainerHigh,
-            border: Border.all(color: scheme.outlineVariant),
-          ),
-          child: Icon(
-            Icons.queue_music,
-            color: scheme.onSurfaceVariant,
-            size: 30,
+    return AnimatedBuilder(
+      animation: PlaylistsStore.instance,
+      builder: (context, _) {
+        final playlists = PlaylistsStore.instance.playlists;
+        if (playlists.isEmpty) {
+          return _buildEmptyState(
+            context,
+            icon: Icons.queue_music_outlined,
+            title: 'Aún no hay playlists',
+            subtitle:
+                'Crea tu primera playlist; se guardará como archivo .bassy.',
+            showRescan: false,
+            action: _createPlaylist,
+            actionLabel: 'Crear playlist',
+          );
+        }
+
+        final scheme = Theme.of(context).colorScheme;
+
+        return SizedBox(
+          height: _listTileHeight,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            itemCount: playlists.length,
+            itemBuilder: (context, index) {
+              final pl = playlists[index];
+              final coverPath = _userPlaylistCover(pl);
+
+              return GestureDetector(
+                onTap: () => _openUserPlaylist(context, pl),
+                onLongPress: () => _playlistOptions(context, pl),
+                child: Container(
+                  width: 220,
+                  margin: const EdgeInsets.only(right: 12),
+                  padding: EdgeInsets.all(_listPad),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainer,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: SizedBox(
+                          width: _listCoverSize,
+                          height: _listCoverSize,
+                          child: _buildCoverImageOrIcon(
+                            context,
+                            coverPath: coverPath,
+                            fallbackIcon: Icons.queue_music,
+                            iconSize: 34,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              pl.name,
+                              style: TextStyle(
+                                color: scheme.onSurface,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 14,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '${pl.songPaths.length} canciones',
+                              style: TextStyle(
+                                color: scheme.onSurfaceVariant,
+                                fontSize: 11.5,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
           ),
         );
-
-    if (coverPath == null) return fallback();
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(10),
-      child: Image.file(
-        File(coverPath),
-        width: 64,
-        height: 64,
-        fit: BoxFit.cover,
-        cacheWidth: 192,
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => fallback(),
-      ),
+      },
     );
   }
 
@@ -1550,6 +1624,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       showRescan: false,
     );
   }
+
+  // -------------------------------------------------------------------------
+  // Álbumes — carrusel "Todo"
+  // -------------------------------------------------------------------------
 
   Widget _buildAlbums(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();
@@ -1636,46 +1714,69 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _buildAlbumsDetailed(BuildContext context) {
+  // -------------------------------------------------------------------------
+  // Álbumes — listado de la pestaña "Álbumes"
+  // -------------------------------------------------------------------------
+
+  /// Listado vertical de álbumes. Usa el mismo estilo de listado que
+  /// podcasts (carátula cuadrada, tile 88 de alto).
+  Widget _buildAlbumsTab(BuildContext context) {
+    final controller = _controllerFor(_fAlbums);
+
     if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
     }
     final albums = _albumPlaylists;
     if (albums.isEmpty) {
-      return _buildEmptyState(
-        context,
-        icon: Icons.album_outlined,
-        title: 'No hay álbumes',
-        subtitle: 'Las canciones necesitan metadatos de álbum.',
+      return ListView(
+        controller: controller,
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildEmptyState(
+            context,
+            icon: Icons.album_outlined,
+            title: 'No hay álbumes',
+            subtitle: 'Las canciones necesitan metadatos de álbum.',
+          ),
+        ],
       );
     }
     final scheme = Theme.of(context).colorScheme;
-    return Column(
-      children: albums.map((album) {
+
+    return ListView.builder(
+      controller: controller,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: albums.length,
+      itemExtent: _listTileHeight + _listTileGap,
+      itemBuilder: (context, index) {
+        final album = albums[index];
         final coverPath = _playlistCover(album);
-        return GestureDetector(
-          onTap: () => _openPlaylist(context, album),
-          child: _buildDetailCard(
-            context: context,
-            leading: _buildSquareCover(
-              context,
-              coverPath: coverPath,
-              fallbackIcon: Icons.album,
-              size: 64,
-              rounded: 10,
-            ),
-            title: album.title,
-            meta: '${album.count} pistas · ${album.totalDurationLabel}',
-            trailing: Icon(
-              Icons.chevron_right,
-              color: scheme.onSurfaceVariant,
-              size: 24,
+        return RepaintBoundary(
+          key: ValueKey<String>(album.id),
+          child: GestureDetector(
+            onTap: () => _openPlaylist(context, album),
+            child: _buildListTile(
+              context: context,
+              cover: _buildCoverImageOrIcon(
+                context,
+                coverPath: coverPath,
+                fallbackIcon: Icons.album,
+                iconSize: 34,
+              ),
+              title: album.title,
+              subtitle:
+                  '${album.count} pistas · ${album.totalDurationLabel}',
+              coverIsRound: false,
             ),
           ),
         );
-      }).toList(),
+      },
     );
   }
+
+  // -------------------------------------------------------------------------
+  // Artistas — carrusel "Todo"
+  // -------------------------------------------------------------------------
 
   Widget _buildArtists(BuildContext context) {
     if (_loadingLibrary) return const SizedBox.shrink();
@@ -1738,51 +1839,73 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _buildArtistsDetailed(BuildContext context) {
+  // -------------------------------------------------------------------------
+  // Artistas — listado de la pestaña "Artistas"
+  // -------------------------------------------------------------------------
+
+  /// Listado vertical de artistas. Usa el mismo estilo de listado que
+  /// podcasts pero con carátula redonda (ClipOval).
+  Widget _buildArtistsTab(BuildContext context) {
+    final controller = _controllerFor(_fArtists);
+
     if (_loadingLibrary) {
       return const Center(child: CircularProgressIndicator());
     }
     final artists = _artistPlaylists;
     if (artists.isEmpty) {
-      return _buildEmptyState(
-        context,
-        icon: Icons.person_outline,
-        title: 'No hay artistas',
-        subtitle: 'Las canciones necesitan metadatos de artista.',
+      return ListView(
+        controller: controller,
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildEmptyState(
+            context,
+            icon: Icons.person_outline,
+            title: 'No hay artistas',
+            subtitle: 'Las canciones necesitan metadatos de artista.',
+          ),
+        ],
       );
     }
     final scheme = Theme.of(context).colorScheme;
-    return Column(
-      children: artists.map((artist) {
+
+    return ListView.builder(
+      controller: controller,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: artists.length,
+      itemExtent: _listTileHeight + _listTileGap,
+      itemBuilder: (context, index) {
+        final artist = artists[index];
         final coverPath = _playlistCover(artist);
-        return GestureDetector(
-          onTap: () => _openPlaylist(context, artist),
-          child: _buildDetailCard(
-            context: context,
-            leading: ClipOval(
-              child: SizedBox(
-                width: 64,
-                height: 64,
-                child: _buildCoverImageOrIcon(
-                  context,
-                  coverPath: coverPath,
-                  fallbackIcon: Icons.person,
-                  iconSize: 32,
-                ),
+        return RepaintBoundary(
+          key: ValueKey<String>(artist.id),
+          child: GestureDetector(
+            onTap: () => _openPlaylist(context, artist),
+            child: _buildListTile(
+              context: context,
+              cover: _buildCoverImageOrIcon(
+                context,
+                coverPath: coverPath,
+                fallbackIcon: Icons.person,
+                iconSize: 34,
               ),
-            ),
-            title: artist.title,
-            trailing: Icon(
-              Icons.chevron_right,
-              color: scheme.onSurfaceVariant,
-              size: 24,
+              title: artist.title,
+              subtitle: '${artist.count} pistas',
+              coverIsRound: true,
             ),
           ),
         );
-      }).toList(),
+      },
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Podcasts — carrusel "Todo"
+  // -------------------------------------------------------------------------
+
+  /// Carrusel horizontal de podcasts (pestaña "Todo").
+  ///
+  /// Carátula 76×76, tile 88 de alto, padding simétrico de 6 en todos
+  /// los lados — mismos valores que el carrusel de playlists.
   Widget _buildPodcasts(BuildContext context, {int? limit}) {
     if (_loadingLibrary) return const SizedBox.shrink();
     final podcasts = _podcastPlaylists;
@@ -1796,8 +1919,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     final scheme = Theme.of(context).colorScheme;
     final list = limit == null ? podcasts : podcasts.take(limit).toList();
+
     return SizedBox(
-      height: 90,
+      height: _listTileHeight,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         itemCount: list.length,
@@ -1809,7 +1933,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             child: Container(
               width: 220,
               margin: const EdgeInsets.only(right: 12),
-              padding: const EdgeInsets.all(8),
+              padding: EdgeInsets.all(_listPad),
               decoration: BoxDecoration(
                 color: scheme.surfaceContainer,
                 borderRadius: BorderRadius.circular(12),
@@ -1819,13 +1943,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   ClipRRect(
                     borderRadius: BorderRadius.circular(8),
                     child: SizedBox(
-                      width: 64,
-                      height: 64,
+                      width: _listCoverSize,
+                      height: _listCoverSize,
                       child: _buildCoverImageOrIcon(
                         context,
                         coverPath: coverPath,
                         fallbackIcon: Icons.mic,
-                        iconSize: 30,
+                        iconSize: 34,
                       ),
                     ),
                   ),
@@ -1856,6 +1980,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Podcasts — lista vertical de la pestaña "Podcasts"
+  // -------------------------------------------------------------------------
+
   Widget _buildPodcastsList(BuildContext context) {
     final controller = _controllerFor(_fPodcasts);
 
@@ -1877,12 +2005,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ],
       );
     }
-    final scheme = Theme.of(context).colorScheme;
+
     return ListView.builder(
       controller: controller,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       itemCount: podcasts.length,
-      itemExtent: 90,
+      itemExtent: _listTileHeight + _listTileGap,
       itemBuilder: (context, index) {
         final pod = podcasts[index];
         final coverPath = _playlistCover(pod);
@@ -1890,56 +2018,104 @@ class _LibraryScreenState extends State<LibraryScreen> {
           key: ValueKey<String>(pod.id),
           child: GestureDetector(
             onTap: () => _openPlaylist(context, pod),
-            child: Container(
-              margin: const EdgeInsets.only(bottom: 10),
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainer,
-                borderRadius: BorderRadius.circular(12),
+            child: _buildListTile(
+              context: context,
+              cover: _buildCoverImageOrIcon(
+                context,
+                coverPath: coverPath,
+                fallbackIcon: Icons.mic,
+                iconSize: 34,
               ),
-              child: Row(
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: SizedBox(
-                      width: 64,
-                      height: 64,
-                      child: _buildCoverImageOrIcon(
-                        context,
-                        coverPath: coverPath,
-                        fallbackIcon: Icons.mic,
-                        iconSize: 30,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          pod.title,
-                          style: TextStyle(
-                            color: scheme.onSurface,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 14,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  Icon(
-                    Icons.chevron_right,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ],
-              ),
+              title: pod.title,
+              coverIsRound: false,
+              showChevron: true,
             ),
           ),
         );
       },
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Tile compartido para listados verticales tipo "podcast"
+  // -------------------------------------------------------------------------
+
+  /// Tile reutilizable para los listados verticales de Playlists, Álbumes,
+  /// Artistas y Podcasts.
+  ///
+  /// - Carátula 76×76, tile 88 de alto, padding simétrico de 6.
+  /// - `coverIsRound`: si es true, la carátula se recorta en círculo
+  ///   (usado para artistas).
+  /// - `showChevron`: muestra el chevron a la derecha.
+  Widget _buildListTile({
+    required BuildContext context,
+    required Widget cover,
+    required String title,
+    String? subtitle,
+    bool coverIsRound = false,
+    bool showChevron = true,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+
+    final Widget coverChild = SizedBox(
+      width: _listCoverSize,
+      height: _listCoverSize,
+      child: cover,
+    );
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: _listTileGap),
+      padding: EdgeInsets.all(_listPad),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          coverIsRound
+              ? ClipOval(child: coverChild)
+              : ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: coverChild,
+                ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 11.5,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (showChevron)
+            Icon(
+              Icons.chevron_right,
+              color: scheme.onSurfaceVariant,
+            ),
+        ],
+      ),
     );
   }
 
