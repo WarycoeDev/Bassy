@@ -1,3 +1,4 @@
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -43,6 +44,11 @@ class _SearchScreenState extends State<SearchScreen> {
   ];
 
   final TextEditingController _searchController = TextEditingController();
+
+  // Controla explícitamente el foco del buscador para evitar que el teclado
+  // aparezca por reconstrucciones de la pantalla.
+  final FocusNode _searchFocusNode = FocusNode();
+
   final GlobalKey<NavigatorState> _navKey = GlobalKey<NavigatorState>();
 
   /// Query committed (ya con debounce, trimmed).
@@ -83,6 +89,9 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   void initState() {
     super.initState();
+
+    // Importante:
+    // Nunca solicitamos foco automáticamente.
     _loadHistory();
     _bindLibrary();
   }
@@ -92,11 +101,15 @@ class _SearchScreenState extends State<SearchScreen> {
     _debounce?.cancel();
     _applyTimer?.cancel();
     _sub?.cancel();
+
     _searchController.dispose();
+    _searchFocusNode.dispose();
+
     _bodyRev.dispose();
     _hasText.dispose();
     _filterN.dispose();
     _libCount.dispose();
+
     super.dispose();
   }
 
@@ -107,7 +120,9 @@ class _SearchScreenState extends State<SearchScreen> {
   Future<void> _loadHistory() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getStringList(_prefsKey) ?? const [];
+
     if (!mounted) return;
+
     _history = raw
         .map((e) {
           try {
@@ -120,11 +135,13 @@ class _SearchScreenState extends State<SearchScreen> {
         })
         .whereType<_HistoryEntry>()
         .toList();
+
     _bodyRev.value++;
   }
 
   Future<void> _persistHistory() async {
     final prefs = await SharedPreferences.getInstance();
+
     await prefs.setStringList(
       _prefsKey,
       _history.map((e) => jsonEncode(e.toJson())).toList(),
@@ -133,48 +150,68 @@ class _SearchScreenState extends State<SearchScreen> {
 
   void _pushHistory(_HistoryEntry entry) {
     if (entry.query.trim().isEmpty) return;
+
     final list = [
       entry,
       ..._history.where(
         (e) => !(e.query == entry.query && e.kind == entry.kind),
       ),
     ];
-    if (list.length > _maxHistory) list.removeRange(_maxHistory, list.length);
+
+    if (list.length > _maxHistory) {
+      list.removeRange(_maxHistory, list.length);
+    }
+
     _history = list;
     _bodyRev.value++;
+
     _persistHistory();
   }
 
   void _saveQueryToHistory() {
     final q = _query.trim();
+
     if (q.isEmpty) return;
+
     _pushHistory(
-      _HistoryEntry(query: q, kind: _HistoryKind.query, icon: Icons.search),
+      _HistoryEntry(
+        query: q,
+        kind: _HistoryKind.query,
+        icon: Icons.search,
+      ),
     );
   }
 
   Future<void> _clearHistory() async {
     _history = const [];
     _bodyRev.value++;
+
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_prefsKey);
   }
 
   void _removeHistoryEntry(_HistoryEntry entry) {
     _history = _history
-        .where((e) => !(e.query == entry.query && e.kind == entry.kind))
+        .where(
+          (e) => !(e.query == entry.query && e.kind == entry.kind),
+        )
         .toList();
+
     _bodyRev.value++;
     _persistHistory();
   }
 
   void _applyHistoryEntry(_HistoryEntry entry) {
     _debounce?.cancel();
+
     _searchController.text = entry.query;
+
     _searchController.selection = TextSelection.fromPosition(
       TextPosition(offset: entry.query.length),
     );
+
     _hasText.value = entry.query.isNotEmpty;
+
     _commitQuery(entry.query);
   }
 
@@ -183,29 +220,40 @@ class _SearchScreenState extends State<SearchScreen> {
   // ===========================================================================
 
   void _bindLibrary() {
-  final last = MediaScanner.instance.lastResult;
-  if (last != null) {
-    _applyLibrary(last.songs, last.podcasts, loading: false);
-  }
+    final last = MediaScanner.instance.lastResult;
 
-  _sub = MediaScanner.instance.watchStream().listen((p) {
-    _pendingProgress = p;
-    _applyTimer ??= Timer(
-      const Duration(milliseconds: _libraryApplyMs),
-      () {
-        _applyTimer = null;
-        final pp = _pendingProgress;
-        _pendingProgress = null;
-        if (!mounted || pp == null) return;
-        _applyLibrary(
-          pp.songs,
-          pp.podcasts,
-          loading: pp.scanning && pp.songs.isEmpty && pp.podcasts.isEmpty,
-        );
-      },
-    );
-  });
-}
+    if (last != null) {
+      _applyLibrary(
+        last.songs,
+        last.podcasts,
+        loading: false,
+      );
+    }
+
+    _sub = MediaScanner.instance.watchStream().listen((p) {
+      _pendingProgress = p;
+
+      _applyTimer ??= Timer(
+        const Duration(milliseconds: _libraryApplyMs),
+        () {
+          _applyTimer = null;
+
+          final pp = _pendingProgress;
+          _pendingProgress = null;
+
+          if (!mounted || pp == null) return;
+
+          _applyLibrary(
+            pp.songs,
+            pp.podcasts,
+            loading: pp.scanning &&
+                pp.songs.isEmpty &&
+                pp.podcasts.isEmpty,
+          );
+        },
+      );
+    });
+  }
 
   void _applyLibrary(
     List<Song> songs,
@@ -224,6 +272,7 @@ class _SearchScreenState extends State<SearchScreen> {
       _artists = Playlist.fromArtists(songs);
       changed = true;
     }
+
     if (pSig != _podcastsSig) {
       _podcastsSig = pSig;
       _podcasts = podcasts;
@@ -241,7 +290,9 @@ class _SearchScreenState extends State<SearchScreen> {
         artists: _artists,
         podcasts: _podcastPlaylists,
       );
+
       _libCount.value = _songs.length + _podcasts.length;
+
       _runSearch(force: true);
     } else if (loadingChanged) {
       _bodyRev.value++;
@@ -252,6 +303,7 @@ class _SearchScreenState extends State<SearchScreen> {
   /// cualquier posición, no solo en el primero/último elemento.
   int _signature(List<Song> list) {
     var h = list.length;
+
     for (final s in list) {
       h = Object.hash(
         h,
@@ -260,6 +312,7 @@ class _SearchScreenState extends State<SearchScreen> {
         s.modified.millisecondsSinceEpoch,
       );
     }
+
     return h;
   }
 
@@ -269,6 +322,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
   void _runSearch({bool force = false}) {
     final folded = _fold(_query);
+
     if (!force &&
         folded == _resultsQuery &&
         _selectedFilter == _resultsFilter) {
@@ -294,19 +348,24 @@ class _SearchScreenState extends State<SearchScreen> {
 
     _resultsQuery = folded;
     _resultsFilter = _selectedFilter;
+
     _bodyRev.value++;
   }
 
   void _commitQuery(String q) {
     final trimmed = q.trim();
+
     if (trimmed == _query) return;
+
     _query = trimmed;
     _runSearch();
   }
 
   void _onTextChanged(String raw) {
     _hasText.value = raw.isNotEmpty;
+
     _debounce?.cancel();
+
     _debounce = Timer(
       const Duration(milliseconds: _debounceMs),
       () => _commitQuery(raw),
@@ -315,63 +374,100 @@ class _SearchScreenState extends State<SearchScreen> {
 
   void _onSubmitted(String raw) {
     _debounce?.cancel();
+
     _commitQuery(raw);
-    if (_query.isNotEmpty) _saveQueryToHistory();
+
+    if (_query.isNotEmpty) {
+      _saveQueryToHistory();
+    }
   }
 
   void _clearText() {
     _debounce?.cancel();
+
     _searchController.clear();
     _hasText.value = false;
+
     _commitQuery('');
   }
 
   void _changeFilter(int index) {
     if (index == _selectedFilter) return;
+
     _selectedFilter = index;
     _filterN.value = index;
+
+    // Al cambiar de filtro, quitamos el teclado.
+    _searchFocusNode.unfocus();
+
     _runSearch();
   }
 
   void _openPlaylist(Playlist playlist) {
-  if (_query.isNotEmpty) _saveQueryToHistory();
-  showDialog<void>(
-    context: context,
-    barrierColor: Colors.black.withValues(alpha: 0.45),
-    builder: (dialogContext) {
-      final scheme = Theme.of(dialogContext).colorScheme;
-      return Dialog(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        insetPadding: const EdgeInsets.symmetric(
-          horizontal: 32,   // antes 16
-          vertical: 24,
-        ),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 380,   // antes 520
-            maxHeight: 640,
+    _searchFocusNode.unfocus();
+
+    if (_query.isNotEmpty) {
+      _saveQueryToHistory();
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (dialogContext) {
+        final scheme = Theme.of(dialogContext).colorScheme;
+
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 32,
+            vertical: 24,
           ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(18),
-            child: Material(
-              color: scheme.surface,
-              child: PlaylistDetailScreen(
-                playlist: playlist,
-                showBackButton: false,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              maxWidth: 380,
+              maxHeight: 640,
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: Material(
+                color: scheme.surface,
+                child: PlaylistDetailScreen(
+                  playlist: playlist,
+                  showBackButton: false,
+                ),
               ),
             ),
           ),
-        ),
-      );
-    },
-  );
-}
+        );
+      },
+    );
+  }
 
   void _openSong(Song song) {
-    if (_query.isNotEmpty) _saveQueryToHistory();
+    _searchFocusNode.unfocus();
+
+    if (_query.isNotEmpty) {
+      _saveQueryToHistory();
+    }
+
     // TODO: conectar con tu reproductor real, p. ej.:
     // PlayerService.instance.play(song);
+  }
+
+  // ===========================================================================
+  // Helpers de teclado
+  // ===========================================================================
+
+  /// Quita el foco del TextField y, por consecuencia, oculta el teclado.
+  void _dismissKeyboard() {
+    final currentFocus = FocusManager.instance.primaryFocus;
+
+    if (currentFocus != null) {
+      currentFocus.unfocus();
+    }
+
+    _searchFocusNode.unfocus();
   }
 
   // ===========================================================================
@@ -381,7 +477,7 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   Widget build(BuildContext context) {
     // NestedNavigatorScope gestiona el back:
-    //  - Si hay rutas internas (PlaylistDetailScreen, etc.) → las popea.
+    //  - Si hay rutas internas → las popea.
     //  - Si estamos en la raíz de Search → delega en onExitRoot.
     return NestedNavigatorScope(
       navigatorKey: _navKey,
@@ -393,29 +489,40 @@ class _SearchScreenState extends State<SearchScreen> {
   Widget _buildHome(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    return Scaffold(
-      backgroundColor: scheme.surface,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 16),
-              _buildHeader(context),
-              const SizedBox(height: 20),
-              _buildSearchBar(context),
-              const SizedBox(height: 16),
-              _buildFilterChips(context),
-              const SizedBox(height: 16),
-              // Solo el cuerpo se reconstruye al buscar.
-              Expanded(
-                child: ValueListenableBuilder<int>(
-                  valueListenable: _bodyRev,
-                  builder: (ctx, _, __) => _buildBody(ctx),
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+
+      // Tocar cualquier zona fuera del buscador oculta el teclado.
+      onTap: _dismissKeyboard,
+
+      child: Scaffold(
+        backgroundColor: scheme.surface,
+
+        // El contenido se reajusta correctamente cuando aparece el teclado.
+        resizeToAvoidBottomInset: true,
+
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 16),
+                _buildHeader(context),
+                const SizedBox(height: 20),
+                _buildSearchBar(context),
+                const SizedBox(height: 16),
+                _buildFilterChips(context),
+                const SizedBox(height: 16),
+
+                Expanded(
+                  child: ValueListenableBuilder<int>(
+                    valueListenable: _bodyRev,
+                    builder: (ctx, _, __) => _buildBody(ctx),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -424,17 +531,25 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Widget _buildBody(BuildContext context) {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(
+        child: CircularProgressIndicator(),
+      );
     }
-    if (_query.isNotEmpty) return _buildResults(context);
+
+    if (_query.isNotEmpty) {
+      return _buildResults(context);
+    }
+
     return _buildRecentSearches(context);
   }
 
   // ─────────────────────────────────────────────────────────────
   // HEADER
   // ─────────────────────────────────────────────────────────────
+
   Widget _buildHeader(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
@@ -454,7 +569,10 @@ class _SearchScreenState extends State<SearchScreen> {
               valueListenable: _libCount,
               builder: (_, count, __) => Text(
                 '$count elementos en tu biblioteca',
-                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+                style: TextStyle(
+                  color: scheme.onSurfaceVariant,
+                  fontSize: 13,
+                ),
               ),
             ),
           ],
@@ -464,59 +582,109 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  Widget _buildIconButton(BuildContext context, IconData icon) {
+  Widget _buildIconButton(
+    BuildContext context,
+    IconData icon,
+  ) {
     final scheme = Theme.of(context).colorScheme;
+
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: scheme.surfaceContainer,
         borderRadius: BorderRadius.circular(12),
       ),
-      child: Icon(icon, color: scheme.onSurface, size: 22),
+      child: Icon(
+        icon,
+        color: scheme.onSurface,
+        size: 22,
+      ),
     );
   }
 
   // ─────────────────────────────────────────────────────────────
   // SEARCH BAR
   // ─────────────────────────────────────────────────────────────
+
   Widget _buildSearchBar(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: TextField(
-        controller: _searchController,
-        textInputAction: TextInputAction.search,
-        onSubmitted: _onSubmitted,
-        onChanged: _onTextChanged,
-        style: TextStyle(color: scheme.onSurface, fontSize: 14),
-        cursorColor: scheme.primary,
-        decoration: InputDecoration(
-          hintText: 'Canciones, artistas, álbumes...',
-          hintStyle: TextStyle(color: scheme.onSurfaceVariant, fontSize: 14),
-          prefixIcon: Icon(
-            Icons.search,
-            color: scheme.onSurfaceVariant,
-            size: 22,
+
+    // Este GestureDetector consume el tap del buscador para que el
+    // GestureDetector exterior NO llame a _dismissKeyboard.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        // No hacemos unfocus.
+        //
+        // El TextField mantiene su comportamiento normal:
+        // al tocarlo obtiene el foco y abre el teclado.
+      },
+      child: Container(
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainer,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: TextField(
+          controller: _searchController,
+
+          // Control de foco explícito.
+          focusNode: _searchFocusNode,
+
+          // MUY IMPORTANTE:
+          // evita que Flutter abra el teclado automáticamente al montar
+          // o reconstruir esta pantalla.
+          autofocus: false,
+
+          textInputAction: TextInputAction.search,
+
+          onSubmitted: _onSubmitted,
+          onChanged: _onTextChanged,
+
+          style: TextStyle(
+            color: scheme.onSurface,
+            fontSize: 14,
           ),
-          suffixIcon: ValueListenableBuilder<bool>(
-            valueListenable: _hasText,
-            builder: (_, has, __) => has
-                ? GestureDetector(
-                    onTap: _clearText,
-                    behavior: HitTestBehavior.opaque,
-                    child: Icon(
-                      Icons.close,
-                      color: scheme.onSurfaceVariant,
-                      size: 20,
-                    ),
-                  )
-                : const SizedBox.shrink(),
+
+          cursorColor: scheme.primary,
+
+          decoration: InputDecoration(
+            hintText: 'Canciones, artistas, álbumes...',
+            hintStyle: TextStyle(
+              color: scheme.onSurfaceVariant,
+              fontSize: 14,
+            ),
+
+            prefixIcon: Icon(
+              Icons.search,
+              color: scheme.onSurfaceVariant,
+              size: 22,
+            ),
+
+            suffixIcon: ValueListenableBuilder<bool>(
+              valueListenable: _hasText,
+              builder: (_, has, __) {
+                if (!has) {
+                  return const SizedBox.shrink();
+                }
+
+                return GestureDetector(
+                  onTap: _clearText,
+                  behavior: HitTestBehavior.opaque,
+                  child: Icon(
+                    Icons.close,
+                    color: scheme.onSurfaceVariant,
+                    size: 20,
+                  ),
+                );
+              },
+            ),
+
+            border: InputBorder.none,
+
+            contentPadding: const EdgeInsets.symmetric(
+              vertical: 16,
+            ),
           ),
-          border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(vertical: 16),
         ),
       ),
     );
@@ -525,8 +693,10 @@ class _SearchScreenState extends State<SearchScreen> {
   // ─────────────────────────────────────────────────────────────
   // FILTER CHIPS
   // ─────────────────────────────────────────────────────────────
+
   Widget _buildFilterChips(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+
     return SizedBox(
       height: 40,
       child: ValueListenableBuilder<int>(
@@ -536,22 +706,29 @@ class _SearchScreenState extends State<SearchScreen> {
           itemCount: _filters.length,
           itemBuilder: (context, index) {
             final isSelected = index == selected;
+
             return GestureDetector(
               onTap: () => _changeFilter(index),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 margin: const EdgeInsets.only(right: 10),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
-                  color: isSelected ? scheme.primary : scheme.surfaceContainer,
+                  color: isSelected
+                      ? scheme.primary
+                      : scheme.surfaceContainer,
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Center(
                   child: Text(
                     _filters[index],
                     style: TextStyle(
-                      color: isSelected ? scheme.onPrimary : scheme.onSurface,
+                      color: isSelected
+                          ? scheme.onPrimary
+                          : scheme.onSurface,
                       fontWeight: FontWeight.w600,
                       fontSize: 14,
                     ),
@@ -568,23 +745,30 @@ class _SearchScreenState extends State<SearchScreen> {
   // ─────────────────────────────────────────────────────────────
   // BOTÓN YOUTUBE
   // ─────────────────────────────────────────────────────────────
+
   Widget _buildYouTubeButton(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+
     return SizedBox(
       width: double.infinity,
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: () {
-            
+            _dismissKeyboard();
           },
           borderRadius: BorderRadius.circular(12),
           child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+            padding: const EdgeInsets.symmetric(
+              vertical: 14,
+              horizontal: 16,
+            ),
             decoration: BoxDecoration(
               color: scheme.surfaceContainer,
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: scheme.outlineVariant),
+              border: Border.all(
+                color: scheme.outlineVariant,
+              ),
             ),
             child: Row(
               children: [
@@ -641,6 +825,7 @@ class _SearchScreenState extends State<SearchScreen> {
   // ─────────────────────────────────────────────────────────────
   // BÚSQUEDAS RECIENTES
   // ─────────────────────────────────────────────────────────────
+
   Widget _buildRecentSearches(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
@@ -651,7 +836,11 @@ class _SearchScreenState extends State<SearchScreen> {
           Center(
             child: Column(
               children: [
-                Icon(Icons.history, size: 56, color: scheme.onSurfaceVariant),
+                Icon(
+                  Icons.history,
+                  size: 56,
+                  color: scheme.onSurfaceVariant,
+                ),
                 const SizedBox(height: 12),
                 Text(
                   'Sin búsquedas recientes',
@@ -664,8 +853,10 @@ class _SearchScreenState extends State<SearchScreen> {
                 const SizedBox(height: 4),
                 Text(
                   'Lo que busques aparecerá aquí',
-                  style:
-                      TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+                  style: TextStyle(
+                    color: scheme.onSurfaceVariant,
+                    fontSize: 13,
+                  ),
                 ),
               ],
             ),
@@ -676,7 +867,8 @@ class _SearchScreenState extends State<SearchScreen> {
 
     return ListView.builder(
       padding: const EdgeInsets.only(bottom: 24),
-      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      keyboardDismissBehavior:
+          ScrollViewKeyboardDismissBehavior.onDrag,
       itemCount: _history.length + 1,
       itemBuilder: (ctx, i) {
         if (i == 0) {
@@ -694,11 +886,16 @@ class _SearchScreenState extends State<SearchScreen> {
                   ),
                 ),
                 GestureDetector(
-                  onTap: _clearHistory,
+                  onTap: () {
+                    _dismissKeyboard();
+                    _clearHistory();
+                  },
                   behavior: HitTestBehavior.opaque,
                   child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 2,
+                    ),
                     child: Text(
                       'Limpiar',
                       style: TextStyle(
@@ -713,15 +910,26 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
           );
         }
-        return _buildHistoryTile(ctx, _history[i - 1]);
+
+        return _buildHistoryTile(
+          ctx,
+          _history[i - 1],
+        );
       },
     );
   }
 
-  Widget _buildHistoryTile(BuildContext context, _HistoryEntry h) {
+  Widget _buildHistoryTile(
+    BuildContext context,
+    _HistoryEntry h,
+  ) {
     final scheme = Theme.of(context).colorScheme;
+
     return GestureDetector(
-      onTap: () => _applyHistoryEntry(h),
+      onTap: () {
+        _dismissKeyboard();
+        _applyHistoryEntry(h);
+      },
       behavior: HitTestBehavior.opaque,
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
@@ -739,7 +947,11 @@ class _SearchScreenState extends State<SearchScreen> {
                 color: scheme.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Icon(h.icon, color: scheme.onSurfaceVariant, size: 24),
+              child: Icon(
+                h.icon,
+                color: scheme.onSurfaceVariant,
+                size: 24,
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -780,7 +992,10 @@ class _SearchScreenState extends State<SearchScreen> {
               ),
             ),
             GestureDetector(
-              onTap: () => _removeHistoryEntry(h),
+              onTap: () {
+                _dismissKeyboard();
+                _removeHistoryEntry(h);
+              },
               behavior: HitTestBehavior.opaque,
               child: Padding(
                 padding: const EdgeInsets.all(6),
@@ -798,8 +1013,9 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // RESULTADOS (slivers lazy: solo se construye lo visible)
+  // RESULTADOS
   // ─────────────────────────────────────────────────────────────
+
   Widget _buildResults(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final r = _results;
@@ -816,7 +1032,8 @@ class _SearchScreenState extends State<SearchScreen> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  mainAxisAlignment:
+                      MainAxisAlignment.spaceBetween,
                   children: [
                     _sectionTitle(context, 'Resultados'),
                     Text(
@@ -859,8 +1076,10 @@ class _SearchScreenState extends State<SearchScreen> {
                   const SizedBox(height: 4),
                   Text(
                     'Prueba con otra palabra o cambia el filtro',
-                    style:
-                        TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 13,
+                    ),
                   ),
                 ],
               ),
@@ -871,20 +1090,26 @@ class _SearchScreenState extends State<SearchScreen> {
     } else {
       // 1) Canciones primero
       final songs = r.songs.ranked;
+
       if (songs.isNotEmpty) {
         slivers.add(
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: _sectionTitle(context, 'Canciones'),
+              child: _sectionTitle(
+                context,
+                'Canciones',
+              ),
             ),
           ),
         );
+
         slivers.add(
           SliverList(
             delegate: SliverChildBuilderDelegate(
               (ctx, i) {
                 final s = songs[i].song!;
+
                 return GestureDetector(
                   key: ValueKey(s.path),
                   behavior: HitTestBehavior.opaque,
@@ -897,12 +1122,20 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
           ),
         );
-        if (r.artists.length + r.albums.length + r.podcasts.length > 0) {
-          slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 12)));
+
+        if (r.artists.length +
+                r.albums.length +
+                r.podcasts.length >
+            0) {
+          slivers.add(
+            const SliverToBoxAdapter(
+              child: SizedBox(height: 12),
+            ),
+          );
         }
       }
 
-      // 2) Artistas (cover redonda)
+      // 2) Artistas
       slivers.addAll(
         _playlistSection(
           context,
@@ -914,6 +1147,7 @@ class _SearchScreenState extends State<SearchScreen> {
           roundCover: true,
         ),
       );
+
       // 3) Álbumes
       slivers.addAll(
         _playlistSection(
@@ -925,6 +1159,7 @@ class _SearchScreenState extends State<SearchScreen> {
           metaLabel: 'pistas',
         ),
       );
+
       // 4) Podcasts
       slivers.addAll(
         _playlistSection(
@@ -938,15 +1173,23 @@ class _SearchScreenState extends State<SearchScreen> {
       );
     }
 
-    slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
+    slivers.add(
+      const SliverToBoxAdapter(
+        child: SizedBox(height: 24),
+      ),
+    );
 
     return CustomScrollView(
-      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      keyboardDismissBehavior:
+          ScrollViewKeyboardDismissBehavior.onDrag,
       slivers: slivers,
     );
   }
 
-  // Álbumes, artistas y podcasts usan el mismo tile que LibraryScreen.
+  // ===========================================================================
+  // SECCIONES DE PLAYLISTS
+  // ===========================================================================
+
   List<Widget> _playlistSection(
     BuildContext context, {
     required String title,
@@ -958,26 +1201,43 @@ class _SearchScreenState extends State<SearchScreen> {
   }) {
     final scheme = Theme.of(context).colorScheme;
     final items = bucket.ranked;
-    if (items.isEmpty) return const [];
 
-    final preview = _selectedFilter == 0 && items.length > _previewCount;
-    final count = preview ? _previewCount : items.length;
+    if (items.isEmpty) {
+      return const [];
+    }
+
+    final preview =
+        _selectedFilter == 0 &&
+        items.length > _previewCount;
+
+    final count = preview
+        ? _previewCount
+        : items.length;
 
     return [
       SliverToBoxAdapter(
         child: Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
             children: [
-              _sectionTitle(context, title),
+              _sectionTitle(
+                context,
+                title,
+              ),
               if (preview)
                 GestureDetector(
-                  onTap: () => _changeFilter(filterIndex),
+                  onTap: () {
+                    _dismissKeyboard();
+                    _changeFilter(filterIndex);
+                  },
                   behavior: HitTestBehavior.opaque,
                   child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 2,
+                    ),
                     child: Text(
                       'Ver todo (${items.length})',
                       style: TextStyle(
@@ -998,19 +1258,26 @@ class _SearchScreenState extends State<SearchScreen> {
             ctx,
             entry: items[i],
             icon: icon,
-            meta: '${items[i].playlist!.count} $metaLabel',
+            meta:
+                '${items[i].playlist!.count} $metaLabel',
             roundCover: roundCover,
           ),
           childCount: count,
           addAutomaticKeepAlives: false,
         ),
       ),
-      const SliverToBoxAdapter(child: SizedBox(height: 12)),
+      const SliverToBoxAdapter(
+        child: SizedBox(height: 12),
+      ),
     ];
   }
 
-  Widget _sectionTitle(BuildContext context, String title) {
+  Widget _sectionTitle(
+    BuildContext context,
+    String title,
+  ) {
     final scheme = Theme.of(context).colorScheme;
+
     return Text(
       title,
       style: TextStyle(
@@ -1021,21 +1288,10 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // TILE para playlists (álbum/artista/podcast) — más alto
-  // ─────────────────────────────────────────────────────────────
-  // -------------------------------------------------------------------------
-  // Tile compartido con LibraryScreen para álbumes, artistas y podcasts.
-  //
-  // Mantiene exactamente las mismas proporciones visuales del listado de
-  // LibraryScreen:
-  //   - tile: 88 px de alto
-  //   - padding: 6 px
-  //   - portada: 76 × 76 px
-  //   - separación portada/texto: 12 px
-  //   - separación entre tiles: 10 px
-  //   - artistas: portada circular
-  // -------------------------------------------------------------------------
+  // ===========================================================================
+  // TILE PARA PLAYLISTS
+  // ===========================================================================
+
   Widget _playlistTile(
     BuildContext context, {
     required _SearchEntry entry,
@@ -1062,7 +1318,8 @@ class _SearchScreenState extends State<SearchScreen> {
               cacheWidth: 160,
               filterQuality: FilterQuality.low,
               gaplessPlayback: true,
-              errorBuilder: (_, __, ___) => _buildSearchCoverFallback(
+              errorBuilder: (_, __, ___) =>
+                  _buildSearchCoverFallback(
                 context,
                 icon: icon,
               ),
@@ -1078,8 +1335,12 @@ class _SearchScreenState extends State<SearchScreen> {
       behavior: HitTestBehavior.opaque,
       child: Container(
         height: tileHeight,
-        margin: const EdgeInsets.only(bottom: tileGap),
-        padding: const EdgeInsets.all(tilePadding),
+        margin: const EdgeInsets.only(
+          bottom: tileGap,
+        ),
+        padding: const EdgeInsets.all(
+          tilePadding,
+        ),
         decoration: BoxDecoration(
           color: scheme.surfaceContainer,
           borderRadius: BorderRadius.circular(12),
@@ -1095,8 +1356,10 @@ class _SearchScreenState extends State<SearchScreen> {
             const SizedBox(width: 12),
             Expanded(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                mainAxisAlignment:
+                    MainAxisAlignment.center,
                 children: [
                   Text(
                     playlist.title,
@@ -1106,17 +1369,20 @@ class _SearchScreenState extends State<SearchScreen> {
                       fontSize: 14,
                     ),
                     maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    overflow:
+                        TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 3),
                   Text(
                     '${playlist.subtitle} · $meta',
                     style: TextStyle(
-                      color: scheme.onSurfaceVariant,
+                      color:
+                          scheme.onSurfaceVariant,
                       fontSize: 11.5,
                     ),
                     maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    overflow:
+                        TextOverflow.ellipsis,
                   ),
                 ],
               ),
@@ -1153,46 +1419,56 @@ class _SearchScreenState extends State<SearchScreen> {
 // Normalización (minúsculas + sin acentos)
 // ===========================================================================
 
-const String _accentFrom = 'áàäâãéèëêíìïîóòöôõúùüûñç';
-const String _accentTo = 'aaaaaeeeeiiiiooooouuuunc';
+const String _accentFrom =
+    'áàäâãéèëêíìïîóòöôõúùüûñç';
+
+const String _accentTo =
+    'aaaaaeeeeiiiiooooouuuunc';
 
 String _fold(String input) {
   final lower = input.toLowerCase();
 
   // Camino rápido: ASCII puro.
   var ascii = true;
+
   for (var i = 0; i < lower.length; i++) {
     if (lower.codeUnitAt(i) > 127) {
       ascii = false;
       break;
     }
   }
+
   if (ascii) return lower;
 
   final sb = StringBuffer();
+
   for (var i = 0; i < lower.length; i++) {
     final c = lower[i];
     final idx = _accentFrom.indexOf(c);
-    sb.write(idx >= 0 ? _accentTo[idx] : c);
+
+    sb.write(
+      idx >= 0 ? _accentTo[idx] : c,
+    );
   }
+
   return sb.toString();
 }
 
 // ===========================================================================
-// Índice de búsqueda (precomputado)
+// Índice de búsqueda
 // ===========================================================================
 
 class _SearchEntry {
   final Song? song;
   final Playlist? playlist;
 
-  /// Todos los campos en minúsculas/sin acentos para un solo `contains`.
+  /// Todos los campos en minúsculas/sin acentos para un solo contains.
   final String haystack;
 
-  /// Título normalizado (para ordenar por relevancia).
+  /// Título normalizado para ordenar por relevancia.
   final String title;
 
-  /// Portada precalculada (solo playlists).
+  /// Portada precalculada.
   final String? cover;
 
   const _SearchEntry({
@@ -1205,27 +1481,59 @@ class _SearchEntry {
 }
 
 class _Bucket {
-  /// Coincidencias en el orden original (sirve para refinar).
+  /// Coincidencias en el orden original.
   final List<_SearchEntry> matches;
 
-  /// Coincidencias ordenadas por relevancia (las que empiezan con la query primero).
+  /// Coincidencias ordenadas por relevancia.
   final List<_SearchEntry> ranked;
 
-  const _Bucket(this.matches, this.ranked);
+  const _Bucket(
+    this.matches,
+    this.ranked,
+  );
 
-  static const empty = _Bucket([], []);
+  static const empty = _Bucket(
+    [],
+    [],
+  );
 
   int get length => ranked.length;
 
-  factory _Bucket.from(List<_SearchEntry> matches, String firstToken) {
-    if (matches.length < 2) return _Bucket(matches, matches);
+  factory _Bucket.from(
+    List<_SearchEntry> matches,
+    String firstToken,
+  ) {
+    if (matches.length < 2) {
+      return _Bucket(
+        matches,
+        matches,
+      );
+    }
+
     final starts = <_SearchEntry>[];
     final rest = <_SearchEntry>[];
+
     for (final e in matches) {
-      (e.title.startsWith(firstToken) ? starts : rest).add(e);
+      (e.title.startsWith(firstToken)
+              ? starts
+              : rest)
+          .add(e);
     }
-    if (starts.isEmpty) return _Bucket(matches, matches);
-    return _Bucket(matches, [...starts, ...rest]);
+
+    if (starts.isEmpty) {
+      return _Bucket(
+        matches,
+        matches,
+      );
+    }
+
+    return _Bucket(
+      matches,
+      [
+        ...starts,
+        ...rest,
+      ],
+    );
   }
 }
 
@@ -1255,42 +1563,70 @@ class _SearchIndex {
     required List<Playlist> artists,
     required List<Playlist> podcasts,
   }) {
-    _SearchEntry songEntry(Song s) => _SearchEntry(
+    _SearchEntry songEntry(Song s) =>
+        _SearchEntry(
           song: s,
           title: _fold(s.title),
           haystack: _fold(
-            '${s.title}\u0000${s.artist}\u0000${s.album}\u0000${s.fileName}',
+            '${s.title}\u0000'
+            '${s.artist}\u0000'
+            '${s.album}\u0000'
+            '${s.fileName}',
           ),
         );
 
     _SearchEntry plEntry(Playlist p) {
       String? cover;
+
       for (final s in p.songs) {
         final c = s.coverPath;
+
         if (c != null && c.isNotEmpty) {
           cover = c;
           break;
         }
       }
+
       return _SearchEntry(
         playlist: p,
         title: _fold(p.title),
-        haystack: _fold('${p.title}\u0000${p.subtitle}'),
+        haystack: _fold(
+          '${p.title}\u0000${p.subtitle}',
+        ),
         cover: cover,
       );
     }
 
     return _SearchIndex(
-      songs: [for (final s in songs) songEntry(s)],
-      albums: [for (final a in albums) plEntry(a)],
-      artists: [for (final a in artists) plEntry(a)],
-      podcasts: [for (final p in podcasts) plEntry(p)],
+      songs: [
+        for (final s in songs)
+          songEntry(s),
+      ],
+      albums: [
+        for (final a in albums)
+          plEntry(a),
+      ],
+      artists: [
+        for (final a in artists)
+          plEntry(a),
+      ],
+      podcasts: [
+        for (final p in podcasts)
+          plEntry(p),
+      ],
     );
   }
 
   /// [query] ya viene normalizada con `_fold`.
-  /// Filtro: 0=Todo, 1=Canciones, 2=Álbumes, 3=Artistas, 4=Podcasts.
-  /// Todas las palabras de la query deben aparecer (AND).
+  ///
+  /// Filtro:
+  /// 0 = Todo
+  /// 1 = Canciones
+  /// 2 = Álbumes
+  /// 3 = Artistas
+  /// 4 = Podcasts
+  ///
+  /// Todas las palabras deben aparecer (AND).
   _SearchResults search(
     String query,
     int filter, {
@@ -1298,34 +1634,75 @@ class _SearchIndex {
   }) {
     final tokens = query
         .split(' ')
-        .where((t) => t.isNotEmpty)
-        .toList(growable: false);
-    if (tokens.isEmpty) return _SearchResults.empty;
+        .where(
+          (t) => t.isNotEmpty,
+        )
+        .toList(
+          growable: false,
+        );
+
+    if (tokens.isEmpty) {
+      return _SearchResults.empty;
+    }
+
     final first = tokens.first;
 
-    _Bucket run(List<_SearchEntry> source, bool enabled, _Bucket? prev) {
-      if (!enabled) return _Bucket.empty;
+    _Bucket run(
+      List<_SearchEntry> source,
+      bool enabled,
+      _Bucket? prev,
+    ) {
+      if (!enabled) {
+        return _Bucket.empty;
+      }
+
       final src = prev?.matches ?? source;
       final out = <_SearchEntry>[];
+
       for (final e in src) {
         var ok = true;
+
         for (final t in tokens) {
           if (!e.haystack.contains(t)) {
             ok = false;
             break;
           }
         }
-        if (ok) out.add(e);
+
+        if (ok) {
+          out.add(e);
+        }
       }
-      return _Bucket.from(out, first);
+
+      return _Bucket.from(
+        out,
+        first,
+      );
     }
 
     final all = filter == 0;
+
     return _SearchResults(
-      songs: run(songs, all || filter == 1, previous?.songs),
-      albums: run(albums, all || filter == 2, previous?.albums),
-      artists: run(artists, all || filter == 3, previous?.artists),
-      podcasts: run(podcasts, all || filter == 4, previous?.podcasts),
+      songs: run(
+        songs,
+        all || filter == 1,
+        previous?.songs,
+      ),
+      albums: run(
+        albums,
+        all || filter == 2,
+        previous?.albums,
+      ),
+      artists: run(
+        artists,
+        all || filter == 3,
+        previous?.artists,
+      ),
+      podcasts: run(
+        podcasts,
+        all || filter == 4,
+        previous?.podcasts,
+      ),
     );
   }
 }
@@ -1351,7 +1728,10 @@ class _SearchResults {
   );
 
   int get total =>
-      songs.length + albums.length + artists.length + podcasts.length;
+      songs.length +
+      albums.length +
+      artists.length +
+      podcasts.length;
 }
 
 // ===========================================================================
@@ -1366,6 +1746,7 @@ enum _HistoryKind {
   podcast('Podcast');
 
   final String label;
+
   const _HistoryKind(this.label);
 }
 
@@ -1380,13 +1761,19 @@ class _HistoryEntry {
     required this.icon,
   });
 
-  Map<String, dynamic> toJson() => {'q': query, 'k': kind.name};
+  Map<String, dynamic> toJson() => {
+        'q': query,
+        'k': kind.name,
+      };
 
-  factory _HistoryEntry.fromJson(Map<String, dynamic> json) {
+  factory _HistoryEntry.fromJson(
+    Map<String, dynamic> json,
+  ) {
     final kind = _HistoryKind.values.firstWhere(
       (e) => e.name == json['k'],
       orElse: () => _HistoryKind.query,
     );
+
     return _HistoryEntry(
       query: json['q'] as String? ?? '',
       kind: kind,
