@@ -332,10 +332,19 @@ class SongTile extends StatelessWidget {
   ///    cola, etc., y el contexto de la lista se reenvía para que la
   ///    cola se cargue con todos los capítulos.
   /// 2. MÚSICA:
-  ///    - Si CUALQUIERA de las dos colas ya tiene elementos, se abre el
-  ///      menú de queue correspondiente para decidir qué hacer.
-  ///    - Si ambas colas están vacías, se reproduce ÚNICAMENTE este tile
-  ///      (cola de un solo elemento), sin importar el contexto.
+  ///    - Si CUALQUIERA de las dos colas (música o podcast) ya tiene
+  ///      elementos, se abre el menú de queue correspondiente para
+  ///      decidir qué hacer (Reproducir ahora, Añadir a la cola, etc.).
+  ///    - Si ambas colas están vacías, se reproduce directamente la
+  ///      lista de contexto (`queueContext`) empezando por esta canción,
+  ///      o solo esta canción si no hay contexto. Esto equivale al
+  ///      botón "Reproducir ahora" del PlaybackMenu.
+  ///
+  /// Nota: cuando se reproduce directamente (ambas colas vacías) NO se
+  /// llama a `switchToQueue` antes de `setQueueOf`, porque `setQueueOf`
+  /// ya cambia la cola activa (ver `_setQueueImpl`). Llamar primero a
+  /// `switchToQueue` reproduciría momentáneamente la canción previa de
+  /// la cola de música antes de ser reemplazada.
   Future<void> _defaultOnTap(BuildContext context) async {
     final c = PlaybackController.instance;
 
@@ -362,7 +371,9 @@ class SongTile extends StatelessWidget {
       return;
     }
 
-    // --- MÚSICA: comportamiento previo ---------------------------
+    // --- MÚSICA ------------------------------------------------
+    // Si alguna de las dos colas ya tiene contenido, mostramos el menú
+    // de queue para que el usuario decida qué hacer.
     final musicQueue = handler.songsOf(MediaKind.music);
     final podcastQueue = handler.songsOf(MediaKind.podcast);
     final hasAnyQueue = musicQueue.isNotEmpty || podcastQueue.isNotEmpty;
@@ -382,14 +393,26 @@ class SongTile extends StatelessWidget {
       return;
     }
 
+    // Ambas colas vacías: reproducir directamente (equivale a
+    // "Reproducir ahora" del PlaybackMenu).
     try {
-      await c.switchToQueue(song.kind);
-      await handler.setQueueOf(
-        song.kind,
-        [song],
-        startIndex: 0,
-        autoPlay: true,
-      );
+      if (ctx != null && ctx.isNotEmpty) {
+        // Reproduce TODA la lista de contexto, empezando por esta canción.
+        await handler.setQueueOf(
+          song.kind,
+          ctx,
+          startIndex: _resolvedIndex(ctx),
+          autoPlay: true,
+        );
+      } else {
+        // Sin contexto: reproduce únicamente este tile.
+        await handler.setQueueOf(
+          song.kind,
+          [song],
+          startIndex: 0,
+          autoPlay: true,
+        );
+      }
     } catch (e, st) {
       debugPrint('SongTile: fallo al reproducir -> $e\n$st');
     }
