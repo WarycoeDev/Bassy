@@ -1,3 +1,4 @@
+// lib/widgets/directory_picker_dialog.dart
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -25,6 +26,9 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
   List<_QuickAccess> _quickAccess = const [];
   bool _loading = true;
   String? _error;
+
+  /// Si es `true`, se muestran carpetas cuyo nombre empieza por `.`.
+  bool _showHidden = false;
 
   @override
   void initState() {
@@ -118,6 +122,10 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
     if (mounted) setState(() => _quickAccess = shortcuts);
   }
 
+  bool _isHidden(Directory d) {
+    return p.basename(d.path).startsWith('.');
+  }
+
   Future<void> _open(Directory? dir) async {
     if (dir == null) {
       setState(() {
@@ -139,7 +147,13 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
           .where((e) => e is Directory)
           .cast<Directory>()
           .toList();
-      children.sort(
+
+      // Filtra ocultos según el toggle.
+      final filtered = children
+          .where((d) => _showHidden || !_isHidden(d))
+          .toList();
+
+      filtered.sort(
         (a, b) => p
             .basename(a.path)
             .toLowerCase()
@@ -148,7 +162,7 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
       if (!mounted) return;
       setState(() {
         _current = dir;
-        _entries = children;
+        _entries = filtered;
         _loading = false;
       });
     } catch (e) {
@@ -490,44 +504,59 @@ class _DirectoryPickerDialogState extends State<DirectoryPickerDialog> {
   }
 
   Widget _buildFooter(ColorScheme scheme) {
-  final current = _current;
-  return Padding(
-    padding: const EdgeInsets.fromLTRB(8, 8, 12, 12),
-    child: Row(
-      children: [
-        IconButton(
-          onPressed: _createFolder,
-          tooltip: 'Nueva carpeta',
-          icon: Icon(
-            Icons.create_new_folder_outlined,
-            color: scheme.primary,
-            size: 22,
+    final current = _current;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 8, 12, 12),
+      child: Row(
+        children: [
+          IconButton(
+            onPressed: _createFolder,
+            tooltip: 'Nueva carpeta',
+            icon: Icon(
+              Icons.create_new_folder_outlined,
+              color: scheme.primary,
+              size: 22,
+            ),
           ),
-        ),
-        const Spacer(),
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: Text(
-            'Cancelar',
-            style: TextStyle(color: scheme.onSurfaceVariant),
+          IconButton(
+            onPressed: () {
+              setState(() => _showHidden = !_showHidden);
+              // Recarga la carpeta actual aplicando el filtro.
+              if (_current != null) _open(_current);
+            },
+            tooltip: _showHidden
+                ? 'Ocultar elementos ocultos'
+                : 'Mostrar elementos ocultos',
+            icon: Icon(
+              _showHidden ? Icons.visibility : Icons.visibility_off,
+              color: scheme.onSurfaceVariant,
+              size: 22,
+            ),
           ),
-        ),
-        const SizedBox(width: 8),
-        FilledButton.icon(
-          onPressed: current == null
-              ? null
-              : () => Navigator.of(context).pop(current.path),
-          icon: const Icon(Icons.check, size: 18),
-          label: const Text('Seleccionar'),
-          style: FilledButton.styleFrom(
-            backgroundColor: scheme.primary,
-            foregroundColor: scheme.onPrimary,
+          const Spacer(),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(
+              'Cancelar',
+              style: TextStyle(color: scheme.onSurfaceVariant),
+            ),
           ),
-        ),
-      ],
-    ),
-  );
-}
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            onPressed: current == null
+                ? null
+                : () => Navigator.of(context).pop(current.path),
+            icon: const Icon(Icons.check, size: 18),
+            label: const Text('Seleccionar'),
+            style: FilledButton.styleFrom(
+              backgroundColor: scheme.primary,
+              foregroundColor: scheme.onPrimary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _QuickAccess {

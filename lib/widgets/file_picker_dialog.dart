@@ -42,6 +42,9 @@ class _FilePickerDialogState extends State<FilePickerDialog> {
   bool _loading = true;
   String? _error;
 
+  /// Si es `true`, se muestran archivos/carpetas cuyo nombre empieza por `.`.
+  bool _showHidden = false;
+
   Set<String> get _extSet => (widget.extensions ?? const [])
       .map((e) => e.toLowerCase().replaceAll('.', ''))
       .where((e) => e.isNotEmpty)
@@ -141,6 +144,8 @@ class _FilePickerDialogState extends State<FilePickerDialog> {
     if (mounted) setState(() => _quickAccess = shortcuts);
   }
 
+  bool _isHidden(String path) => p.basename(path).startsWith('.');
+
   bool _matchesFilter(File f) {
     final set = _extSet;
     if (set.isEmpty) return true;
@@ -165,7 +170,10 @@ class _FilePickerDialogState extends State<FilePickerDialog> {
         throw const FileSystemException('La carpeta no existe');
       }
       final entries = await dir.list(followLinks: false).toList();
-      final dirs = entries.whereType<Directory>().toList()
+      final dirs = entries
+          .whereType<Directory>()
+          .where((d) => _showHidden || !_isHidden(d.path))
+          .toList()
         ..sort(
           (a, b) => p
               .basename(a.path)
@@ -175,6 +183,7 @@ class _FilePickerDialogState extends State<FilePickerDialog> {
       final files = entries
           .whereType<File>()
           .where(_matchesFilter)
+          .where((f) => _showHidden || !_isHidden(f.path))
           .toList()
         ..sort(
           (a, b) => p
@@ -624,6 +633,21 @@ class _FilePickerDialogState extends State<FilePickerDialog> {
       padding: const EdgeInsets.fromLTRB(8, 8, 12, 12),
       child: Row(
         children: [
+          IconButton(
+            onPressed: () {
+              setState(() => _showHidden = !_showHidden);
+              // Recarga la carpeta actual aplicando el filtro.
+              if (_current != null) _open(_current);
+            },
+            tooltip: _showHidden
+                ? 'Ocultar elementos ocultos'
+                : 'Mostrar elementos ocultos',
+            icon: Icon(
+              _showHidden ? Icons.visibility : Icons.visibility_off,
+              color: scheme.onSurfaceVariant,
+              size: 22,
+            ),
+          ),
           const Spacer(),
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
