@@ -212,14 +212,7 @@ class SongContextMenu {
         onTap: () async {
           await favorites.toggle(song);
           if (!context.mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                isFav ? 'Quitado de favoritos' : 'Añadido a favoritos',
-              ),
-              duration: const Duration(seconds: 1),
-            ),
-          );
+          
         },
       ),
 
@@ -365,12 +358,7 @@ class SongContextMenu {
   ) async {
     final changed = await PlaylistPickerDialog.show(context, song);
     if (!changed || !context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Playlists actualizadas'),
-        duration: Duration(seconds: 1),
-      ),
-    );
+   
   }
 
   // ---------- Acciones específicas de podcast ----------
@@ -470,8 +458,6 @@ class SongContextMenu {
   static Duration _playbackPosition(Song song) => Duration.zero;
 
   static void _todo(BuildContext context, String label) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('TODO: $label')),
-    );
+   
   }
 }

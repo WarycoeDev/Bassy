@@ -576,12 +576,7 @@ class _SearchScreenState extends State<SearchScreen> {
         color: Colors.transparent,
         child: InkWell(
           onTap: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Buscando "$_query" en YouTube'),
-                backgroundColor: scheme.inverseSurface,
-              ),
-            );
+            
           },
           borderRadius: BorderRadius.circular(12),
           child: Container(

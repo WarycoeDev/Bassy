@@ -339,12 +339,7 @@ class SongTile extends StatelessWidget {
     if (!c.isReady) {
       debugPrint('SongTile: PlaybackController no listo');
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('El reproductor aún no está listo…'),
-            duration: Duration(seconds: 2),
-          ),
-        );
+
       }
       return;
     }
@@ -401,9 +396,7 @@ class SongTile extends StatelessWidget {
     } catch (e, st) {
       debugPrint('SongTile: fallo al reproducir -> $e\n$st');
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('No se pudo reproducir: $e')),
-        );
+
       }
     }
   }

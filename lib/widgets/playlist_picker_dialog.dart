@@ -82,9 +82,7 @@ class _PlaylistPickerDialogState extends State<PlaylistPickerDialog> {
       setState(() => _selected.add(created.id));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo crear la playlist: $e')),
-      );
+     
     }
   }
 
@@ -115,9 +113,7 @@ class _PlaylistPickerDialogState extends State<PlaylistPickerDialog> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo guardar: $e')),
-      );
+      
     }
   }
 

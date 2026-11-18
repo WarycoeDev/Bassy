@@ -33,9 +33,7 @@ class DirectoryPickerTile extends StatelessWidget {
       onChanged([...directories, selected]);
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo abrir el selector: $e')),
-      );
+     
     }
   }
 

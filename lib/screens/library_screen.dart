@@ -302,6 +302,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // PLAYLISTS DE USUARIO (.bassy)
   // ============================================================
 
+  /// Diálogo de "Nueva playlist" usando el componente `InputMenu`
+  /// (placeholder de `input_menu.dart`), que ya aplica su estilo.
   Future<void> _createPlaylist() async {
     final result = await InputMenu.show(
       context,
@@ -320,18 +322,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     try {
       final created = await PlaylistsStore.instance.create(name);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Playlist «${created.name}» creada')),
-      );
+      
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo crear la playlist: $e')),
-      );
+
     }
   }
 
-    Future<void> _importPlaylist() async {
+  Future<void> _importPlaylist() async {
     // Sugerir Downloads en Android / Documents en desktop.
     String? initialPath;
     try {
@@ -367,20 +364,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final imported =
           await PlaylistsStore.instance.importFromFile(path);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Playlist «${imported.name}» importada '
-            '(${imported.songPaths.length} canciones)',
-          ),
-          duration: const Duration(seconds: 3),
-        ),
-      );
+      
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo importar: $e')),
-      );
+      
     }
   }
 
@@ -469,14 +456,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     try {
       await PlaylistsStore.instance.save(pl.copyWith(name: name));
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Playlist renombrada a «$name»')),
-      );
+      
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo renombrar: $e')),
-      );
+      
     }
   }
 
@@ -518,17 +501,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final path =
           await PlaylistsStore.instance.exportToDirectory(pl.id, target);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Exportado a:\n$path'),
-          duration: const Duration(seconds: 4),
-        ),
-      );
+      
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo exportar: $e')),
-      );
+      
     }
   }
 
@@ -552,14 +528,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     try {
       await PlaylistsStore.instance.delete(pl.id);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Playlist «${pl.name}» eliminada')),
-      );
+     
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo eliminar: $e')),
-      );
+     
     }
   }
 
@@ -873,7 +845,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
         Row(
           children: [
-
             const SizedBox(width: 8),
             _buildIconButton(
               context,
