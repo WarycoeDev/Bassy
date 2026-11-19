@@ -3,19 +3,26 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_soloud/flutter_soloud.dart' as sl;
 
 import '../models/replay_gain_data.dart';
 import '../models/song.dart';
+import 'playback_controller.dart';
 
 /// Analizador de ReplayGain.
 ///
-/// Implementación de referencia (placeholder): estima loudness a partir
-/// de tamaño/duración/bitrate. Para producción, sustituir `_analyzeFile`
-/// por una llamada a ffmpeg con el filtro `ebur128`, o por una librería
-/// nativa tipo `replaygain`.
+/// Mide el nivel real (≈ RMS) del audio leyendo las muestras del archivo
+/// con flutter_soloud y calcula la ganancia necesaria para llevar la pista
+/// a un nivel objetivo común.
 class ReplayGainAnalyzer {
   ReplayGainAnalyzer._();
   static final ReplayGainAnalyzer instance = ReplayGainAnalyzer._();
+
+  /// Nivel objetivo común para todas las pistas (dBFS RMS).
+  static const double _targetDb = -16.0;
+
+  /// Muestras por canal que se leen del archivo para estimar el nivel.
+  static const int _samplesToRead = 16000;
 
   bool _cancelled = false;
 
@@ -63,32 +70,67 @@ class ReplayGainAnalyzer {
     return out;
   }
 
-  /// --- PLACEHOLDER ---
-  /// Estima loudness a partir del tamaño/duración/bitrate.
-  /// Reemplazar por análisis real (ffmpeg/ebur128) en producción.
+  Future<void> _ensureEngine() async {
+    final soloud = sl.SoLoud.instance;
+    if (soloud.isInitialized) return;
+    try {
+      if (PlaybackController.instance.isReady) {
+        await PlaybackController.instance.handler.ensureEngine();
+      } else {
+        await soloud.init();
+      }
+    } catch (_) {
+      if (!soloud.isInitialized) rethrow;
+    }
+  }
+
+  /// Mide el nivel real de la pista.
+  ///
+  /// NOTA: `readSamplesFromFile` es la API de flutter_soloud ≥ 3.2 para
+  /// leer muestras de un archivo. Si tu versión la expone con otra firma,
+  /// solo hay que ajustar esas dos llamadas; el resto del cálculo no
+  /// depende de ella.
   Future<ReplayGainEntry> _analyzeFile(File file, Song song) async {
-    final size = await file.length();
-    final durationMs = song.duration?.inMilliseconds ?? 0;
-    final durationSec = math.max(1.0, durationMs / 1000.0);
+    await _ensureEngine();
+    final soloud = sl.SoLoud.instance;
 
-    // Bitrate medio aproximado (kbps).
-    final kbps = (size * 8) / (durationSec * 1000);
-    // Heurística: pistas más "pesadas" → más loudness típico.
-    // Rango típico de loudness integrado: -30 .. -6 LUFS.
-    final normalized = (kbps / 320).clamp(0.0, 1.0);
-    final integratedLufs = -30.0 + normalized * 24.0; // -30 .. -6
+    // Promedio de |muestra| por tramo (≈ nivel RMS) y picos por tramo.
+    final avg = await soloud.readSamplesFromFile(
+      file.path,
+      _samplesToRead,
+      average: true,
+    );
+    final pk = await soloud.readSamplesFromFile(file.path, _samplesToRead);
 
-    // Ganancia para llevar a -18 LUFS (objetivo ReplayGain estándar).
-    const targetLufs = -18.0;
-    final trackGain = (targetLufs - integratedLufs).clamp(-18.0, 18.0);
+    double sumSq = 0;
+    int n = 0;
+    for (final v in avg) {
+      final a = v.abs();
+      if (a > 0.001) {
+        // Puerta de silencio: -60 dBFS.
+        sumSq += a * a;
+        n++;
+      }
+    }
+    if (n == 0) throw StateError('Pista silenciosa o ilegible');
 
-    // Peak "estimado": cuanto más fuerte, más cerca de 1.0.
-    final peak = (0.7 + normalized * 0.3).clamp(0.0, 1.5);
+    var peak = 0.0;
+    for (final v in pk) {
+      final a = v.abs();
+      if (a > peak) peak = a;
+    }
+    peak = peak.clamp(0.05, 1.5).toDouble();
+
+    // mean|x| ≈ 0.8 · RMS  →  RMS ≈ mean · 1.25
+    final rms = math.sqrt(sumSq / n) * 1.25;
+    final rmsDb = 20 * math.log(rms) / math.ln10;
+
+    final trackGain = (_targetDb - rmsDb).clamp(-18.0, 6.0).toDouble();
 
     return ReplayGainEntry(
       trackGain: trackGain,
       trackPeak: peak,
-      integratedLufs: integratedLufs,
+      integratedLufs: rmsDb,
       analyzedAt: DateTime.now(),
     );
   }

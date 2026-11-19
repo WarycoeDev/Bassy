@@ -149,6 +149,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   PlaybackAudioHandler() {
     _activeQueue = _musicQueue;
     _rg.activeGainDb.addListener(_onReplayGainChanged);
+    _rg.enabled.addListener(_onReplayGainChanged);
     _onReplayGainChanged();
     _publish();
     unawaited(_loadSlowed());
@@ -164,6 +165,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
   // ============================================================
   // MOTOR
   // ============================================================
+
+  /// Acceso público para el analizador de ReplayGain.
+  Future<void> ensureEngine() => _ensureEngine();
 
   Future<void> _ensureEngine() async {
     if (_soloud.isInitialized) return;
@@ -554,12 +558,30 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  /// Reacciona a cambios de ganancia/activación de ReplayGain.
+  /// Ignora cambios nulos y suaviza la transición (fade de 400 ms) en
+  /// lugar de dar un salto de volumen.
   void _onReplayGainChanged() {
-    _replayGainDb = _rg.enabled.value ? _rg.activeGainDb.value : 0.0;
+    final newDb = _rg.enabled.value ? _rg.activeGainDb.value : 0.0;
+    if (newDb == _replayGainDb) return;
+    _replayGainDb = newDb;
     if (!_isMusicQueue) return;
+
     if (_crossfading) {
       _mixCrossfade(_position);
-    } else {
+      return;
+    }
+    final h = _handle;
+    if (h == null || !_isValid(h)) return;
+
+    final f = _transitionsEnabled && _transitionMode == 1
+        ? _computeFadeFactor(_position, _duration)
+        : 1.0;
+    final v = (_baseLinear() * f).clamp(0.0, 4.0).toDouble();
+    try {
+      _soloud.fadeVolume(h, v, const Duration(milliseconds: 400));
+      _lastVol = v;
+    } catch (_) {
       _applyVolume(force: true);
     }
   }
@@ -784,6 +806,9 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _xfToken++;
 
     _activeQueue.currentIndex = ni;
+    // La ganancia de la nueva pista se fija ANTES de aplicar el volumen,
+    // para que no haya salto al terminar el crossfade.
+    _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
     _duration = _soloud.getLength(ns);
     _position = _livePosition();
     _lastVol = -1;
@@ -792,7 +817,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _applyVolume(force: true);
 
     if (!_durationCtrl.isClosed) _durationCtrl.add(_duration);
-    _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
+
+    final newSong = _activeQueue.currentSong;
+    if (newSong != null && _isMusicQueue && newSong.kind == MediaKind.music) {
+      unawaited(_rg.ensureAnalyzed(newSong));
+    }
     _emitControlsState();
   }
 
@@ -867,6 +896,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastVol = -1;
 
     q.currentIndex = songIndex;
+
+    // La ganancia ReplayGain de la nueva canción se fija ANTES de
+    // aplicar volumen, para no arrancar con la ganancia de la anterior.
+    _rg.notifyCurrentSong(song.path);
+    _replayGainDb = _rg.enabled.value ? _rg.activeGainDb.value : 0.0;
 
     // ===== STATS / REANUDAR =====
     // Reiniciamos posición y duración ANTES de publicar: así nadie
@@ -959,6 +993,11 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     _rg.notifyCurrentSong(_activeQueue.currentSong?.path);
+    // Si la pista aún no tiene registro, se analiza en background y la
+    // ganancia entra con un fade suave cuando esté lista.
+    if (_isMusicQueue && song.kind == MediaKind.music) {
+      unawaited(_rg.ensureAnalyzed(song));
+    }
     _emitControlsState();
   }
 
@@ -1876,6 +1915,7 @@ class PlaybackAudioHandler extends BaseAudioHandler with SeekHandler {
     _ticker?.cancel();
     _ticker = null;
     _rg.activeGainDb.removeListener(_onReplayGainChanged);
+    _rg.enabled.removeListener(_onReplayGainChanged);
     await _canGoPreviousCtrl.close();
     await _canGoNextCtrl.close();
     await _shuffleCtrl.close();

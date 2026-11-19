@@ -41,15 +41,14 @@ void main() async {
     );
   }
 
-  // después de JustAudioMediaKit.ensureInitialized(...) (si lo usas):
-await ReverbService.instance.load();
-await PlaybackController.instance.init();
+  await ReverbService.instance.load();
 
   // 1) Configuración de sesión de audio (foco, bluetooth, etc.)
   final session = await AudioSession.instance;
   await session.configure(const AudioSessionConfiguration.music());
 
-  // 2) Arranca audio_service / audio handler ANTES de runApp
+  // 2) Arranca audio_service / audio handler ANTES de runApp.
+  //    Esto también inicializa ReplayGain (ver PlaybackController.init).
   await PlaybackController.instance.init();
 
   WidgetsBinding.instance.addObserver(_LifecycleRescanObserver());

@@ -31,13 +31,20 @@ class ReplayGainService extends ChangeNotifier {
   final ValueNotifier<int> analyzedCount = ValueNotifier<int>(0);
   final ValueNotifier<double> activeGainDb = ValueNotifier<double>(0.0);
 
+  bool _initialized = false;
   bool _analyzing = false;
   bool _clearing = false;
   String? _currentSongPath;
+  final Set<String> _pending = <String>{};
 
   void _forward() => notifyListeners();
 
+  /// Idempotente: solo la primera llamada tiene efecto. Se invoca al
+  /// arrancar la app (PlaybackController.init), de modo que abrir Settings
+  /// ya no reinicia el estado ni cambia el volumen.
   Future<void> init({required bool enabledInitially}) async {
+    if (_initialized) return;
+    _initialized = true;
     enabled.value = enabledInitially;
     await _store.ensureLoaded();
     analyzedCount.value = await _store.count();
@@ -71,6 +78,24 @@ class ReplayGainService extends ChangeNotifier {
       if (gain > maxGainWithoutClip) gain = maxGainWithoutClip;
     }
     activeGainDb.value = gain.clamp(-18.0, 18.0);
+  }
+
+  /// Analiza la pista indicada si aún no tiene registro (nivela sin
+  /// necesidad de lanzar el análisis manual de toda la biblioteca).
+  Future<void> ensureAnalyzed(Song song) async {
+    final p = song.path;
+    if (!_initialized || !enabled.value || p == null) return;
+    if (_analyzing || _store.getSync(p) != null || !_pending.add(p)) return;
+    try {
+      final e = await _analyzer.analyze(song);
+      await _store.putAll({p: e});
+      analyzedCount.value = await _store.count();
+      if (_currentSongPath == p) _recomputeActiveGain(p);
+    } catch (e) {
+      debugPrint('ReplayGainService.ensureAnalyzed: $e');
+    } finally {
+      _pending.remove(p);
+    }
   }
 
   Future<void> analyzeMissing(List<Song> songs) =>

@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../models/song.dart';
 import 'playback_audio_handler.dart';
 import 'playback_queue.dart';
+import 'replay_gain_service.dart';
 import 'settings_service.dart';
 import 'stats_service.dart';
 
@@ -32,6 +33,17 @@ class PlaybackController {
     if (_handler != null) return;
     if (kIsWeb) return;
 
+    // ReplayGain se inicializa ANTES de crear el handler, para que la
+    // primera canción ya suene con su ganancia y no cambie al abrir Settings.
+    AppSettings? settings;
+    try {
+      settings = await SettingsService.instance.load();
+      await ReplayGainService.instance
+          .init(enabledInitially: settings.replayGainEnabled);
+    } catch (e) {
+      debugPrint('PlaybackController.init: settings/ReplayGain falló: $e');
+    }
+
     _handler = await AudioService.init(
       builder: () => PlaybackAudioHandler(),
       config: const AudioServiceConfig(
@@ -43,17 +55,12 @@ class PlaybackController {
       ),
     );
 
-    try {
-      final settings = await SettingsService.instance.load();
+    if (settings != null) {
       _handler!.setTransitionConfig(
         enabled: settings.transitionsEnabled,
         mode: settings.transitionMode,
         crossfadeSeconds: settings.crossfadeSeconds,
         fadeSeconds: settings.fadeSeconds,
-      );
-    } catch (e) {
-      debugPrint(
-        'PlaybackController.init: no se pudo cargar settings: $e',
       );
     }
 
